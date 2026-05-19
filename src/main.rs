@@ -1,12 +1,16 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! Slice 2 of Milestone 1: the window draws. A wgpu surface is attached, and
-//! every frame the renderer clears the surface to terminite's background color.
-//! The GPU pipeline is live; nothing is on it yet. Slice 3 wires
-//! `alacritty_terminal` and the live cell grid.
+//! Slice 3a of Milestone 1: text on the screen. A glyphon `TextRenderer` is
+//! wired into the wgpu pipeline and draws static lines over the cleared
+//! background. Slice 3b wires `alacritty_terminal` and turns those static
+//! lines into the live cell grid driven by a real shell.
 
 use std::sync::Arc;
 
+use glyphon::{
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::WindowEvent;
@@ -16,13 +20,27 @@ use winit::window::{Window, WindowId};
 /// terminite's resting background — deep, quiet, not pure black.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.04, g: 0.04, b: 0.06, a: 1.0 };
 
+/// Placeholder words drawn until the grid arrives.
+const GREETING: &str = "terminite — slice 3a · text is on the screen\n\
+                        the cell grid and the shell arrive next";
+
 /// Everything needed to put pixels on the window.
 struct Renderer {
-    window: Arc<Window>,
+    instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
+    surface_config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
+
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    text_buffer: Buffer,
+
+    // Window last: winit/wgpu want it dropped after the surface.
+    window: Arc<Window>,
 }
 
 impl Renderer {
@@ -30,12 +48,12 @@ impl Renderer {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
+        let scale_factor = window.scale_factor();
 
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(window.clone())
             .expect("terminite: failed to create the surface");
-
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -44,7 +62,6 @@ impl Renderer {
             })
             .await
             .expect("terminite: no suitable GPU adapter");
-
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("terminite device"),
@@ -55,40 +72,129 @@ impl Renderer {
             .await
             .expect("terminite: failed to acquire the GPU device");
 
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
-
-        let config = wgpu::SurfaceConfiguration {
+        // Bgra8UnormSrgb is glyphon's expected color space, and macOS' surface default.
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width,
             height,
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &config);
+        surface.configure(&device, &surface_config);
 
-        Self { window, surface, device, queue, config }
+        // Text rendering.
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 20.0));
+        let physical_width = (width as f64 * scale_factor) as f32;
+        let physical_height = (height as f64 * scale_factor) as f32;
+        text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
+        text_buffer.set_text(
+            &mut font_system,
+            GREETING,
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        text_buffer.shape_until_scroll(&mut font_system, false);
+
+        Self {
+            instance,
+            surface,
+            surface_config,
+            device,
+            queue,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            text_buffer,
+            window,
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.surface.configure(&self.device, &self.surface_config);
+        let scale = self.window.scale_factor();
+        let physical_width = (width as f64 * scale) as f32;
+        let physical_height = (height as f64 * scale) as f32;
+        self.text_buffer.set_size(
+            &mut self.font_system,
+            Some(physical_width),
+            Some(physical_height),
+        );
+        self.text_buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     fn render(&mut self) {
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.surface_config.width,
+                height: self.surface_config.height,
+            },
+        );
+
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                [TextArea {
+                    buffer: &self.text_buffer,
+                    left: 24.0,
+                    top: 24.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.surface_config.width as i32,
+                        bottom: self.surface_config.height as i32,
+                    },
+                    default_color: Color::rgb(220, 220, 220),
+                    custom_glyphs: &[],
+                }],
+                &mut self.swash_cache,
+            )
+            .expect("terminite: text prepare failed");
+
         let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                // The window resized between frames; reconfigure and skip this one.
-                self.surface.configure(&self.device, &self.config);
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                self.surface.configure(&self.device, &self.surface_config);
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self
+                    .instance
+                    .create_surface(self.window.clone())
+                    .expect("terminite: failed to recreate the surface");
+                self.surface.configure(&self.device, &self.surface_config);
+                self.window.request_redraw();
                 return;
             }
             other => {
@@ -96,6 +202,7 @@ impl Renderer {
                 return;
             }
         };
+
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -105,8 +212,8 @@ impl Renderer {
                     label: Some("terminite frame"),
                 });
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terminite pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -121,10 +228,15 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("terminite: text render failed");
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.window.pre_present_notify();
         surface_texture.present();
+        self.atlas.trim();
     }
 }
 
@@ -136,6 +248,9 @@ struct Terminite {
 
 impl ApplicationHandler for Terminite {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.renderer.is_some() {
+            return;
+        }
         let attributes = Window::default_attributes()
             .with_title("terminite")
             .with_inner_size(LogicalSize::new(900.0, 600.0));
