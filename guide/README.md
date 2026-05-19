@@ -23,6 +23,6 @@ to share the vision.
 ## Status
 
 Kickoff. As of 2026-05-19 the founding architecture is set (see
-[Decisions](decisions.md)) and the guide is committed to git. Next: install the
-Rust toolchain and scaffold the project, building toward the first milestone — a
-window that opens instantly and shows a live terminal grid.
+[Decisions](decisions.md)) and the Rust project is scaffolded — it builds, and
+`cargo run` opens an empty window. Working toward Milestone 1: a window that
+opens instantly and shows a live terminal grid.

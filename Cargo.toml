@@ -1,0 +1,9 @@
+[package]
+name = "terminite"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+wgpu = "29.0.3"
+winit = "0.30.13"
