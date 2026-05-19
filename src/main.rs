@@ -1,9 +1,8 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! Slice 3b of Milestone 1: a real shell behind the screen. `alacritty_terminal`
-//! spawns a PTY in its own thread; every frame the renderer locks the `Term`,
-//! reads its cell grid, and draws it through glyphon. Slice 3c wires keyboard
-//! input so the human (and the AI) can actually drive the shell.
+//! With these fixes the terminal *fits the window* and there is a *visible
+//! cursor*. Slice 3c made it interactive; slice 3d (here) makes it actually
+//! usable. The move-in is reachable.
 
 use std::sync::Arc;
 
@@ -28,10 +27,27 @@ use winit::window::{Window, WindowId};
 /// terminite's resting background — deep, quiet, not pure black.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.04, g: 0.04, b: 0.06, a: 1.0 };
 
-const TERM_COLS: usize = 80;
-const TERM_ROWS: usize = 24;
-const CELL_WIDTH_PX: u16 = 8;
-const CELL_HEIGHT_PX: u16 = 20;
+/// Text metrics. The buffer's `Metrics` and the cursor/grid math use the same
+/// numbers so they stay in lockstep.
+const FONT_SIZE: f32 = 14.0;
+const LINE_HEIGHT: f32 = 20.0;
+/// Monospace glyphs advance ≈ 0.6 × font size for most monospace fonts. Used to
+/// position the cursor and to compute how many columns fit in the window.
+const CELL_ADVANCE: f32 = FONT_SIZE * 0.6;
+
+/// Padding from the window edge to the text.
+const TEXT_LEFT: f32 = 24.0;
+const TEXT_TOP: f32 = 24.0;
+
+/// Compute the number of columns and rows of monospace cells that fit in a
+/// surface of the given physical size, accounting for terminite's padding.
+fn compute_grid_size(physical_width: f32, physical_height: f32) -> (usize, usize) {
+    let available_w = (physical_width - TEXT_LEFT).max(CELL_ADVANCE);
+    let available_h = (physical_height - TEXT_TOP).max(LINE_HEIGHT);
+    let cols = (available_w / CELL_ADVANCE) as usize;
+    let rows = (available_h / LINE_HEIGHT) as usize;
+    (cols.max(2), rows.max(2))
+}
 
 /// Grid dimensions for `Term::new`. `alacritty_terminal` asks for any
 /// `Dimensions` implementor; one of our own keeps the rows/cols intent clear.
@@ -64,16 +80,16 @@ struct LiveTerm {
 }
 
 impl LiveTerm {
-    fn new() -> Self {
-        let size = GridSize { cols: TERM_COLS, rows: TERM_ROWS };
+    fn new(cols: usize, rows: usize) -> Self {
+        let size = GridSize { cols, rows };
         let term = Term::new(TermConfig::default(), &size, Notifier);
         let term = Arc::new(FairMutex::new(term));
 
         let window_size = WindowSize {
-            num_lines: TERM_ROWS as u16,
-            num_cols: TERM_COLS as u16,
-            cell_width: CELL_WIDTH_PX,
-            cell_height: CELL_HEIGHT_PX,
+            num_lines: rows as u16,
+            num_cols: cols as u16,
+            cell_width: CELL_ADVANCE as u16,
+            cell_height: LINE_HEIGHT as u16,
         };
         let pty = tty::new(&tty::Options::default(), window_size, 0)
             .expect("terminite: failed to open the PTY");
@@ -81,11 +97,25 @@ impl LiveTerm {
         let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
         let sender = event_loop.channel();
-        // Detach the I/O thread; we keep the channel sender to drive input and,
-        // eventually, shutdown.
+        // Detach the I/O thread; we keep the channel sender to drive input,
+        // resize, and (eventually) shutdown.
         let _ = event_loop.spawn();
 
         Self { term, sender }
+    }
+
+    /// Resize the underlying `Term` and notify the PTY.
+    fn resize(&self, cols: usize, rows: usize) {
+        {
+            let mut term = self.term.lock();
+            term.resize(GridSize { cols, rows });
+        }
+        let _ = self.sender.send(Msg::Resize(WindowSize {
+            num_lines: rows as u16,
+            num_cols: cols as u16,
+            cell_width: CELL_ADVANCE as u16,
+            cell_height: LINE_HEIGHT as u16,
+        }));
     }
 
     /// Send bytes to the shell over the PTY.
@@ -93,13 +123,14 @@ impl LiveTerm {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
-    /// Snapshot the visible grid into a String. One row per line, trailing
-    /// whitespace trimmed so glyphon doesn't render miles of empty space.
-    fn snapshot(&self) -> String {
+    /// Snapshot the visible grid and the cursor position. One lock per frame.
+    fn snapshot(&self) -> (String, i32, usize) {
         let term = self.term.lock();
         let grid = term.grid();
         let rows = grid.screen_lines();
         let cols = grid.columns();
+        let cursor_line = grid.cursor.point.line.0;
+        let cursor_col = grid.cursor.point.column.0;
         let mut out = String::with_capacity((cols + 1) * rows);
         for line in 0..rows {
             let row = &grid[Line(line as i32)];
@@ -110,7 +141,7 @@ impl LiveTerm {
             out.push_str(line_text.trim_end());
             out.push('\n');
         }
-        out
+        (out, cursor_line, cursor_col)
     }
 }
 
@@ -164,6 +195,7 @@ struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text_buffer: Buffer,
+    cursor_buffer: Buffer,
     /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
     /// terminal hasn't changed between frames.
     last_snapshot: String,
@@ -224,9 +256,10 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(14.0, 20.0));
         let physical_width = (width as f64 * scale_factor) as f32;
         let physical_height = (height as f64 * scale_factor) as f32;
+
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
         text_buffer.set_text(
             &mut font_system,
@@ -237,7 +270,26 @@ impl Renderer {
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
 
-        let live_term = LiveTerm::new();
+        // Cursor: a separate buffer holding a single filled block. We reposition
+        // its `TextArea` each frame; its content is fixed.
+        let mut cursor_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        cursor_buffer.set_size(
+            &mut font_system,
+            Some(CELL_ADVANCE * 2.0),
+            Some(LINE_HEIGHT * 2.0),
+        );
+        cursor_buffer.set_text(
+            &mut font_system,
+            "█",
+            &Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+            None,
+        );
+        cursor_buffer.shape_until_scroll(&mut font_system, false);
+
+        // The grid sized for this window.
+        let (cols, rows) = compute_grid_size(physical_width, physical_height);
+        let live_term = LiveTerm::new(cols, rows);
 
         Self {
             instance,
@@ -251,6 +303,7 @@ impl Renderer {
             atlas,
             text_renderer,
             text_buffer,
+            cursor_buffer,
             last_snapshot: String::new(),
             live_term,
             window,
@@ -273,11 +326,17 @@ impl Renderer {
             Some(physical_height),
         );
         self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+
+        // Recompute grid dimensions and push them through to Term + PTY.
+        let (cols, rows) = compute_grid_size(physical_width, physical_height);
+        self.live_term.resize(cols, rows);
+        // Invalidate the snapshot cache so the next frame re-shapes the buffer
+        // at the new size.
+        self.last_snapshot.clear();
     }
 
     fn render(&mut self) {
-        // Pull the latest grid; re-shape only when it actually changed.
-        let snapshot = self.live_term.snapshot();
+        let (snapshot, cursor_line, cursor_col) = self.live_term.snapshot();
         if snapshot != self.last_snapshot {
             self.text_buffer.set_text(
                 &mut self.font_system,
@@ -298,6 +357,15 @@ impl Renderer {
             },
         );
 
+        let cursor_left = TEXT_LEFT + (cursor_col as f32) * CELL_ADVANCE;
+        let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT;
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: self.surface_config.width as i32,
+            bottom: self.surface_config.height as i32,
+        };
+
         self.text_renderer
             .prepare(
                 &self.device,
@@ -305,20 +373,26 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: 24.0,
-                    top: 24.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.surface_config.width as i32,
-                        bottom: self.surface_config.height as i32,
+                [
+                    TextArea {
+                        buffer: &self.text_buffer,
+                        left: TEXT_LEFT,
+                        top: TEXT_TOP,
+                        scale: 1.0,
+                        bounds,
+                        default_color: Color::rgb(220, 220, 220),
+                        custom_glyphs: &[],
                     },
-                    default_color: Color::rgb(220, 220, 220),
-                    custom_glyphs: &[],
-                }],
+                    TextArea {
+                        buffer: &self.cursor_buffer,
+                        left: cursor_left,
+                        top: cursor_top,
+                        scale: 1.0,
+                        bounds,
+                        default_color: Color::rgba(255, 200, 80, 180),
+                        custom_glyphs: &[],
+                    },
+                ],
                 &mut self.swash_cache,
             )
             .expect("terminite: text prepare failed");
