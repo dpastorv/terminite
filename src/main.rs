@@ -1,12 +1,19 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! Slice 3a of Milestone 1: text on the screen. A glyphon `TextRenderer` is
-//! wired into the wgpu pipeline and draws static lines over the cleared
-//! background. Slice 3b wires `alacritty_terminal` and turns those static
-//! lines into the live cell grid driven by a real shell.
+//! Slice 3b of Milestone 1: a real shell behind the screen. `alacritty_terminal`
+//! spawns a PTY in its own thread; every frame the renderer locks the `Term`,
+//! reads its cell grid, and draws it through glyphon. Slice 3c wires keyboard
+//! input so the human (and the AI) can actually drive the shell.
 
 use std::sync::Arc;
 
+use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
+use alacritty_terminal::event_loop::EventLoop as TermEventLoop;
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::tty;
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -20,9 +27,83 @@ use winit::window::{Window, WindowId};
 /// terminite's resting background — deep, quiet, not pure black.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.04, g: 0.04, b: 0.06, a: 1.0 };
 
-/// Placeholder words drawn until the grid arrives.
-const GREETING: &str = "terminite — slice 3a · text is on the screen\n\
-                        the cell grid and the shell arrive next";
+const TERM_COLS: usize = 80;
+const TERM_ROWS: usize = 24;
+const CELL_WIDTH_PX: u16 = 8;
+const CELL_HEIGHT_PX: u16 = 20;
+
+/// Grid dimensions for `Term::new`. `alacritty_terminal` asks for any
+/// `Dimensions` implementor; one of our own keeps the rows/cols intent clear.
+struct GridSize {
+    cols: usize,
+    rows: usize,
+}
+
+impl Dimensions for GridSize {
+    fn total_lines(&self) -> usize { self.rows }
+    fn screen_lines(&self) -> usize { self.rows }
+    fn columns(&self) -> usize { self.cols }
+}
+
+/// A no-op listener for terminal events. In a later slice this becomes the
+/// bridge that wakes the render thread on `Event::Wakeup` and dispatches
+/// title / bell / exit. For now we redraw every frame and read the grid fresh.
+#[derive(Clone)]
+struct Notifier;
+
+impl EventListener for Notifier {
+    fn send_event(&self, _event: TermEvent) {}
+}
+
+/// The live terminal: the shared `Term` plus an I/O thread driving its PTY.
+struct LiveTerm {
+    term: Arc<FairMutex<Term<Notifier>>>,
+}
+
+impl LiveTerm {
+    fn new() -> Self {
+        let size = GridSize { cols: TERM_COLS, rows: TERM_ROWS };
+        let term = Term::new(TermConfig::default(), &size, Notifier);
+        let term = Arc::new(FairMutex::new(term));
+
+        let window_size = WindowSize {
+            num_lines: TERM_ROWS as u16,
+            num_cols: TERM_COLS as u16,
+            cell_width: CELL_WIDTH_PX,
+            cell_height: CELL_HEIGHT_PX,
+        };
+        let pty = tty::new(&tty::Options::default(), window_size, 0)
+            .expect("terminite: failed to open the PTY");
+
+        let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
+            .expect("terminite: failed to start the PTY event loop");
+        // Detach the I/O thread. Slice 3c will keep the channel sender to drive
+        // input and shutdown; for now the OS reaps the thread on exit.
+        let _ = event_loop.spawn();
+
+        Self { term }
+    }
+
+    /// Snapshot the visible grid into a String. One row per line, trailing
+    /// whitespace trimmed so glyphon doesn't render miles of empty space.
+    fn snapshot(&self) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        let mut out = String::with_capacity((cols + 1) * rows);
+        for line in 0..rows {
+            let row = &grid[Line(line as i32)];
+            let mut line_text = String::with_capacity(cols);
+            for col in 0..cols {
+                line_text.push(row[Column(col)].c);
+            }
+            out.push_str(line_text.trim_end());
+            out.push('\n');
+        }
+        out
+    }
+}
 
 /// Everything needed to put pixels on the window.
 struct Renderer {
@@ -38,6 +119,11 @@ struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text_buffer: Buffer,
+    /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
+    /// terminal hasn't changed between frames.
+    last_snapshot: String,
+
+    live_term: LiveTerm,
 
     // Window last: winit/wgpu want it dropped after the surface.
     window: Arc<Window>,
@@ -72,7 +158,6 @@ impl Renderer {
             .await
             .expect("terminite: failed to acquire the GPU device");
 
-        // Bgra8UnormSrgb is glyphon's expected color space, and macOS' surface default.
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -86,7 +171,6 @@ impl Renderer {
         };
         surface.configure(&device, &surface_config);
 
-        // Text rendering.
         let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
@@ -101,12 +185,14 @@ impl Renderer {
         text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
         text_buffer.set_text(
             &mut font_system,
-            GREETING,
+            "",
             &Attrs::new().family(Family::Monospace),
             Shaping::Advanced,
             None,
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
+
+        let live_term = LiveTerm::new();
 
         Self {
             instance,
@@ -120,6 +206,8 @@ impl Renderer {
             atlas,
             text_renderer,
             text_buffer,
+            last_snapshot: String::new(),
+            live_term,
             window,
         }
     }
@@ -143,6 +231,20 @@ impl Renderer {
     }
 
     fn render(&mut self) {
+        // Pull the latest grid; re-shape only when it actually changed.
+        let snapshot = self.live_term.snapshot();
+        if snapshot != self.last_snapshot {
+            self.text_buffer.set_text(
+                &mut self.font_system,
+                &snapshot,
+                &Attrs::new().family(Family::Monospace),
+                Shaping::Advanced,
+                None,
+            );
+            self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.last_snapshot = snapshot;
+        }
+
         self.viewport.update(
             &self.queue,
             Resolution {
