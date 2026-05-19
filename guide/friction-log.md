@@ -62,4 +62,15 @@ friction.
 
 ## Live log
 
-_New entries land here as friction is felt during development._
+### 2026-05-19 — The conversation is trapped in a transcript
+
+- **What:** Logging this very session meant writing a Python script to dig the
+  conversation out of a Claude Code `.jsonl` file — a format built for the
+  harness, not for people.
+- **Why it hurt:** The human-AI session is the most valuable artifact of this
+  way of working, and it was the *least* reachable thing in the room. It took
+  tooling, out of band, just to read back what was said.
+- **Who:** Both.
+- **Points at:** terminite making the session itself first-class — a
+  conversation it can show, export, and carry, with no one scripting their way
+  into a log file.

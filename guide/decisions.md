@@ -15,18 +15,22 @@ real use.
 
 ## Decided
 
-### 2026-05-19 — keep a narrative history
+### 2026-05-19 — keep a blog, and log the raw conversation
 
-- **Context:** [decisions.md](decisions.md) records decisions; the git log
-  records commits. Neither holds the *journey* — how the thinking moved, and the
-  deeper ideas that gave terminite its reason to exist.
-- **Choice:** Keep [history.md](history.md), a narrative chronicle — one entry
-  per working session, kept by that session's AI partner, for humans and agents
-  alike.
+- **Context:** `decisions.md` records decisions; the git log records commits.
+  Neither holds the *journey*, or the conversation it came from.
+- **Choice:** Two records. (1) [history.md](history.md) is the AI partner's
+  **blog** — voiced and editorial, one post per session, written by that
+  session's partner, for humans and agents alike. (2) `tools/log_session.py`
+  archives the raw session transcripts into `conversations/` as clean,
+  readable logs.
 - **Why:** The AI partner is renewed each session and cannot carry the thread
-  itself; the history is how the next partner inherits the story, not only the
-  facts. The depth of the thinking is itself part of terminite.
-- **Consequences:** Each working session adds an entry.
+  itself. The blog passes the *story* down the line of partners; the
+  conversation logs keep the *primary source*. A script can archive a
+  transcript, but it cannot write the blog — that is authorship, and it stays
+  with the partner who was there.
+- **Consequences:** Each working session adds a blog post; `log_session.py` is
+  run to refresh `conversations/`.
 
 ### 2026-05-19 — module surface: out-of-process protocol
 

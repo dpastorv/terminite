@@ -19,7 +19,7 @@ to share the vision.
 - [Friction Log](friction-log.md) — terminite's real roadmap: friction felt by the human-AI pair
 - [Getting Started](getting-started.md) — how to build and run terminite
 - [Decisions](decisions.md) — choices made, and choices still open
-- [History](history.md) — the story of terminite's making, session by session
+- [History](history.md) — the AI partner's blog: the story of terminite's making, with a voice
 
 ## Status
 
