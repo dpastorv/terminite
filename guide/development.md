@@ -26,6 +26,8 @@ log; they are not invented anywhere else.
   change that serves no principle does not land, however good it looks.
 - Notable choices are recorded in [decisions.md](decisions.md) — *with the
   reasoning*, so a future reader remembers why.
+- The journey itself — how the thinking moved — is kept in
+  [history.md](history.md), one entry per working session.
 
 ## Conventions
 
