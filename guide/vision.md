@@ -32,6 +32,42 @@ single thesis is this:
 Everything terminite becomes should be a consequence of taking that sentence
 seriously.
 
+## The promise
+
+The moment a person sits down to build something with an AI agent, the two of
+them become a *society* — a small one, often a brief one, a single afternoon or
+a single task, but a real one. They share a space, a goal, and a memory of what
+just happened. Every developer, every vibecoder, every person steering an agent
+from a prompt is forming exactly that society, over and over, all day. It is a
+new way of working, and a fundamentally *social* one — and it has no home built
+for it.
+
+terminite is that home.
+
+So the thesis sharpens. terminite's community is not humans who happen to use
+AI; **the community is humans and agents, both** — each a first-class member.
+And the promise terminite makes is made to both at once:
+
+> terminite should be beautiful, workable, and usable for the human **and** for
+> the agent — equally, neither one an afterthought.
+
+For the human, that is loveliness as it has always been understood (below). For
+the agent, it is something terminals have never offered: structure it can read,
+state it can query, events it can trust. The friction log records, entry by
+entry, what that costs today.
+
+Two things follow, and neither is negotiable:
+
+- **Any agent, not one.** terminite is built alongside an AI partner, and the
+  first one is a specific assistant. terminite depends on none. Any AI, any
+  agent, any CLI can take that seat — the design must never assume a particular
+  one.
+- **Extensible by either, or both.** A human can extend terminite; an agent can
+  extend terminite; they can extend it together. "Add to it" is promised to
+  every member of the community, in whatever form they arrive — which is exactly
+  why the module surface is a language-agnostic protocol, not a human-only
+  plugin API.
+
 ## Built for one person
 
 terminite is built for its owner — first and only. It is not built for "users."
@@ -81,19 +117,21 @@ belong in terminite.
 
 1. **Two users, one surface.** Every feature is judged by how well it serves the
    human *and* the AI at once. Helping one at the other's expense is a failure.
-2. **Make the screen legible — both ways.** The human should understand at a
+2. **Any agent, not one.** terminite serves any AI, agent, or CLI — never a
+   single vendor's. The first AI partner is not a dependency.
+3. **Make the screen legible — both ways.** The human should understand at a
    glance what the AI did; the AI should be able to read the screen as cleanly
    as the human does. Output is structure, not just a stream of bytes.
-3. **The friction log is the roadmap.** Features come from real, felt friction
+4. **The friction log is the roadmap.** Features come from real, felt friction
    in the owner's daily work — never from a checklist or a competitor.
-4. **One person's taste.** terminite has an owner, not a committee. Openness is
+5. **One person's taste.** terminite has an owner, not a committee. Openness is
    about sharing the result, not outsourcing the decisions.
-5. **Loveliness is non-negotiable.** Speed, native feel, and great defaults are
-   the price of entry for every release — not a goal for "later."
-6. **Crafted, not skinned.** terminite draws its own interface — GPU-rendered,
+6. **Loveliness is non-negotiable.** Speed, a crafted feel, and great defaults
+   are the price of entry for every release — not a goal for "later."
+7. **Crafted, not skinned.** terminite draws its own interface — GPU-rendered,
    crafted to feel first-class. It is one deliberate surface, never a skinnable
    shell and never a web page in a costume. Not Winamp, and not Electron.
-7. **Quiet over clever.** When in doubt, do less, and do it invisibly.
+8. **Quiet over clever.** When in doubt, do less, and do it invisibly.
 
 ## What is settled, and what is not
 
