@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
-use alacritty_terminal::event_loop::EventLoop as TermEventLoop;
+use alacritty_terminal::event_loop::{EventLoop as TermEventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
@@ -20,8 +20,9 @@ use glyphon::{
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 /// terminite's resting background — deep, quiet, not pure black.
@@ -55,9 +56,11 @@ impl EventListener for Notifier {
     fn send_event(&self, _event: TermEvent) {}
 }
 
-/// The live terminal: the shared `Term` plus an I/O thread driving its PTY.
+/// The live terminal: the shared `Term`, the I/O thread driving its PTY, and
+/// the channel used to push bytes back into the shell.
 struct LiveTerm {
     term: Arc<FairMutex<Term<Notifier>>>,
+    sender: EventLoopSender,
 }
 
 impl LiveTerm {
@@ -77,11 +80,17 @@ impl LiveTerm {
 
         let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
-        // Detach the I/O thread. Slice 3c will keep the channel sender to drive
-        // input and shutdown; for now the OS reaps the thread on exit.
+        let sender = event_loop.channel();
+        // Detach the I/O thread; we keep the channel sender to drive input and,
+        // eventually, shutdown.
         let _ = event_loop.spawn();
 
-        Self { term }
+        Self { term, sender }
+    }
+
+    /// Send bytes to the shell over the PTY.
+    fn write(&self, bytes: Vec<u8>) {
+        let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
     /// Snapshot the visible grid into a String. One row per line, trailing
@@ -102,6 +111,42 @@ impl LiveTerm {
             out.push('\n');
         }
         out
+    }
+}
+
+/// Translate a winit key press into the bytes a shell expects on stdin.
+fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    if event.state != ElementState::Pressed {
+        return None;
+    }
+    // Ctrl + letter — translate to the corresponding control byte (Ctrl-C = 3,
+    // Ctrl-D = 4, …). Driven by the logical key so keyboard layout is honored.
+    if modifiers.control_key() {
+        if let Key::Character(text) = &event.logical_key {
+            let mut chars = text.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                let lower = c.to_ascii_lowercase();
+                if lower.is_ascii_lowercase() {
+                    return Some(vec![(lower as u8) & 0x1f]);
+                }
+            }
+        }
+    }
+    match &event.logical_key {
+        Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
+        Key::Named(NamedKey::Backspace) => Some(b"\x7f".to_vec()),
+        Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
+        Key::Named(NamedKey::Escape) => Some(b"\x1b".to_vec()),
+        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
+        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
+        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
+        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
+        Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
+        Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
+        Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
+        Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
+        _ => event.text.as_ref().map(|s| s.as_bytes().to_vec()),
     }
 }
 
@@ -346,6 +391,7 @@ impl Renderer {
 #[derive(Default)]
 struct Terminite {
     renderer: Option<Renderer>,
+    modifiers: ModifiersState,
 }
 
 impl ApplicationHandler for Terminite {
@@ -371,13 +417,26 @@ impl ApplicationHandler for Terminite {
         _id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(renderer) = self.renderer.as_mut() else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => renderer.resize(size.width, size.height),
+            WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let Some(bytes) = key_to_bytes(&event, self.modifiers) {
+                    if let Some(renderer) = self.renderer.as_mut() {
+                        renderer.live_term.write(bytes);
+                    }
+                }
+            }
+            WindowEvent::Resized(size) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.resize(size.width, size.height);
+                }
+            }
             WindowEvent::RedrawRequested => {
-                renderer.render();
-                renderer.window.request_redraw();
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.render();
+                    renderer.window.request_redraw();
+                }
             }
             _ => {}
         }
