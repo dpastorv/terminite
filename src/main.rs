@@ -31,11 +31,20 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
 pub const FONT_SIZE: f32 = 28.0;
 pub const LINE_HEIGHT: f32 = 36.0;
 
-/// Padding from the window edge to the text.
+/// Horizontal padding from the window edge to the text.
 pub const TEXT_LEFT: f32 = 24.0;
-pub const TEXT_TOP: f32 = 24.0;
+/// Vertical offset from the window top to where the text area begins. This
+/// accounts for the tab bar (renderer-internal) plus inner padding. The
+/// renderer draws the tab bar in `[0, TAB_BAR_HEIGHT)`; text sits below.
+pub const TEXT_TOP: f32 = 68.0;
 
 // ── Cross-thread event into winit ──────────────────────────────────────────
+
+/// Identifies one tab inside the window. Monotonic; survives reordering.
+/// `Notifier` for each tab carries its own `TabId` so per-shell events
+/// (title, bell) can be routed to the right tab.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TabId(pub u64);
 
 /// Events that wake terminite's render loop. The terminal's I/O thread sends
 /// these from off-thread; the winit loop responds on the next tick.
@@ -43,10 +52,10 @@ pub const TEXT_TOP: f32 = 24.0;
 pub enum UserEvent {
     /// Generic wake — output arrived, redraw the frame.
     Wakeup,
-    /// Shell emitted an OSC 0/1/2 title; update the window title.
-    SetTitle(String),
+    /// Shell emitted an OSC 0/1/2 title; update the tab's title.
+    SetTitle(TabId, String),
     /// Shell emitted `\a` (bell). Visual flash.
-    Bell,
+    Bell(TabId),
 }
 
 // ── Input translation ──────────────────────────────────────────────────────
@@ -144,14 +153,14 @@ impl ApplicationHandler<UserEvent> for Terminite {
                     renderer.window.request_redraw();
                 }
             }
-            UserEvent::SetTitle(title) => {
-                if let Some(renderer) = self.renderer.as_ref() {
-                    renderer.window.set_title(&title);
+            UserEvent::SetTitle(tab_id, title) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_tab_title(tab_id, title);
                 }
             }
-            UserEvent::Bell => {
+            UserEvent::Bell(tab_id) => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.ring_bell();
+                    renderer.ring_bell(tab_id);
                 }
             }
         }
@@ -181,12 +190,33 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // Cmd-shortcuts: copy, paste, quit (Cmd on macOS = super_key
-                // in winit's ModifiersState).
+                // Cmd-shortcuts: copy, paste, quit, tab ops (Cmd on macOS =
+                // super_key in winit's ModifiersState).
                 if event.state == ElementState::Pressed && self.modifiers.super_key() {
                     if let Key::Character(text) = &event.logical_key {
-                        let lower = text.chars().next().map(|c| c.to_ascii_lowercase());
-                        match lower {
+                        let ch = text.chars().next().map(|c| c.to_ascii_lowercase());
+                        let shift = self.modifiers.shift_key();
+
+                        // Cmd+Shift+] / Cmd+Shift+[: next / previous tab.
+                        if shift {
+                            match ch {
+                                Some(']') => {
+                                    if let Some(r) = self.renderer.as_mut() {
+                                        r.next_tab();
+                                    }
+                                    return;
+                                }
+                                Some('[') => {
+                                    if let Some(r) = self.renderer.as_mut() {
+                                        r.prev_tab();
+                                    }
+                                    return;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        match ch {
                             Some('c') => {
                                 if let Some(r) = self.renderer.as_mut() {
                                     r.copy_selection();
@@ -200,10 +230,29 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 return;
                             }
                             Some('q') => {
-                                // macOS would normally route Cmd+Q through
-                                // the application menu; without a menu we
-                                // trap it here.
                                 event_loop.exit();
+                                return;
+                            }
+                            Some('t') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.new_tab();
+                                }
+                                return;
+                            }
+                            Some('w') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    if r.close_active_tab() {
+                                        event_loop.exit();
+                                    }
+                                }
+                                return;
+                            }
+                            // Cmd+1 … Cmd+9: jump to that tab index.
+                            Some(d) if d.is_ascii_digit() && d != '0' => {
+                                let idx = (d as u8 - b'1') as usize;
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.switch_to_tab(idx);
+                                }
                                 return;
                             }
                             _ => {}
@@ -230,8 +279,8 @@ impl ApplicationHandler<UserEvent> for Terminite {
                     }
                 }
                 if let Some(bytes) = key_to_bytes(&event, self.modifiers) {
-                    if let Some(renderer) = self.renderer.as_mut() {
-                        renderer.live_term.write(bytes);
+                    if let Some(renderer) = self.renderer.as_ref() {
+                        renderer.write_active(bytes);
                     }
                 }
             }

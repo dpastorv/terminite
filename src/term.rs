@@ -20,7 +20,7 @@ use glyphon::Color;
 use winit::event_loop::EventLoopProxy;
 
 use crate::palette::{dim_color, resolve_color, BACKGROUND_RGB, DEFAULT_FG};
-use crate::{UserEvent, LINE_HEIGHT};
+use crate::{TabId, UserEvent, LINE_HEIGHT};
 
 /// Visual style of a contiguous text run. Two cells join the same run only
 /// when every field matches.
@@ -106,10 +106,14 @@ impl Dimensions for GridSize {
 /// when alacritty emits `Event::PtyWrite` (CPR responses, clipboard replies,
 /// color queries, device-attribute requests), we forward the bytes back to
 /// the shell.
+///
+/// Each Notifier carries its tab's `TabId` so per-shell events (title, bell)
+/// can be routed back to the correct tab.
 #[derive(Clone)]
 pub struct Notifier {
     pub proxy: EventLoopProxy<UserEvent>,
     pub pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
+    pub tab_id: TabId,
 }
 
 impl EventListener for Notifier {
@@ -123,15 +127,17 @@ impl EventListener for Notifier {
                 }
             }
             TermEvent::Title(title) => {
-                let _ = self.proxy.send_event(UserEvent::SetTitle(title.clone()));
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::SetTitle(self.tab_id, title.clone()));
             }
             TermEvent::ResetTitle => {
                 let _ = self
                     .proxy
-                    .send_event(UserEvent::SetTitle("terminite".to_string()));
+                    .send_event(UserEvent::SetTitle(self.tab_id, "terminite".to_string()));
             }
             TermEvent::Bell => {
-                let _ = self.proxy.send_event(UserEvent::Bell);
+                let _ = self.proxy.send_event(UserEvent::Bell(self.tab_id));
             }
             _ => {}
         }
@@ -153,11 +159,13 @@ impl LiveTerm {
         rows: usize,
         cell_advance: f32,
         proxy: EventLoopProxy<UserEvent>,
+        tab_id: TabId,
     ) -> Self {
         let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
         let notifier = Notifier {
             proxy,
             pty_sender: pty_sender.clone(),
+            tab_id,
         };
         let size = GridSize { cols, rows };
         let term = Term::new(TermConfig::default(), &size, notifier.clone());
