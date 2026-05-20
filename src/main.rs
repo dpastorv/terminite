@@ -24,7 +24,7 @@ use glyphon::{
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -426,11 +426,25 @@ impl Dimensions for GridSize {
     }
 }
 
+/// Cross-thread events that wake terminite's render loop. The terminal's I/O
+/// thread sends `Wakeup` whenever the shell produces output that needs to be
+/// drawn; the winit loop responds by requesting one redraw.
+#[derive(Debug)]
+enum UserEvent {
+    Wakeup,
+}
+
+/// Bridge between the PTY thread and winit's event loop. Holding an
+/// `EventLoopProxy` lets us request redraws from off-thread without polling.
 #[derive(Clone)]
-struct Notifier;
+struct Notifier {
+    proxy: EventLoopProxy<UserEvent>,
+}
 
 impl EventListener for Notifier {
-    fn send_event(&self, _event: TermEvent) {}
+    fn send_event(&self, _event: TermEvent) {
+        let _ = self.proxy.send_event(UserEvent::Wakeup);
+    }
 }
 
 struct LiveTerm {
@@ -440,9 +454,15 @@ struct LiveTerm {
 }
 
 impl LiveTerm {
-    fn new(cols: usize, rows: usize, cell_advance: f32) -> Self {
+    fn new(
+        cols: usize,
+        rows: usize,
+        cell_advance: f32,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Self {
+        let notifier = Notifier { proxy };
         let size = GridSize { cols, rows };
-        let term = Term::new(TermConfig::default(), &size, Notifier);
+        let term = Term::new(TermConfig::default(), &size, notifier.clone());
         let term = Arc::new(FairMutex::new(term));
 
         let window_size = WindowSize {
@@ -463,7 +483,7 @@ impl LiveTerm {
         let pty = tty::new(&tty_options, window_size, 0)
             .expect("terminite: failed to open the PTY");
 
-        let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
+        let event_loop = TermEventLoop::new(term.clone(), notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
         let sender = event_loop.channel();
         let _ = event_loop.spawn();
@@ -678,7 +698,7 @@ struct Renderer {
 }
 
 impl Renderer {
-    async fn new(window: Arc<Window>) -> Self {
+    async fn new(window: Arc<Window>, proxy: EventLoopProxy<UserEvent>) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -763,7 +783,7 @@ impl Renderer {
         cursor_buffer.shape_until_scroll(&mut font_system, false);
 
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
-        let live_term = LiveTerm::new(cols, rows, cell_advance);
+        let live_term = LiveTerm::new(cols, rows, cell_advance, proxy);
 
         Self {
             instance,
@@ -972,13 +992,13 @@ impl Renderer {
     }
 }
 
-#[derive(Default)]
 struct Terminite {
     renderer: Option<Renderer>,
     modifiers: ModifiersState,
+    proxy: EventLoopProxy<UserEvent>,
 }
 
-impl ApplicationHandler for Terminite {
+impl ApplicationHandler<UserEvent> for Terminite {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;
@@ -991,8 +1011,18 @@ impl ApplicationHandler for Terminite {
                 .create_window(attributes)
                 .expect("terminite: failed to create the window"),
         );
-        let renderer = pollster::block_on(Renderer::new(window.clone()));
+        let renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
         self.renderer = Some(renderer);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Wakeup => {
+                if let Some(renderer) = self.renderer.as_ref() {
+                    renderer.window.request_redraw();
+                }
+            }
+        }
     }
 
     fn window_event(
@@ -1019,7 +1049,6 @@ impl ApplicationHandler for Terminite {
             WindowEvent::RedrawRequested => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.render();
-                    renderer.window.request_redraw();
                 }
             }
             _ => {}
@@ -1028,8 +1057,15 @@ impl ApplicationHandler for Terminite {
 }
 
 fn main() {
-    let event_loop = EventLoop::new().expect("terminite: failed to start the event loop");
-    let mut terminite = Terminite::default();
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .expect("terminite: failed to start the event loop");
+    let proxy = event_loop.create_proxy();
+    let mut terminite = Terminite {
+        renderer: None,
+        modifiers: ModifiersState::default(),
+        proxy,
+    };
     event_loop
         .run_app(&mut terminite)
         .expect("terminite: the event loop exited with an error");
