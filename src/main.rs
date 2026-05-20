@@ -1,8 +1,8 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! With these fixes the terminal *fits the window* and there is a *visible
-//! cursor*. Slice 3c made it interactive; slice 3d (here) makes it actually
-//! usable. The move-in is reachable.
+//! The cell advance was guessed before; now it is *measured* from the font
+//! cosmic-text actually picks. Cursor and grid math use the same measured
+//! number, so they stay aligned across the line.
 
 use std::sync::Arc;
 
@@ -27,26 +27,47 @@ use winit::window::{Window, WindowId};
 /// terminite's resting background — deep, quiet, not pure black.
 const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.04, g: 0.04, b: 0.06, a: 1.0 };
 
-/// Text metrics. The buffer's `Metrics` and the cursor/grid math use the same
-/// numbers so they stay in lockstep.
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 20.0;
-/// Monospace glyphs advance ≈ 0.6 × font size for most monospace fonts. Used to
-/// position the cursor and to compute how many columns fit in the window.
-const CELL_ADVANCE: f32 = FONT_SIZE * 0.6;
 
 /// Padding from the window edge to the text.
 const TEXT_LEFT: f32 = 24.0;
 const TEXT_TOP: f32 = 24.0;
 
-/// Compute the number of columns and rows of monospace cells that fit in a
-/// surface of the given physical size, accounting for terminite's padding.
-fn compute_grid_size(physical_width: f32, physical_height: f32) -> (usize, usize) {
-    let available_w = (physical_width - TEXT_LEFT).max(CELL_ADVANCE);
+/// Compute how many columns and rows of monospace cells fit in a surface of
+/// the given physical size, accounting for terminite's padding.
+fn compute_grid_size(
+    physical_width: f32,
+    physical_height: f32,
+    cell_advance: f32,
+) -> (usize, usize) {
+    let available_w = (physical_width - TEXT_LEFT).max(cell_advance);
     let available_h = (physical_height - TEXT_TOP).max(LINE_HEIGHT);
-    let cols = (available_w / CELL_ADVANCE) as usize;
+    let cols = (available_w / cell_advance) as usize;
     let rows = (available_h / LINE_HEIGHT) as usize;
     (cols.max(2), rows.max(2))
+}
+
+/// Measure the actual monospace cell advance by shaping a single character and
+/// reading its laid-out width. Replaces the old `font_size × 0.6` guess, which
+/// drifted across a line on the font cosmic-text actually picks.
+fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
+    let mut probe = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+    probe.set_size(font_system, Some(1000.0), Some(LINE_HEIGHT * 2.0));
+    probe.set_text(
+        font_system,
+        "M",
+        &Attrs::new().family(Family::Monospace),
+        Shaping::Advanced,
+        None,
+    );
+    probe.shape_until_scroll(font_system, false);
+    probe
+        .layout_runs()
+        .next()
+        .and_then(|run| run.glyphs.first())
+        .map(|glyph| glyph.w)
+        .unwrap_or(FONT_SIZE * 0.6)
 }
 
 /// Grid dimensions for `Term::new`. `alacritty_terminal` asks for any
@@ -77,10 +98,11 @@ impl EventListener for Notifier {
 struct LiveTerm {
     term: Arc<FairMutex<Term<Notifier>>>,
     sender: EventLoopSender,
+    cell_advance: f32,
 }
 
 impl LiveTerm {
-    fn new(cols: usize, rows: usize) -> Self {
+    fn new(cols: usize, rows: usize, cell_advance: f32) -> Self {
         let size = GridSize { cols, rows };
         let term = Term::new(TermConfig::default(), &size, Notifier);
         let term = Arc::new(FairMutex::new(term));
@@ -88,7 +110,7 @@ impl LiveTerm {
         let window_size = WindowSize {
             num_lines: rows as u16,
             num_cols: cols as u16,
-            cell_width: CELL_ADVANCE as u16,
+            cell_width: cell_advance as u16,
             cell_height: LINE_HEIGHT as u16,
         };
         let pty = tty::new(&tty::Options::default(), window_size, 0)
@@ -101,7 +123,7 @@ impl LiveTerm {
         // resize, and (eventually) shutdown.
         let _ = event_loop.spawn();
 
-        Self { term, sender }
+        Self { term, sender, cell_advance }
     }
 
     /// Resize the underlying `Term` and notify the PTY.
@@ -113,7 +135,7 @@ impl LiveTerm {
         let _ = self.sender.send(Msg::Resize(WindowSize {
             num_lines: rows as u16,
             num_cols: cols as u16,
-            cell_width: CELL_ADVANCE as u16,
+            cell_width: self.cell_advance as u16,
             cell_height: LINE_HEIGHT as u16,
         }));
     }
@@ -199,6 +221,8 @@ struct Renderer {
     /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
     /// terminal hasn't changed between frames.
     last_snapshot: String,
+    /// Measured monospace cell advance in physical pixels.
+    cell_advance: f32,
 
     live_term: LiveTerm,
 
@@ -249,6 +273,10 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut font_system = FontSystem::new();
+        // Measure the real cell advance from the font cosmic-text picks. Every
+        // bit of cell/cursor math downstream uses this number.
+        let cell_advance = measure_cell_advance(&mut font_system);
+
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -275,7 +303,7 @@ impl Renderer {
         let mut cursor_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         cursor_buffer.set_size(
             &mut font_system,
-            Some(CELL_ADVANCE * 2.0),
+            Some(cell_advance * 2.0),
             Some(LINE_HEIGHT * 2.0),
         );
         cursor_buffer.set_text(
@@ -287,9 +315,9 @@ impl Renderer {
         );
         cursor_buffer.shape_until_scroll(&mut font_system, false);
 
-        // The grid sized for this window.
-        let (cols, rows) = compute_grid_size(physical_width, physical_height);
-        let live_term = LiveTerm::new(cols, rows);
+        // The grid sized for this window, using the measured advance.
+        let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
+        let live_term = LiveTerm::new(cols, rows, cell_advance);
 
         Self {
             instance,
@@ -305,6 +333,7 @@ impl Renderer {
             text_buffer,
             cursor_buffer,
             last_snapshot: String::new(),
+            cell_advance,
             live_term,
             window,
         }
@@ -328,7 +357,8 @@ impl Renderer {
         self.text_buffer.shape_until_scroll(&mut self.font_system, false);
 
         // Recompute grid dimensions and push them through to Term + PTY.
-        let (cols, rows) = compute_grid_size(physical_width, physical_height);
+        let (cols, rows) =
+            compute_grid_size(physical_width, physical_height, self.cell_advance);
         self.live_term.resize(cols, rows);
         // Invalidate the snapshot cache so the next frame re-shapes the buffer
         // at the new size.
@@ -357,7 +387,7 @@ impl Renderer {
             },
         );
 
-        let cursor_left = TEXT_LEFT + (cursor_col as f32) * CELL_ADVANCE;
+        let cursor_left = TEXT_LEFT + (cursor_col as f32) * self.cell_advance;
         let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT;
         let bounds = TextBounds {
             left: 0,
