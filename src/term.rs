@@ -1,7 +1,7 @@
 //! The live terminal: PTY thread, snapshot of the cell grid into rendering-
 //! friendly data (styled text runs, background runs, decoration runs).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as TermEventLoop, EventLoopSender, Msg};
@@ -82,15 +82,27 @@ impl Dimensions for GridSize {
     fn columns(&self) -> usize { self.cols }
 }
 
-/// Bridge between the PTY thread and winit's event loop. Holding an
-/// `EventLoopProxy` lets us request redraws from off-thread without polling.
+/// Bridge between the PTY thread and winit's event loop. The proxy wakes the
+/// render loop on any event. The pty_sender is filled in *after* the event
+/// loop is created (it returns the sender), so we hold it behind a Mutex —
+/// when alacritty emits `Event::PtyWrite` (CPR responses, clipboard replies,
+/// color queries, device-attribute requests), we forward the bytes back to
+/// the shell.
 #[derive(Clone)]
 pub struct Notifier {
     pub proxy: EventLoopProxy<UserEvent>,
+    pub pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
 }
 
 impl EventListener for Notifier {
-    fn send_event(&self, _event: TermEvent) {
+    fn send_event(&self, event: TermEvent) {
+        if let TermEvent::PtyWrite(text) = &event {
+            if let Ok(guard) = self.pty_sender.lock() {
+                if let Some(sender) = guard.as_ref() {
+                    let _ = sender.send(Msg::Input(text.clone().into_bytes().into()));
+                }
+            }
+        }
         let _ = self.proxy.send_event(UserEvent::Wakeup);
     }
 }
@@ -110,7 +122,11 @@ impl LiveTerm {
         cell_advance: f32,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
-        let notifier = Notifier { proxy };
+        let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
+        let notifier = Notifier {
+            proxy,
+            pty_sender: pty_sender.clone(),
+        };
         let size = GridSize { cols, rows };
         let term = Term::new(TermConfig::default(), &size, notifier.clone());
         let term = Arc::new(FairMutex::new(term));

@@ -310,6 +310,14 @@ impl Renderer {
         let (offset, history) = self.live_term.offset_and_history();
         if offset >= history {
             // Scrolled to the top of history; no more room upward.
+            if self.pixel_offset > 0.0 {
+                // Fired only at the boundary — useful for diagnosing whether
+                // the cap is what the user expected.
+                eprintln!(
+                    "[scroll] hit top of history: offset={} history={} (rows={})",
+                    offset, history, self.grid_rows
+                );
+            }
             self.pixel_offset = 0.0;
         } else if offset == 0 && self.pixel_offset < 0.0 {
             // At live bottom; can't go below.
