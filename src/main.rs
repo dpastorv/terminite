@@ -26,8 +26,10 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-pub const FONT_SIZE: f32 = 14.0;
-pub const LINE_HEIGHT: f32 = 20.0;
+// Sized in physical pixels. On a Retina display (scale=2) these are
+// equivalent to ~14pt logical text — comfortable terminal default.
+pub const FONT_SIZE: f32 = 28.0;
+pub const LINE_HEIGHT: f32 = 36.0;
 
 /// Padding from the window edge to the text.
 pub const TEXT_LEFT: f32 = 24.0;
