@@ -504,6 +504,10 @@ impl Renderer {
         // Selection highlight: one rect per row of the selection. Coordinates
         // are absolute (Line index); convert to viewport rows by adding the
         // current display_offset so the highlight rides along with content.
+        // We allow vl = -1 (one row above the viewport) so the highlight
+        // smoothly enters from the top during pixel-smooth scroll — matching
+        // the extra-row text/background rendering. Without this, a selected
+        // line briefly loses its highlight as it slides through that row.
         if let Some(sel) = self.selection.as_ref() {
             if !sel.is_empty() {
                 let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
@@ -512,7 +516,7 @@ impl Renderer {
                 let display_offset = self.live_term.offset_and_history().0 as i32;
                 for abs_line in s_line..=e_line {
                     let vl = abs_line + display_offset;
-                    if vl < 0 || vl >= rows {
+                    if vl < -1 || vl >= rows {
                         continue;
                     }
                     let col_start = if abs_line == s_line { s_col } else { 0 };
