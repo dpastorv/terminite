@@ -341,8 +341,11 @@ impl Renderer {
                     );
                 } else if at_live {
                     eprintln!(
-                        "[scroll] hit live boundary: offset={} history={} (rows={})",
-                        after, history, self.grid_rows
+                        "[scroll] hit live boundary: offset={} history={} (rows={}) {}",
+                        after,
+                        history,
+                        self.grid_rows,
+                        self.live_term.debug_bottom_strip(self.grid_rows)
                     );
                 }
             }
