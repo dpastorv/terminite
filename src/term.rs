@@ -11,9 +11,11 @@ use alacritty_terminal::index::{Column, Line};
 pub use alacritty_terminal::grid::Scroll as TermScroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
+
+pub use alacritty_terminal::vte::ansi::CursorShape as CursorShapeKind;
 use glyphon::Color;
 use winit::event_loop::EventLoopProxy;
 
@@ -63,11 +65,27 @@ pub struct Snapshot {
     pub deco_runs: Vec<DecorationRun>,
     pub cursor_line: i32,
     pub cursor_col: usize,
+    pub cursor_shape: CursorShape,
+    pub cursor_blinking: bool,
     /// True if the snapshot's first row of text is the "extra row above the
     /// viewport" used for pixel-smooth scrolling. False when no scrollback is
     /// available above the current top (history exhausted or display_offset 0
     /// with empty history).
     pub has_extra_row: bool,
+}
+
+/// Snapshot of the relevant `TermMode` flags. Pulled out so the renderer can
+/// branch on mode without holding a term lock.
+#[derive(Default, Clone, Copy)]
+pub struct ModeFlags {
+    pub bracketed_paste: bool,
+    pub mouse_report_click: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub sgr_mouse: bool,
+    #[allow(dead_code)]
+    pub alt_screen: bool,
+    pub focus_in_out: bool,
 }
 
 #[derive(Debug)]
@@ -96,12 +114,26 @@ pub struct Notifier {
 
 impl EventListener for Notifier {
     fn send_event(&self, event: TermEvent) {
-        if let TermEvent::PtyWrite(text) = &event {
-            if let Ok(guard) = self.pty_sender.lock() {
-                if let Some(sender) = guard.as_ref() {
-                    let _ = sender.send(Msg::Input(text.clone().into_bytes().into()));
+        match &event {
+            TermEvent::PtyWrite(text) => {
+                if let Ok(guard) = self.pty_sender.lock() {
+                    if let Some(sender) = guard.as_ref() {
+                        let _ = sender.send(Msg::Input(text.clone().into_bytes().into()));
+                    }
                 }
             }
+            TermEvent::Title(title) => {
+                let _ = self.proxy.send_event(UserEvent::SetTitle(title.clone()));
+            }
+            TermEvent::ResetTitle => {
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::SetTitle("terminite".to_string()));
+            }
+            TermEvent::Bell => {
+                let _ = self.proxy.send_event(UserEvent::Bell);
+            }
+            _ => {}
         }
         let _ = self.proxy.send_event(UserEvent::Wakeup);
     }
@@ -182,6 +214,59 @@ impl LiveTerm {
 
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.sender.send(Msg::Input(bytes.into()));
+    }
+
+    pub fn mode_flags(&self) -> ModeFlags {
+        let term = self.term.lock();
+        let m = term.mode();
+        ModeFlags {
+            bracketed_paste: m.contains(TermMode::BRACKETED_PASTE),
+            mouse_report_click: m.contains(TermMode::MOUSE_REPORT_CLICK),
+            mouse_drag: m.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: m.contains(TermMode::MOUSE_MOTION),
+            sgr_mouse: m.contains(TermMode::SGR_MOUSE),
+            alt_screen: m.contains(TermMode::ALT_SCREEN),
+            focus_in_out: m.contains(TermMode::FOCUS_IN_OUT),
+        }
+    }
+
+    /// Find the word boundaries around (line, col). Word chars: alphanumeric
+    /// and `_`. If the target cell isn't a word char, returns a single-cell
+    /// "word." `line` is in absolute alacritty coordinates.
+    pub fn word_at(&self, line: i32, col: usize) -> ((i32, usize), (i32, usize)) {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let history = grid.history_size() as i32;
+        let max_line = grid.screen_lines() as i32 - 1;
+        let line = line.clamp(-history, max_line);
+        if cols == 0 {
+            return ((line, col), (line, col));
+        }
+        let col = col.min(cols - 1);
+        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let row = &grid[Line(line)];
+        let target = row[Column(col)].c;
+        if !is_word(target) {
+            return ((line, col), (line, col));
+        }
+        let mut start = col;
+        while start > 0 && is_word(row[Column(start - 1)].c) {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < cols && is_word(row[Column(end + 1)].c) {
+            end += 1;
+        }
+        ((line, start), (line, end))
+    }
+
+    /// Whole-line selection range. `line` is in absolute alacritty coordinates.
+    pub fn line_at(&self, line: i32) -> ((i32, usize), (i32, usize)) {
+        let term = self.term.lock();
+        let cols = term.grid().columns();
+        let end = cols.saturating_sub(1);
+        ((line, 0), (line, end))
     }
 
     /// Shift the visible viewport up or down through the scrollback.
@@ -306,6 +391,7 @@ impl LiveTerm {
     /// the viewport when the user scrolls back.
     pub fn snapshot(&self) -> Snapshot {
         let term = self.term.lock();
+        let cursor_style = term.cursor_style();
         let grid = term.grid();
         let rows = grid.screen_lines();
         let cols = grid.columns();
@@ -504,6 +590,8 @@ impl LiveTerm {
             deco_runs,
             cursor_line,
             cursor_col,
+            cursor_shape: cursor_style.shape,
+            cursor_blinking: cursor_style.blinking,
             has_extra_row,
         }
     }
