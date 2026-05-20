@@ -37,7 +37,13 @@ const TEXT_TOP: f32 = 24.0;
 /// Tiny visual nudges so the cursor sits where the eye expects, not where the
 /// cell math says. Geometric correctness ≠ visual correctness.
 const CURSOR_X_OFFSET: f32 = 2.0;
-const CURSOR_Y_OFFSET: f32 = -4.0;
+const CURSOR_Y_OFFSET: f32 = -2.0;
+
+/// The cursor block is rendered at a slightly larger font than the text so it
+/// wraps the letter with breathing room above and below — the M (or any
+/// character) sits centered inside the cursor instead of beside it.
+const CURSOR_FONT_SIZE: f32 = FONT_SIZE + 4.0;
+const CURSOR_LINE_HEIGHT: f32 = LINE_HEIGHT + 4.0;
 
 /// Compute how many columns and rows of monospace cells fit in a surface of
 /// the given physical size, accounting for terminite's padding.
@@ -303,13 +309,16 @@ impl Renderer {
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
 
-        // Cursor: a separate buffer holding a single filled block. We reposition
-        // its `TextArea` each frame; its content is fixed.
-        let mut cursor_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        // Cursor: a separate buffer holding a single filled block at a slightly
+        // larger font size so the cursor wraps the character it's on top of.
+        let mut cursor_buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(CURSOR_FONT_SIZE, CURSOR_LINE_HEIGHT),
+        );
         cursor_buffer.set_size(
             &mut font_system,
-            Some(cell_advance * 2.0),
-            Some(LINE_HEIGHT * 2.0),
+            Some(CURSOR_FONT_SIZE * 2.0),
+            Some(CURSOR_LINE_HEIGHT * 2.0),
         );
         cursor_buffer.set_text(
             &mut font_system,
