@@ -120,9 +120,23 @@ without resenting it. Not yet *lovable* — just *correct*.
 
 ## Phase 2 — Be the pair's terminal
 
-This is the "fun part." Every Phase 1 item is in service of getting here.
-The pair (human + AI) shouldn't be staring at a coordinate-free byte stream;
-they should be looking at *named, structured objects on a shared surface*.
+> Phase 2 turns the terminal from a stream into a Model. Terminal with a
+> DOM. Chess with words.
+>
+> Every command + its output becomes a block — named, addressable, with
+> lifecycle events the pair can react to. On any block, three things become
+> possible: **reference** it (name it, point at it by ID), **augment** it
+> (annotate, transform, slice, ask), and **point** at it (highlight, share
+> attention). Both of us — human and AI — share that Model as common
+> ground. We refer to the same objects, by the same names, in the same
+> coordinate system. The AI stops reconstructing structure from heuristics;
+> the human stops re-grounding every reference from scratch.
+>
+> Out-of-process modules grow the surface from both sides. Either user can
+> write one.
+>
+> The thesis is small and load-bearing: when the substrate is structured,
+> the relationship is natural. Phase 2 is the work of making it so.
 
 ### The Model — the central idea
 
