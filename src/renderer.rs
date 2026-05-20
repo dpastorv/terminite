@@ -117,7 +117,6 @@ impl Renderer {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
-        let scale_factor = window.scale_factor();
 
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -167,8 +166,13 @@ impl Renderer {
         let rects_below = RectRenderer::new(&device, format, "below");
         let rects_above = RectRenderer::new(&device, format, "above");
 
-        let physical_width = (width as f64 * scale_factor) as f32;
-        let physical_height = (height as f64 * scale_factor) as f32;
+        // winit's PhysicalSize is already in physical pixels — earlier code
+        // multiplied by scale_factor a second time, so the grid math thought
+        // the surface was 2x taller than it actually was on Retina, and rows
+        // past visible got snapshotted into the buffer but rendered off the
+        // bottom of the window.
+        let physical_width = width as f32;
+        let physical_height = height as f32;
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
@@ -228,9 +232,8 @@ impl Renderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        let scale = self.window.scale_factor();
-        let physical_width = (width as f64 * scale) as f32;
-        let physical_height = (height as f64 * scale) as f32;
+        let physical_width = width as f32;
+        let physical_height = height as f32;
         self.text_buffer.set_size(
             &mut self.font_system,
             Some(physical_width),
