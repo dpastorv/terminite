@@ -30,16 +30,21 @@ const CURSOR_COLOR: [f32; 4] = [1.0, 200.0 / 255.0, 80.0 / 255.0, 180.0 / 255.0]
 /// Translucent steel-blue selection highlight.
 const SELECTION_COLOR: [f32; 4] = [0.32, 0.46, 0.75, 0.35];
 
+/// Selection coordinates are stored in alacritty's *absolute* `Line`
+/// coordinate (viewport row minus the current display_offset). That way the
+/// selection tracks the underlying grid content as the user scrolls — a
+/// viewport-relative store would leave the highlight glued to fixed rows that
+/// then show different content.
 #[derive(Clone, Copy, PartialEq)]
 struct Selection {
-    anchor_line: usize,
+    anchor_line: i32,
     anchor_col: usize,
-    head_line: usize,
+    head_line: i32,
     head_col: usize,
 }
 
 impl Selection {
-    fn from_anchor(line: usize, col: usize) -> Self {
+    fn from_anchor(line: i32, col: usize) -> Self {
         Self {
             anchor_line: line,
             anchor_col: col,
@@ -48,13 +53,13 @@ impl Selection {
         }
     }
 
-    fn extend_to(&mut self, line: usize, col: usize) {
+    fn extend_to(&mut self, line: i32, col: usize) {
         self.head_line = line;
         self.head_col = col;
     }
 
     /// Return start <= end lexicographically.
-    fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+    fn normalized(&self) -> ((i32, usize), (i32, usize)) {
         let a = (self.anchor_line, self.anchor_col);
         let h = (self.head_line, self.head_col);
         if a <= h {
@@ -257,10 +262,18 @@ impl Renderer {
         )
     }
 
+    /// Convert a mouse pixel position into an absolute (Line, Column) using
+    /// the current display_offset. Used for both selection start and extend.
+    fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
+        let (vl, col) = self.pixel_to_cell(x, y);
+        let display_offset = self.live_term.offset_and_history().0 as i32;
+        (vl as i32 - display_offset, col)
+    }
+
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         self.mouse_pos = (x, y);
         if self.dragging {
-            let (line, col) = self.pixel_to_cell(x, y);
+            let (line, col) = self.pixel_to_absolute(x, y);
             if let Some(sel) = self.selection.as_mut() {
                 sel.extend_to(line, col);
             }
@@ -269,7 +282,7 @@ impl Renderer {
     }
 
     pub fn mouse_down(&mut self) {
-        let (line, col) = self.pixel_to_cell(self.mouse_pos.0, self.mouse_pos.1);
+        let (line, col) = self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
         self.selection = Some(Selection::from_anchor(line, col));
         self.dragging = true;
         self.window.request_redraw();
@@ -327,6 +340,16 @@ impl Renderer {
                         self.grid_rows
                     );
                 }
+            }
+        }
+
+        // If a selection drag is in progress, extend the head to wherever the
+        // mouse pixel currently sits. Without this, the user would have to
+        // wiggle the mouse to "catch up" to the newly-revealed content.
+        if self.dragging {
+            let (line, col) = self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
+            if let Some(sel) = self.selection.as_mut() {
+                sel.extend_to(line, col);
             }
         }
 
@@ -425,15 +448,22 @@ impl Renderer {
             });
         }
 
-        // Selection highlight: one rect per row of the selection.
+        // Selection highlight: one rect per row of the selection. Coordinates
+        // are absolute (Line index); convert to viewport rows by adding the
+        // current display_offset so the highlight rides along with content.
         if let Some(sel) = self.selection.as_ref() {
             if !sel.is_empty() {
                 let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
                 let cols = self.grid_cols;
-                let last = self.grid_rows.saturating_sub(1);
-                for line in s_line..=e_line.min(last) {
-                    let col_start = if line == s_line { s_col } else { 0 };
-                    let col_end_raw = if line == e_line { e_col + 1 } else { cols };
+                let rows = self.grid_rows as i32;
+                let display_offset = self.live_term.offset_and_history().0 as i32;
+                for abs_line in s_line..=e_line {
+                    let vl = abs_line + display_offset;
+                    if vl < 0 || vl >= rows {
+                        continue;
+                    }
+                    let col_start = if abs_line == s_line { s_col } else { 0 };
+                    let col_end_raw = if abs_line == e_line { e_col + 1 } else { cols };
                     let col_end = col_end_raw.min(cols);
                     let col_start = col_start.min(cols);
                     if col_start >= col_end {
@@ -442,7 +472,7 @@ impl Renderer {
                     below.push(RectInstance {
                         rect: [
                             TEXT_LEFT + col_start as f32 * cell_advance,
-                            TEXT_TOP + line as f32 * LINE_HEIGHT + y_shift,
+                            TEXT_TOP + vl as f32 * LINE_HEIGHT + y_shift,
                             (col_end - col_start) as f32 * cell_advance,
                             LINE_HEIGHT,
                         ],

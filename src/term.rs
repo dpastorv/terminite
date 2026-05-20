@@ -198,27 +198,31 @@ impl LiveTerm {
     }
 
     /// Extract the text from a (line, col) range — start..=end inclusive on
-    /// both endpoints, in visible-viewport coordinates. Wide-char spacers are
-    /// skipped; zero-width combining marks are appended to their base
-    /// character. Per-row trailing spaces are trimmed before joining with
-    /// newlines. Visible lines are mapped to absolute lines via the current
-    /// `display_offset`, so selecting works correctly while scrolled back.
-    pub fn extract_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
+    /// both endpoints, in *absolute* alacritty Line coordinates. Wide-char
+    /// spacers are skipped; zero-width combining marks are appended to their
+    /// base character. Per-row trailing spaces are trimmed before joining
+    /// with newlines.
+    pub fn extract_text(&self, start: (i32, usize), end: (i32, usize)) -> String {
         let term = self.term.lock();
         let grid = term.grid();
         let cols = grid.columns();
-        let rows = grid.screen_lines();
-        let display_offset = grid.display_offset() as i32;
-        if start.0 >= rows || cols == 0 {
+        let rows = grid.screen_lines() as i32;
+        let history = grid.history_size() as i32;
+        if cols == 0 {
             return String::new();
         }
+        // Valid alacritty Line range: [-history, rows - 1].
         let (start_line, start_col) = start;
         let (end_line_raw, end_col) = end;
-        let end_line = end_line_raw.min(rows.saturating_sub(1));
+        let start_line = start_line.max(-history);
+        let end_line = end_line_raw.min(rows - 1);
+        if start_line > end_line {
+            return String::new();
+        }
 
         let mut out = String::new();
         for line in start_line..=end_line {
-            let row = &grid[Line(line as i32 - display_offset)];
+            let row = &grid[Line(line)];
             let col_start = if line == start_line { start_col } else { 0 };
             let col_end_raw = if line == end_line { end_col.saturating_add(1) } else { cols };
             let col_start = col_start.min(cols);
