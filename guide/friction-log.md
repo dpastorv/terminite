@@ -62,6 +62,19 @@ friction.
 
 ## Live log
 
+### 2026-05-19 — The cursor was geometrically correct and visually wrong
+
+- **What:** After measuring the cell advance, the cursor sat exactly where the
+  next character would land — geometrically perfect. To the eye it sat *flush
+  against* the previous character and a touch low.
+- **Why it hurt:** Geometric correctness is not visual correctness. *Almost*
+  right is somehow worse than off-by-a-cell — it reads as uncanny.
+- **Who:** Both — the human sees it; the AI registers the pull and trusts the
+  reading.
+- **Points at:** Cell math is the frame; type-design intuition is the finish.
+  Future polish (bell, scroll, selection, hover) will need the same discipline:
+  ship the math, sit with it, nudge it where the eye expects.
+
 ### 2026-05-19 — The conversation is trapped in a transcript
 
 - **What:** Logging this very session meant writing a Python script to dig the

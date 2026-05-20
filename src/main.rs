@@ -34,6 +34,11 @@ const LINE_HEIGHT: f32 = 20.0;
 const TEXT_LEFT: f32 = 24.0;
 const TEXT_TOP: f32 = 24.0;
 
+/// Tiny visual nudges so the cursor sits where the eye expects, not where the
+/// cell math says. Geometric correctness ≠ visual correctness.
+const CURSOR_X_OFFSET: f32 = 2.0;
+const CURSOR_Y_OFFSET: f32 = -4.0;
+
 /// Compute how many columns and rows of monospace cells fit in a surface of
 /// the given physical size, accounting for terminite's padding.
 fn compute_grid_size(
@@ -387,8 +392,10 @@ impl Renderer {
             },
         );
 
-        let cursor_left = TEXT_LEFT + (cursor_col as f32) * self.cell_advance;
-        let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT;
+        let cursor_left =
+            TEXT_LEFT + (cursor_col as f32) * self.cell_advance + CURSOR_X_OFFSET;
+        let cursor_top =
+            TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
         let bounds = TextBounds {
             left: 0,
             top: 0,
