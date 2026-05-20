@@ -153,6 +153,11 @@ impl LiveTerm {
         let event_loop = TermEventLoop::new(term.clone(), notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
         let sender = event_loop.channel();
+        // Share the sender with the Notifier so PtyWrite events from alacritty
+        // (CPR, clipboard, DA, color queries) can write back to the shell.
+        if let Ok(mut guard) = pty_sender.lock() {
+            *guard = Some(sender.clone());
+        }
         let _ = event_loop.spawn();
 
         Self {
