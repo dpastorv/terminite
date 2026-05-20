@@ -48,10 +48,16 @@ Status tags inline:
 
 ## Phase 1 — Earn the terminal
 
-The bar: a careful developer could use terminite as their daily driver
-without resenting it. Not yet *lovable* — just *correct*.
+The bar: a careful developer in 2026 could use terminite as their daily
+driver without resenting it. Not yet *lovable* — just *correct*.
 
-### Input & integration with shell apps
+Phase 1 grew when we honestly asked "what does a 2026 developer expect day
+one?" Tabs and splits joined the floor. Hyperlinks, find, working directory,
+config, and image protocol followed. Phase 1 is bigger than it was; that's
+right — the floor has moved over the last few years and we're meeting it,
+not skipping it.
+
+### Shell-app integration
 
 - [core] **Window title** — handle `Event::Title` (OSC 0/1/2). Right now the
   dock entry and window list stay "terminite" forever, regardless of the
@@ -64,6 +70,12 @@ without resenting it. Not yet *lovable* — just *correct*.
   protocol bytes (X10, SGR-mode at minimum). vim, htop, less, lazygit, fzf,
   tmux all expect clicks and scroll to be reported when they enable the
   mode.
+- [core] **Hyperlinks (OSC 8)** — Cmd-click an explicit hyperlink range.
+  Modern shells and tools (eza, lazygit, npm, cargo, gh) emit these
+  everywhere; clicking them is the 2026 default.
+- [core] **Working directory tracking (OSC 7)** — required for "new tab
+  inherits cwd" (most-reached-for tab affordance) and useful on its own
+  (show cwd in tab title, jump-to-folder from menu).
 - [core] **IME / dead-key input** — winit exposes IME events; today we drop
   them. Anyone typing accented characters (or any non-ASCII input method)
   can't.
@@ -74,16 +86,16 @@ without resenting it. Not yet *lovable* — just *correct*.
   visually with long lines + window drag.
 - [next] **Tab character handling** — make sure `\t` lands on a real tab
   stop after width changes.
+- [next] **OSC 52 clipboard write** — let remote apps set the local
+  clipboard. alacritty_terminal exposes it via events; we just route.
 
-### Selection & clipboard polish
+### Selection
 
 - [core] **Double-click word selection, triple-click line selection**. The
   most-reached-for shortcut in any terminal; absent feels broken.
 - [core] **Auto-scroll while dragging past the viewport edge** — natural
   complement to drag-scroll. Drag past top/bottom while holding the button
   → viewport scrolls and selection extends.
-- [next] **OSC 52 clipboard write** — let remote apps set the local
-  clipboard. alacritty_terminal exposes it via events; we just route.
 - [later] **Selection by regex / column / block (Cmd+Option drag)**.
 
 ### Surface affordances
@@ -93,28 +105,55 @@ without resenting it. Not yet *lovable* — just *correct*.
   on them (cd completion in some shells, IRC clients).
 - [core] **Cursor shape from CSI 0–6 q** — apps switch cursor between
   block / bar / underline. zsh's vi mode relies on it.
-- [next] **Cursor blink (configurable, off by default)**.
-- [next] **Hyperlinks (OSC 8)** — Cmd-click an explicit hyperlink range.
-  Pure URL autodetection is a separate, later item.
-- [later] **URL autodetection** — heuristic regex over the grid, hover-style
-  underline, click to open.
+- [core] **Cursor blink** — configurable, on by default. Matches 2026
+  baseline.
+- [core] **Right-click context menu** — Copy, Paste, Open Link, Select
+  All. Lightweight macOS-native menu.
+- [later] **URL autodetection** — heuristic regex over the grid, hover
+  underline, click to open. (Distinct from explicit OSC 8 above.)
 
-### Find & inspect
+### Tabs & splits
 
-- [next] **Find (Cmd+F)** — incremental search across the scrollback, with
-  match highlights. Becomes the *seed* for Phase 2's block-aware search.
-- [later] **Zoom (Cmd+=/Cmd+-)** — bump `FONT_SIZE` at runtime.
+- [core] **Tabs** — Cmd+T new, Cmd+W close, Cmd+1–9 jump, Cmd+Shift+[/]
+  move, Cmd+Shift+T reopen-closed. One `LiveTerm` per tab; tab bar UI;
+  focus routing; new tab inherits cwd (via OSC 7). Architecturally the
+  biggest single item on the list — most data structures grow a "current
+  tab" dimension.
+- [core] **Splits** — Cmd+D vertical split, Cmd+Shift+D horizontal,
+  Cmd+Opt+arrow to switch focus, drag-the-divider resize, per-pane PTY,
+  per-pane scrollback. Pairs with tabs in the modern terminal — tmux
+  users live in splits and ssh-bouncing devs too. In Phase 2 we may
+  rethink the *unit*: a "split" might be re-anchored to a block thread.
+
+### Find & images
+
+- [core] **Find (Cmd+F)** — incremental search across the scrollback, with
+  match highlights and next/prev. Becomes the *seed* for Phase 2's
+  block-aware find.
+- [core] **Image protocol** — Kitty graphics protocol at minimum; ideally
+  iTerm2 inline images and Sixel too. Decode and render via the wgpu
+  texture pipeline. In Phase 2 the rendered image becomes an addressable
+  block (referenceable, augmentable, point-at-able like any other).
+
+### Config
+
+- [core] **Minimal config file** — TOML at `~/.config/terminite/config.toml`,
+  hot-reload on save. v1 fields (small on purpose; each one is a future
+  commitment): `font_family`, `font_size`, `theme`, `padding`,
+  `cursor_blink`, `bell_style` (visual/audible/none).
 
 ### Window & system
 
 - [core] **Quit on Cmd+Q / window close** — currently we exit on
   `CloseRequested` but should also confirm Cmd+Q routes correctly on macOS.
 - [next] **Restore window position/size on launch** (per-app state, not a
-  config file yet).
+  config file flag).
 - [next] **Focus events** — react to focus loss (dim cursor, stop blink) and
   emit DEC focus reporting (`\e[?1004h`) when the app asks.
 - [later] **Drag-and-drop files** — drop a file onto terminite → paste its
   shell-quoted path.
+- [later] **Zoom (Cmd+=/Cmd+-)** — runtime font_size bump (config takes
+  care of static sizing for v1).
 
 ---
 
@@ -194,14 +233,15 @@ without resenting it. Not yet *lovable* — just *correct*.
 
 Phase 2 makes terminite different. Phase 3 makes it adoptable.
 
-### Theming & config
+### Theming
 
-- [next] **Config file** (probably TOML under `~/.config/terminite/`).
-  Font family, size, palette, padding, behavior flags. Hot-reload.
+(The config *file* is in Phase 1; this section is about what's *in* it.)
+
 - [next] **Built-in themes** — One Dark (current), Solarized, Tomorrow,
   Gruvbox, plus a light theme.
 - [later] **Font ligatures toggle** (cosmic-text supports them; we just
   need the surface).
+- [later] **Background opacity / blur** (macOS NSVisualEffectView equivalent).
 
 ### Distribution
 
@@ -235,14 +275,14 @@ Phase 2 makes terminite different. Phase 3 makes it adoptable.
 
 ### Window management
 
-- [later] **Tabs**.
-- [later] **Splits**.
-- [later] **Multiple windows from the menu**.
+(Tabs and splits moved to Phase 1 — they're 2026 table-stakes. What stays
+here is the rest.)
 
-These are *deliberately* later. They're table-stakes in most terminals and
-absent in ours, but the pair-with-AI thesis stands without them. Tabs in
-particular get re-thought in Phase 2 (a "tab" might be a *block thread*,
-not a separate PTY).
+- [later] **Multiple windows from the menu** — File → New Window.
+- [later] **Sessions / profiles** — saved sets of tabs/splits with cwd and
+  command per pane.
+- [later] **Tab/split reordering across windows** (drag a tab between
+  windows).
 
 ---
 
@@ -262,17 +302,53 @@ Carry these forward when promoting items into the next push:
 
 ---
 
-## Next push (proposed)
+## Phase 1 execution plan
 
-The six items that close out Phase 1's correctness floor, bundled as one
-plan:
+Phase 1 is too large for a single push. Five bundles, in order. Each one
+lands cleanly on `main` and leaves terminite usable.
+
+### Bundle 1 — Correctness floor (small, independent items)
+
+Closes the most-felt gaps. None of these items depends on the others;
+they all earn their keep on their own.
 
 1. Window title (OSC 0/1/2).
 2. Bracketed paste (mode + wrap on write).
 3. Mouse reporting (X10 + SGR).
-4. Double-click word / triple-click line selection.
-5. Auto-scroll while drag-selecting past viewport edge.
-6. Bell (one-frame background flash).
+4. Bell (one-frame background flash).
+5. Cursor shape (CSI 0–6 q) + cursor blink.
+6. Double-click word / triple-click line selection.
+7. Auto-scroll while drag-selecting past viewport edge.
+8. IME / dead-key input.
+9. Alt-screen verify (probably no code, just confirm vim/less/htop work).
+10. Cmd+Q routing.
 
-After that we're at the line. Crossing it lands us in Phase 2 — the part
-this whole thing is *for*.
+### Bundle 2 — Tabs
+
+Architecturally the biggest item. Restructures the renderer to own a
+`Vec<LiveTerm>` indexed by active tab, with focus routing, tab bar UI,
+and new-tab-inherits-cwd via OSC 7. This bundle has OSC 7 in it because
+the two land naturally together.
+
+### Bundle 3 — Splits
+
+Per-pane PTY, per-pane scrollback, per-pane focus. Adds a split-divider
+UI and Cmd+Opt+arrow focus motion. Touches almost as much as tabs.
+
+### Bundle 4 — Discoverability polish
+
+- Hyperlinks (OSC 8) + Cmd-click to open.
+- Find (Cmd+F) — incremental scrollback search.
+- Right-click context menu (copy / paste / open link / select all).
+- Minimal config file (TOML, hot-reload, 6 fields).
+
+### Bundle 5 — Image protocol
+
+Kitty graphics protocol first, iTerm2 inline next, Sixel last. Decode +
+upload as wgpu textures; render under or over text. Phase 2 will treat
+each image as a block.
+
+---
+
+After Bundle 5 we're at the line. Crossing it lands us in Phase 2 — the
+part this whole thing is *for*.
