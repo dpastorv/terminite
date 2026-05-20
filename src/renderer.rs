@@ -299,29 +299,35 @@ impl Renderer {
 
         // Pop whole lines into the term; the remainder stays as a sub-line
         // pixel shift used at render time. `floor` keeps the remainder in
-        // [0, LINE_HEIGHT) for any input direction.
+        // [0, LINE_HEIGHT) for any input direction — but only when the
+        // requested scroll actually happens. If alacritty clamps (we asked
+        // Delta(-2) but were at offset=1), subtracting the full `whole`
+        // leaves a residual that renders as motion in the wrong direction,
+        // and floor's over-pop re-establishes the residual on every event
+        // — so the bottom (offset=0) is never reached cleanly. Subtract by
+        // the *actual* offset delta instead.
         let whole = (self.pixel_offset / LINE_HEIGHT).floor() as i32;
         if whole != 0 {
-            self.pixel_offset -= whole as f32 * LINE_HEIGHT;
+            let (before, _) = self.live_term.offset_and_history();
             self.live_term.scroll(TermScroll::Delta(whole));
-        }
-
-        // Clamp pixel_offset to the actually-available scroll range.
-        let (offset, history) = self.live_term.offset_and_history();
-        if offset >= history {
-            // Scrolled to the top of history; no more room upward.
-            if self.pixel_offset > 0.0 {
-                // Fired only at the boundary — useful for diagnosing whether
-                // the cap is what the user expected.
-                eprintln!(
-                    "[scroll] hit top of history: offset={} history={} (rows={})",
-                    offset, history, self.grid_rows
-                );
+            let (after, history) = self.live_term.offset_and_history();
+            let actual = after as i32 - before as i32;
+            self.pixel_offset -= actual as f32 * LINE_HEIGHT;
+            if actual != whole {
+                // Clamped at a boundary; drop the residual.
+                self.pixel_offset = 0.0;
+                let at_top = whole > 0 && after >= history;
+                let at_live = whole < 0 && after == 0;
+                if at_top || at_live {
+                    eprintln!(
+                        "[scroll] hit {} boundary: offset={} history={} (rows={})",
+                        if at_top { "top" } else { "live" },
+                        after,
+                        history,
+                        self.grid_rows
+                    );
+                }
             }
-            self.pixel_offset = 0.0;
-        } else if offset == 0 && self.pixel_offset < 0.0 {
-            // At live bottom; can't go below.
-            self.pixel_offset = 0.0;
         }
 
         self.window.request_redraw();
