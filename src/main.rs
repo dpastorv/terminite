@@ -189,7 +189,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if let Some(r) = self.renderer.as_ref() {
+                if let Some(r) = self.renderer.as_mut() {
                     r.mouse_wheel(delta);
                 }
             }

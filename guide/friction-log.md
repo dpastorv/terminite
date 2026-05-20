@@ -62,6 +62,22 @@ friction.
 
 ## Live log
 
+### 2026-05-20 — Mouse-wheel scroll did nothing on a trackpad
+
+- **What:** Initial scrollback implementation cast `f32` scroll lines (from
+  winit's `MouseScrollDelta`) directly to `i32`. macOS trackpads deliver
+  `PixelDelta` events with ~1–20 pixels per gesture frame, which divided by
+  line height = 0.05–1.0 lines. Cast to `i32` = 0. Scroll silently did nothing.
+- **Why it hurt:** A terminal that ignores trackpad scroll feels broken at the
+  most fundamental level — you can't read history. The human notices
+  immediately; the partnership looks like it shipped half a feature.
+- **Who:** The human (the AI sees nothing here directly), but the absence
+  shows up as "did the partner ship a terminal that can't scroll?"
+- **Points at:** Any signed-`i32` boundary on continuous input needs an
+  accumulator. The same principle will apply to keyboard auto-repeat tuning,
+  click-and-hold gestures, anywhere a float gets truncated. Truncation is
+  silent and feels like nothing.
+
 ### 2026-05-20 — terminite was burning 50% CPU on no work
 
 - **What:** Idle terminite (no shell output, no input) consumed ~50% of one

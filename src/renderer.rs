@@ -96,6 +96,10 @@ pub struct Renderer {
     selection: Option<Selection>,
     dragging: bool,
     clipboard: Option<Clipboard>,
+    /// Accumulated fractional scroll lines from trackpad PixelDelta events.
+    /// macOS trackpads deliver pixels per gesture frame, often <1 line each;
+    /// we add them up and flush whole lines into the term.
+    scroll_acc: f32,
 
     pub live_term: LiveTerm,
 
@@ -200,6 +204,7 @@ impl Renderer {
             selection: None,
             dragging: false,
             clipboard,
+            scroll_acc: 0.0,
             live_term,
             window,
         }
@@ -276,14 +281,19 @@ impl Renderer {
         self.window.request_redraw();
     }
 
-    pub fn mouse_wheel(&self, delta: MouseScrollDelta) {
+    pub fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        // LineDelta is one click of a real wheel; convention is ~3 lines per
+        // click. PixelDelta is trackpad pixels per gesture frame; convert to
+        // line-fractions and accumulate.
         let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
             MouseScrollDelta::PixelDelta(p) => (p.y as f32) / LINE_HEIGHT,
         };
-        let n = lines as i32;
-        if n != 0 {
-            self.live_term.scroll(TermScroll::Delta(n));
+        self.scroll_acc += lines;
+        let whole = self.scroll_acc.trunc() as i32;
+        if whole != 0 {
+            self.scroll_acc -= whole as f32;
+            self.live_term.scroll(TermScroll::Delta(whole));
             self.window.request_redraw();
         }
     }
