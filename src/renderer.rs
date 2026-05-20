@@ -484,9 +484,12 @@ impl Renderer {
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
 
+        // Clip text rendering to the viewport — keeps the extra row above the
+        // viewport invisible when pixel_offset == 0, and only its bottom slides
+        // into view as pixel_offset grows.
         let bounds = TextBounds {
             left: 0,
-            top: 0,
+            top: TEXT_TOP as i32,
             right: self.surface_config.width as i32,
             bottom: self.surface_config.height as i32,
         };
@@ -573,6 +576,16 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+
+            // Scissor: same idea as TextBounds, but for the rect pipelines.
+            // Without this, the extra-row backgrounds and decorations bleed
+            // into the top padding area above the viewport.
+            let scissor_y = TEXT_TOP as u32;
+            let scissor_h = self
+                .surface_config
+                .height
+                .saturating_sub(scissor_y);
+            pass.set_scissor_rect(0, scissor_y, self.surface_config.width, scissor_h);
 
             self.rects_below.render(&mut pass);
             self.text_renderer
