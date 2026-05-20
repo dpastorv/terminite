@@ -53,26 +53,9 @@ impl Selection {
         }
     }
 
-    /// Only updates the head if the new point is at least as far from the
-    /// anchor as the current head. A single drag stays additive — scrolling
-    /// extends the selection in the scroll direction, and mid-drag mouse
-    /// motion can extend further but never pulls the head back toward the
-    /// anchor.
-    fn extend_to_max(&mut self, line: i32, col: usize) {
-        let new_line_d = (line - self.anchor_line).abs();
-        let cur_line_d = (self.head_line - self.anchor_line).abs();
-        if new_line_d > cur_line_d {
-            self.head_line = line;
-            self.head_col = col;
-        } else if new_line_d == cur_line_d && line == self.head_line {
-            // Same line as current head — extend the col only if it's
-            // further from the anchor's col.
-            let cur_col_d = (self.head_col as i32 - self.anchor_col as i32).abs();
-            let new_col_d = (col as i32 - self.anchor_col as i32).abs();
-            if new_col_d > cur_col_d {
-                self.head_col = col;
-            }
-        }
+    fn extend_to(&mut self, line: i32, col: usize) {
+        self.head_line = line;
+        self.head_col = col;
     }
 
     /// Return start <= end lexicographically.
@@ -312,7 +295,7 @@ impl Renderer {
             }
             let (line, col) = self.pixel_to_absolute(x, y);
             if let Some(sel) = self.selection.as_mut() {
-                sel.extend_to_max(line, col);
+                sel.extend_to(line, col);
             }
             self.last_drag_mouse_pos = (x, y);
             self.window.request_redraw();
@@ -411,11 +394,14 @@ impl Renderer {
                     )
                 };
                 if let Some(sel) = self.selection.as_mut() {
-                    // Extend by the further of the viewport edge or the
-                    // current mouse position; `extend_to_max` keeps the
-                    // selection additive across the whole drag.
-                    sel.extend_to_max(edge.0, edge.1);
-                    sel.extend_to_max(mouse_line, mouse_col);
+                    let edge_d = (edge.0 - sel.anchor_line).abs();
+                    let mouse_d = (mouse_line - sel.anchor_line).abs();
+                    let (head_line, head_col) = if edge_d > mouse_d {
+                        edge
+                    } else {
+                        (mouse_line, mouse_col)
+                    };
+                    sel.extend_to(head_line, head_col);
                 }
             }
         }
