@@ -25,7 +25,12 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 /// terminite's resting background — deep, quiet, not pure black.
-const BACKGROUND: wgpu::Color = wgpu::Color { r: 0.04, g: 0.04, b: 0.06, a: 1.0 };
+const BACKGROUND: wgpu::Color = wgpu::Color {
+    r: 0.04,
+    g: 0.04,
+    b: 0.06,
+    a: 1.0,
+};
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 20.0;
@@ -34,16 +39,23 @@ const LINE_HEIGHT: f32 = 20.0;
 const TEXT_LEFT: f32 = 24.0;
 const TEXT_TOP: f32 = 24.0;
 
-/// Tiny visual nudges so the cursor sits where the eye expects, not where the
-/// cell math says. Geometric correctness ≠ visual correctness.
-const CURSOR_X_OFFSET: f32 = 2.0;
-const CURSOR_Y_OFFSET: f32 = -2.0;
-
 /// The cursor block is rendered at a slightly larger font than the text so it
 /// wraps the letter with breathing room above and below — the M (or any
 /// character) sits centered inside the cursor instead of beside it.
 const CURSOR_FONT_SIZE: f32 = FONT_SIZE + 4.0;
 const CURSOR_LINE_HEIGHT: f32 = LINE_HEIGHT + 4.0;
+
+/// Half of the cursor's extra height — the amount we lift the cursor up to
+/// center it on the text. Derived from the font sizes so changing them keeps
+/// the geometry honest.
+const CURSOR_VERTICAL_PADDING: f32 = (CURSOR_FONT_SIZE - FONT_SIZE) / 2.0;
+
+/// Tiny visual nudges so the cursor sits where the eye expects, not where the
+/// cell math says. The Y offset lifts the cursor by its vertical padding (to
+/// center it on the text) plus one more pixel for taste — that last 1.0 is
+/// the irreducible taste portion. Geometric correctness ≠ visual correctness.
+const CURSOR_X_OFFSET: f32 = 2.0;
+const CURSOR_Y_OFFSET: f32 = -CURSOR_VERTICAL_PADDING - 1.0;
 
 /// Compute how many columns and rows of monospace cells fit in a surface of
 /// the given physical size, accounting for terminite's padding.
@@ -89,9 +101,15 @@ struct GridSize {
 }
 
 impl Dimensions for GridSize {
-    fn total_lines(&self) -> usize { self.rows }
-    fn screen_lines(&self) -> usize { self.rows }
-    fn columns(&self) -> usize { self.cols }
+    fn total_lines(&self) -> usize {
+        self.rows
+    }
+    fn screen_lines(&self) -> usize {
+        self.rows
+    }
+    fn columns(&self) -> usize {
+        self.cols
+    }
 }
 
 /// A no-op listener for terminal events. In a later slice this becomes the
@@ -134,7 +152,11 @@ impl LiveTerm {
         // resize, and (eventually) shutdown.
         let _ = event_loop.spawn();
 
-        Self { term, sender, cell_advance }
+        Self {
+            term,
+            sender,
+            cell_advance,
+        }
     }
 
     /// Resize the underlying `Term` and notify the PTY.
@@ -299,7 +321,11 @@ impl Renderer {
         let physical_height = (height as f64 * scale_factor) as f32;
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
+        text_buffer.set_size(
+            &mut font_system,
+            Some(physical_width),
+            Some(physical_height),
+        );
         text_buffer.set_text(
             &mut font_system,
             "",
@@ -368,11 +394,11 @@ impl Renderer {
             Some(physical_width),
             Some(physical_height),
         );
-        self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.text_buffer
+            .shape_until_scroll(&mut self.font_system, false);
 
         // Recompute grid dimensions and push them through to Term + PTY.
-        let (cols, rows) =
-            compute_grid_size(physical_width, physical_height, self.cell_advance);
+        let (cols, rows) = compute_grid_size(physical_width, physical_height, self.cell_advance);
         self.live_term.resize(cols, rows);
         // Invalidate the snapshot cache so the next frame re-shapes the buffer
         // at the new size.
@@ -389,7 +415,8 @@ impl Renderer {
                 Shaping::Advanced,
                 None,
             );
-            self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+            self.text_buffer
+                .shape_until_scroll(&mut self.font_system, false);
             self.last_snapshot = snapshot;
         }
 
@@ -401,10 +428,8 @@ impl Renderer {
             },
         );
 
-        let cursor_left =
-            TEXT_LEFT + (cursor_col as f32) * self.cell_advance + CURSOR_X_OFFSET;
-        let cursor_top =
-            TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
+        let cursor_left = TEXT_LEFT + (cursor_col as f32) * self.cell_advance + CURSOR_X_OFFSET;
+        let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
         let bounds = TextBounds {
             left: 0,
             top: 0,
@@ -449,8 +474,7 @@ impl Renderer {
                 self.window.request_redraw();
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Outdated
-            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
                 self.window.request_redraw();
                 return;
@@ -473,11 +497,11 @@ impl Renderer {
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("terminite frame"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("terminite frame"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("terminite pass"),
@@ -531,12 +555,7 @@ impl ApplicationHandler for Terminite {
         self.renderer = Some(renderer);
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
