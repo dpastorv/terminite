@@ -197,6 +197,21 @@ impl LiveTerm {
         (term.grid().display_offset(), term.grid().history_size())
     }
 
+    /// Return up to 40 characters of the topmost visible row's content, for
+    /// diagnostic logging. Trimmed.
+    pub fn debug_top_row(&self) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let display_offset = grid.display_offset() as i32;
+        let row = &grid[Line(0 - display_offset)];
+        let cap = grid.columns().min(40);
+        let mut s = String::with_capacity(cap);
+        for col in 0..cap {
+            s.push(row[Column(col)].c);
+        }
+        s.trim().to_string()
+    }
+
     /// Extract the text from a (line, col) range — start..=end inclusive on
     /// both endpoints, in *absolute* alacritty Line coordinates. Wide-char
     /// spacers are skipped; zero-width combining marks are appended to their

@@ -331,25 +331,53 @@ impl Renderer {
                 self.pixel_offset = 0.0;
                 let at_top = whole > 0 && after >= history;
                 let at_live = whole < 0 && after == 0;
-                if at_top || at_live {
+                if at_top {
                     eprintln!(
-                        "[scroll] hit {} boundary: offset={} history={} (rows={})",
-                        if at_top { "top" } else { "live" },
+                        "[scroll] hit top boundary: offset={} history={} (rows={}) topRow='{}'",
                         after,
                         history,
-                        self.grid_rows
+                        self.grid_rows,
+                        self.live_term.debug_top_row()
+                    );
+                } else if at_live {
+                    eprintln!(
+                        "[scroll] hit live boundary: offset={} history={} (rows={})",
+                        after, history, self.grid_rows
                     );
                 }
             }
-        }
 
-        // If a selection drag is in progress, extend the head to wherever the
-        // mouse pixel currently sits. Without this, the user would have to
-        // wiggle the mouse to "catch up" to the newly-revealed content.
-        if self.dragging {
-            let (line, col) = self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
-            if let Some(sel) = self.selection.as_mut() {
-                sel.extend_to(line, col);
+            // While dragging, extending the head to wherever the mouse pixel
+            // sits would actually *shrink* the selection as scroll reveals
+            // new content (the same pixel now points at an older row going
+            // up, newer going down). Instead push the head to the viewport
+            // edge in the scroll direction, so the selection grows to cover
+            // the freshly-revealed lines. Pick whichever extends *further*
+            // from the anchor — mouse position still wins when it's already
+            // farther.
+            if actual != 0 && self.dragging {
+                let (mouse_line, mouse_col) =
+                    self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
+                let edge = if actual > 0 {
+                    // Scrolled UP — viewport top is the oldest edge.
+                    (-(after as i32), 0_usize)
+                } else {
+                    // Scrolled DOWN — viewport bottom is the newest edge.
+                    (
+                        self.grid_rows as i32 - 1 - after as i32,
+                        self.grid_cols.saturating_sub(1),
+                    )
+                };
+                if let Some(sel) = self.selection.as_mut() {
+                    let edge_d = (edge.0 - sel.anchor_line).abs();
+                    let mouse_d = (mouse_line - sel.anchor_line).abs();
+                    let (head_line, head_col) = if edge_d > mouse_d {
+                        edge
+                    } else {
+                        (mouse_line, mouse_col)
+                    };
+                    sel.extend_to(head_line, head_col);
+                }
             }
         }
 
