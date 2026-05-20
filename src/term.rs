@@ -5,8 +5,10 @@ use std::sync::Arc;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as TermEventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
+
+pub use alacritty_terminal::grid::Scroll as TermScroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term};
@@ -152,6 +154,62 @@ impl LiveTerm {
 
     pub fn write(&self, bytes: Vec<u8>) {
         let _ = self.sender.send(Msg::Input(bytes.into()));
+    }
+
+    /// Shift the visible viewport up or down through the scrollback.
+    pub fn scroll(&self, scroll: Scroll) {
+        let mut term = self.term.lock();
+        term.scroll_display(scroll);
+    }
+
+    /// Extract the text from a (line, col) range — start..=end inclusive on
+    /// both endpoints. Wide-char spacers are skipped; zero-width combining
+    /// marks are appended to their base character. Per-row trailing spaces are
+    /// trimmed before joining with newlines.
+    pub fn extract_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines();
+        if start.0 >= rows || cols == 0 {
+            return String::new();
+        }
+        let (start_line, start_col) = start;
+        let (end_line_raw, end_col) = end;
+        let end_line = end_line_raw.min(rows.saturating_sub(1));
+
+        let mut out = String::new();
+        for line in start_line..=end_line {
+            let row = &grid[Line(line as i32)];
+            let col_start = if line == start_line { start_col } else { 0 };
+            let col_end_raw = if line == end_line { end_col.saturating_add(1) } else { cols };
+            let col_start = col_start.min(cols);
+            let col_end = col_end_raw.min(cols);
+
+            let mut line_text = String::new();
+            if col_start < col_end {
+                for col in col_start..col_end {
+                    let cell = &row[Column(col)];
+                    if cell
+                        .flags
+                        .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                    {
+                        continue;
+                    }
+                    line_text.push(cell.c);
+                    if let Some(zw) = cell.zerowidth() {
+                        for ch in zw {
+                            line_text.push(*ch);
+                        }
+                    }
+                }
+            }
+            out.push_str(line_text.trim_end());
+            if line != end_line {
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Snapshot the visible grid: styled text runs, background runs, decoration

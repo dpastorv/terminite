@@ -1,34 +1,73 @@
-//! The Renderer: assembles backgrounds, decorations, text, and the cursor
-//! into a single frame. Two `RectRenderer` instances sandwich the text — one
-//! draws *below* (backgrounds + cursor), one draws *above* (decorations).
+//! The Renderer: assembles backgrounds, decorations, text, the cursor, and
+//! selection highlights into a single frame. Two `RectRenderer` instances
+//! sandwich the text — one draws *below* (backgrounds + selection + cursor),
+//! one draws *above* (decorations).
 
 use std::sync::Arc;
 
+use arboard::Clipboard;
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
+use winit::event::MouseScrollDelta;
 use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
-use crate::term::{DecorationKind, LiveTerm, Snapshot, SpanStyle};
-use crate::{
-    UserEvent, BACKGROUND, FONT_SIZE, LINE_HEIGHT, TEXT_LEFT, TEXT_TOP,
-};
+use crate::term::{DecorationKind, LiveTerm, Snapshot, SpanStyle, TermScroll};
+use crate::{UserEvent, BACKGROUND, FONT_SIZE, LINE_HEIGHT, TEXT_LEFT, TEXT_TOP};
 
-/// Thickness of underline and strikethrough decoration lines, in pixels.
 const UNDERLINE_THICKNESS: f32 = 1.5;
-/// Gap between the two lines of a double underline.
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
 
-/// Cursor visual padding around the cell footprint.
 const CURSOR_PAD_X: f32 = 1.0;
 const CURSOR_PAD_Y: f32 = 1.0;
-/// Cursor color (amber, translucent so the text shows through).
 const CURSOR_COLOR: [f32; 4] = [1.0, 200.0 / 255.0, 80.0 / 255.0, 180.0 / 255.0];
+
+/// Translucent steel-blue selection highlight.
+const SELECTION_COLOR: [f32; 4] = [0.32, 0.46, 0.75, 0.35];
+
+#[derive(Clone, Copy, PartialEq)]
+struct Selection {
+    anchor_line: usize,
+    anchor_col: usize,
+    head_line: usize,
+    head_col: usize,
+}
+
+impl Selection {
+    fn from_anchor(line: usize, col: usize) -> Self {
+        Self {
+            anchor_line: line,
+            anchor_col: col,
+            head_line: line,
+            head_col: col,
+        }
+    }
+
+    fn extend_to(&mut self, line: usize, col: usize) {
+        self.head_line = line;
+        self.head_col = col;
+    }
+
+    /// Return start <= end lexicographically.
+    fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+        let a = (self.anchor_line, self.anchor_col);
+        let h = (self.head_line, self.head_col);
+        if a <= h {
+            (a, h)
+        } else {
+            (h, a)
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.anchor_line == self.head_line && self.anchor_col == self.head_col
+    }
+}
 
 pub struct Renderer {
     instance: wgpu::Instance,
@@ -47,10 +86,16 @@ pub struct Renderer {
     rects_below: RectRenderer,
     rects_above: RectRenderer,
 
-    /// Cached text runs so we only re-shape glyphs when the text actually
-    /// changed. Backgrounds and decorations re-render every frame; that's cheap.
     last_text_runs: Vec<(String, SpanStyle)>,
     cell_advance: f32,
+    grid_cols: usize,
+    grid_rows: usize,
+
+    // Mouse / selection state.
+    mouse_pos: (f32, f32),
+    selection: Option<Selection>,
+    dragging: bool,
+    clipboard: Option<Clipboard>,
 
     pub live_term: LiveTerm,
 
@@ -129,6 +174,10 @@ impl Renderer {
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
         let live_term = LiveTerm::new(cols, rows, cell_advance, proxy);
 
+        // Clipboard is optional; it's possible the platform refuses to give us
+        // one (sandboxing, missing service). Copy/paste then become no-ops.
+        let clipboard = Clipboard::new().ok();
+
         Self {
             instance,
             surface,
@@ -145,6 +194,12 @@ impl Renderer {
             rects_above,
             last_text_runs: Vec::new(),
             cell_advance,
+            grid_cols: cols,
+            grid_rows: rows,
+            mouse_pos: (0.0, 0.0),
+            selection: None,
+            dragging: false,
+            clipboard,
             live_term,
             window,
         }
@@ -170,8 +225,102 @@ impl Renderer {
 
         let (cols, rows) = compute_grid_size(physical_width, physical_height, self.cell_advance);
         self.live_term.resize(cols, rows);
+        self.grid_cols = cols;
+        self.grid_rows = rows;
+        // A resize invalidates the snapshot cache *and* the selection — the
+        // cells the user was selecting may now be in a different place.
         self.last_text_runs.clear();
+        self.selection = None;
     }
+
+    // ── Mouse / keyboard input routing ────────────────────────────────────
+
+    fn pixel_to_cell(&self, px: f32, py: f32) -> (usize, usize) {
+        let cx = (px - TEXT_LEFT).max(0.0);
+        let cy = (py - TEXT_TOP).max(0.0);
+        let col = (cx / self.cell_advance) as usize;
+        let line = (cy / LINE_HEIGHT) as usize;
+        (
+            line.min(self.grid_rows.saturating_sub(1)),
+            col.min(self.grid_cols.saturating_sub(1)),
+        )
+    }
+
+    pub fn mouse_moved(&mut self, x: f32, y: f32) {
+        self.mouse_pos = (x, y);
+        if self.dragging {
+            let (line, col) = self.pixel_to_cell(x, y);
+            if let Some(sel) = self.selection.as_mut() {
+                sel.extend_to(line, col);
+            }
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn mouse_down(&mut self) {
+        let (line, col) = self.pixel_to_cell(self.mouse_pos.0, self.mouse_pos.1);
+        self.selection = Some(Selection::from_anchor(line, col));
+        self.dragging = true;
+        self.window.request_redraw();
+    }
+
+    pub fn mouse_up(&mut self) {
+        self.dragging = false;
+        if let Some(sel) = self.selection.as_ref() {
+            if sel.is_empty() {
+                self.selection = None;
+            } else {
+                self.copy_selection();
+            }
+        }
+        self.window.request_redraw();
+    }
+
+    pub fn mouse_wheel(&self, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(p) => (p.y as f32) / LINE_HEIGHT,
+        };
+        let n = lines as i32;
+        if n != 0 {
+            self.live_term.scroll(TermScroll::Delta(n));
+            self.window.request_redraw();
+        }
+    }
+
+    pub fn scroll_page(&self, up: bool) {
+        let s = if up { TermScroll::PageUp } else { TermScroll::PageDown };
+        self.live_term.scroll(s);
+        self.window.request_redraw();
+    }
+
+    pub fn copy_selection(&mut self) {
+        let Some(sel) = self.selection.as_ref() else { return };
+        if sel.is_empty() {
+            return;
+        }
+        let (start, end) = sel.normalized();
+        let text = self.live_term.extract_text(start, end);
+        if text.is_empty() {
+            return;
+        }
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(text);
+        }
+    }
+
+    pub fn paste(&mut self) {
+        let text = match self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+            Some(t) => t,
+            None => return,
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.live_term.write(text.into_bytes());
+    }
+
+    // ── Frame ────────────────────────────────────────────────────────────
 
     pub fn render(&mut self) {
         let Snapshot {
@@ -213,9 +362,9 @@ impl Renderer {
             },
         );
 
-        // ── Below-text rects: backgrounds + cursor.
         let cell_advance = self.cell_advance;
-        let mut below: Vec<RectInstance> = Vec::with_capacity(bg_runs.len() + 1);
+        let mut below: Vec<RectInstance> = Vec::with_capacity(bg_runs.len() + 8);
+
         for run in &bg_runs {
             below.push(RectInstance {
                 rect: [
@@ -227,7 +376,35 @@ impl Renderer {
                 color: color_to_floats(run.color),
             });
         }
-        // Cursor as a rect — sits under the text so the glyph stays readable.
+
+        // Selection highlight: one rect per row of the selection.
+        if let Some(sel) = self.selection.as_ref() {
+            if !sel.is_empty() {
+                let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
+                let cols = self.grid_cols;
+                let last = self.grid_rows.saturating_sub(1);
+                for line in s_line..=e_line.min(last) {
+                    let col_start = if line == s_line { s_col } else { 0 };
+                    let col_end_raw = if line == e_line { e_col + 1 } else { cols };
+                    let col_end = col_end_raw.min(cols);
+                    let col_start = col_start.min(cols);
+                    if col_start >= col_end {
+                        continue;
+                    }
+                    below.push(RectInstance {
+                        rect: [
+                            TEXT_LEFT + col_start as f32 * cell_advance,
+                            TEXT_TOP + line as f32 * LINE_HEIGHT,
+                            (col_end - col_start) as f32 * cell_advance,
+                            LINE_HEIGHT,
+                        ],
+                        color: SELECTION_COLOR,
+                    });
+                }
+            }
+        }
+
+        // Cursor last in the below layer so it sits on top of selection and bgs.
         below.push(RectInstance {
             rect: [
                 TEXT_LEFT + cursor_col as f32 * cell_advance - CURSOR_PAD_X,
@@ -238,7 +415,6 @@ impl Renderer {
             color: CURSOR_COLOR,
         });
 
-        // ── Above-text rects: underline, double underline, strikeout.
         let mut above: Vec<RectInstance> = Vec::with_capacity(deco_runs.len() * 2);
         for run in &deco_runs {
             let x = TEXT_LEFT + run.start_col as f32 * cell_advance;

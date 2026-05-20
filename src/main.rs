@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -126,10 +126,71 @@ impl ApplicationHandler<UserEvent> for Terminite {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
             WindowEvent::KeyboardInput { event, .. } => {
+                // Cmd-shortcuts: copy and paste (Cmd on macOS = super_key in
+                // winit's ModifiersState).
+                if event.state == ElementState::Pressed && self.modifiers.super_key() {
+                    if let Key::Character(text) = &event.logical_key {
+                        let lower = text.chars().next().map(|c| c.to_ascii_lowercase());
+                        match lower {
+                            Some('c') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.copy_selection();
+                                }
+                                return;
+                            }
+                            Some('v') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.paste();
+                                }
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Shift+PageUp / PageDown scroll the viewport instead of
+                // sending escape sequences to the shell.
+                if event.state == ElementState::Pressed && self.modifiers.shift_key() {
+                    match &event.logical_key {
+                        Key::Named(NamedKey::PageUp) => {
+                            if let Some(r) = self.renderer.as_ref() {
+                                r.scroll_page(true);
+                            }
+                            return;
+                        }
+                        Key::Named(NamedKey::PageDown) => {
+                            if let Some(r) = self.renderer.as_ref() {
+                                r.scroll_page(false);
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(bytes) = key_to_bytes(&event, self.modifiers) {
                     if let Some(renderer) = self.renderer.as_mut() {
                         renderer.live_term.write(bytes);
                     }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.mouse_moved(position.x as f32, position.y as f32);
+                }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                if button == MouseButton::Left {
+                    if let Some(r) = self.renderer.as_mut() {
+                        match state {
+                            ElementState::Pressed => r.mouse_down(),
+                            ElementState::Released => r.mouse_up(),
+                        }
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(r) = self.renderer.as_ref() {
+                    r.mouse_wheel(delta);
                 }
             }
             WindowEvent::Resized(size) => {
