@@ -1,11 +1,9 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! Text-pass: foreground color, bold, italic, dim, hidden, wide characters
-//! (emoji and CJK), zero-width combining marks, the 256-color cube, and the
-//! dim ANSI variants all flow from `alacritty_terminal`'s cell grid into
-//! glyphon as rich-text spans. Still missing: background colors, inverse,
-//! underline, strikethrough — they need pixel rectangles, not glyph runs, so
-//! they wait on the rect renderer.
+//! Rect-renderer pass: a small wgpu pipeline draws filled rectangles for cell
+//! backgrounds, which lights up everything the glyph layer couldn't do alone —
+//! background colors, inverse cells, and (next) selection highlights, status
+//! bars, and a properly-sized cursor.
 
 use std::sync::Arc;
 
@@ -14,10 +12,11 @@ use alacritty_terminal::event_loop::{EventLoop as TermEventLoop, EventLoopSender
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
+use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
@@ -36,6 +35,7 @@ const BACKGROUND: wgpu::Color = wgpu::Color {
     b: 0.06,
     a: 1.0,
 };
+const BACKGROUND_RGB: (u8, u8, u8) = (10, 10, 15);
 
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 20.0;
@@ -44,55 +44,38 @@ const LINE_HEIGHT: f32 = 20.0;
 const TEXT_LEFT: f32 = 24.0;
 const TEXT_TOP: f32 = 24.0;
 
-/// The cursor block is rendered at a slightly larger font than the text so it
-/// wraps the letter with breathing room above and below — the M (or any
-/// character) sits centered inside the cursor instead of beside it.
 const CURSOR_FONT_SIZE: f32 = FONT_SIZE + 4.0;
 const CURSOR_LINE_HEIGHT: f32 = LINE_HEIGHT + 4.0;
-
-/// Half of the cursor's extra height — the amount we lift the cursor up to
-/// center it on the text. Derived from the font sizes so changing them keeps
-/// the geometry honest.
 const CURSOR_VERTICAL_PADDING: f32 = (CURSOR_FONT_SIZE - FONT_SIZE) / 2.0;
-
-/// Tiny visual nudges so the cursor sits where the eye expects, not where the
-/// cell math says. The Y offset lifts the cursor by its vertical padding (to
-/// center it on the text) plus one more pixel for taste — that last 1.0 is
-/// the irreducible taste portion. Geometric correctness ≠ visual correctness.
 const CURSOR_X_OFFSET: f32 = 2.0;
 const CURSOR_Y_OFFSET: f32 = -CURSOR_VERTICAL_PADDING - 1.0;
 
-/// Sixteen-color palette tuned in the One Dark family. Indices 0–7 are the
-/// base ANSI colors, 8–15 the bright variants. The 256-color cube and the
-/// grayscale ramp are computed from the standard xterm levels.
+/// Sixteen-color palette tuned in the One Dark family.
 const PALETTE_16: [(u8, u8, u8); 16] = [
-    (40, 44, 52),    //  0  black
-    (224, 108, 117), //  1  red
-    (152, 195, 121), //  2  green
-    (229, 192, 123), //  3  yellow
-    (97, 175, 239),  //  4  blue
-    (198, 120, 221), //  5  magenta
-    (86, 182, 194),  //  6  cyan
-    (171, 178, 191), //  7  white
-    (92, 99, 112),   //  8  bright black
-    (224, 108, 117), //  9  bright red
-    (152, 195, 121), // 10  bright green
-    (229, 192, 123), // 11  bright yellow
-    (97, 175, 239),  // 12  bright blue
-    (198, 120, 221), // 13  bright magenta
-    (86, 182, 194),  // 14  bright cyan
-    (220, 223, 228), // 15  bright white
+    (40, 44, 52),
+    (224, 108, 117),
+    (152, 195, 121),
+    (229, 192, 123),
+    (97, 175, 239),
+    (198, 120, 221),
+    (86, 182, 194),
+    (171, 178, 191),
+    (92, 99, 112),
+    (224, 108, 117),
+    (152, 195, 121),
+    (229, 192, 123),
+    (97, 175, 239),
+    (198, 120, 221),
+    (86, 182, 194),
+    (220, 223, 228),
 ];
 
 const DEFAULT_FG: (u8, u8, u8) = (220, 220, 220);
 
-/// Halve an RGB triple. Used to derive the dim ANSI named colors and the DIM
-/// cell flag at a single, consistent factor.
 const fn half(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
     (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
 }
 
-/// Map a vte ANSI color into a glyphon Color through terminite's palette.
 fn resolve_color(color: AnsiColor) -> Color {
     let (r, g, b) = match color {
         AnsiColor::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
@@ -130,9 +113,8 @@ fn named_rgb(name: NamedColor) -> (u8, u8, u8) {
         NamedColor::DimWhite => half(PALETTE_16[7]),
         NamedColor::DimForeground => half(DEFAULT_FG),
         NamedColor::BrightForeground => (255, 255, 255),
-        NamedColor::Background => (10, 10, 15),
+        NamedColor::Background => BACKGROUND_RGB,
         NamedColor::Cursor => (255, 200, 80),
-        // Foreground and any new variants — soft default.
         _ => DEFAULT_FG,
     }
 }
@@ -142,23 +124,29 @@ fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
         return PALETTE_16[idx as usize];
     }
     if idx < 232 {
-        // 6×6×6 RGB cube starting at 16.
         let levels: [u8; 6] = [0, 95, 135, 175, 215, 255];
         let i = (idx - 16) as usize;
         return (levels[i / 36], levels[(i / 6) % 6], levels[i % 6]);
     }
-    // Grayscale ramp 232..=255.
     let level = 8 + (idx - 232) * 10;
     (level, level, level)
 }
 
-/// Dim a glyphon color by halving each channel. Used for the cell DIM flag.
 fn dim_color(c: Color) -> Color {
     Color::rgba(c.r() / 2, c.g() / 2, c.b() / 2, c.a())
 }
 
-/// Visual style of a contiguous run of cells. Two cells join the same run only
-/// when every field matches, so bold/italic/color boundaries break the run.
+fn color_to_floats(c: Color) -> [f32; 4] {
+    [
+        c.r() as f32 / 255.0,
+        c.g() as f32 / 255.0,
+        c.b() as f32 / 255.0,
+        c.a() as f32 / 255.0,
+    ]
+}
+
+/// Visual style of a contiguous text run. Two cells join the same run only
+/// when every field matches.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct SpanStyle {
     color: Color,
@@ -166,8 +154,230 @@ struct SpanStyle {
     italic: bool,
 }
 
-/// Compute how many columns and rows of monospace cells fit in a surface of
-/// the given physical size, accounting for terminite's padding.
+/// A horizontal run of cells sharing a background color, in cell coordinates.
+#[derive(Clone, Copy, PartialEq)]
+struct BgRun {
+    line: usize,
+    start_col: usize,
+    width: usize,
+    color: Color,
+}
+
+// ─── Rect renderer ──────────────────────────────────────────────────────────
+
+/// Per-rectangle instance data uploaded to the GPU.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct RectInstance {
+    rect: [f32; 4],  // x, y, w, h in physical pixels
+    color: [f32; 4], // rgba in [0, 1]
+}
+
+/// Uniforms shared by every rectangle in a frame.
+#[repr(C)]
+#[derive(Copy, Clone, Pod, Zeroable)]
+struct RectUniforms {
+    resolution: [f32; 2],
+    _pad: [f32; 2],
+}
+
+const RECT_WGSL: &str = r#"
+struct Uniforms {
+    resolution: vec2<f32>,
+    _pad: vec2<f32>,
+}
+
+@group(0) @binding(0)
+var<uniform> uniforms: Uniforms;
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_main(
+    @builtin(vertex_index) vid: u32,
+    @location(0) rect: vec4<f32>,
+    @location(1) color: vec4<f32>,
+) -> VertexOutput {
+    let corners = array<vec2<f32>, 4>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 1.0),
+    );
+    let c = corners[vid];
+    let px = rect.x + c.x * rect.z;
+    let py = rect.y + c.y * rect.w;
+    let ndc_x = px / uniforms.resolution.x * 2.0 - 1.0;
+    let ndc_y = 1.0 - py / uniforms.resolution.y * 2.0;
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(ndc_x, ndc_y, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return in.color;
+}
+"#;
+
+/// A small wgpu pipeline that draws an instanced batch of solid colored
+/// rectangles in physical-pixel coordinates. The vertex shader generates a
+/// quad on the fly from `@builtin(vertex_index)` so no vertex buffer is needed
+/// beyond the per-instance data.
+struct RectRenderer {
+    pipeline: wgpu::RenderPipeline,
+    instance_buffer: wgpu::Buffer,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    capacity: u32,
+    count: u32,
+}
+
+impl RectRenderer {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("terminite rect shader"),
+            source: wgpu::ShaderSource::Wgsl(RECT_WGSL.into()),
+        });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("terminite rect bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terminite rect uniforms"),
+            size: std::mem::size_of::<RectUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terminite rect bg"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("terminite rect pl"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let capacity: u32 = 4096;
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terminite rect instances"),
+            size: capacity as u64 * std::mem::size_of::<RectInstance>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("terminite rect pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<RectInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 16,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self {
+            pipeline,
+            instance_buffer,
+            uniform_buffer,
+            bind_group,
+            capacity,
+            count: 0,
+        }
+    }
+
+    fn prepare(&mut self, queue: &wgpu::Queue, rects: &[RectInstance], resolution: [f32; 2]) {
+        let count = rects.len().min(self.capacity as usize);
+        self.count = count as u32;
+        if count > 0 {
+            queue.write_buffer(
+                &self.instance_buffer,
+                0,
+                bytemuck::cast_slice(&rects[..count]),
+            );
+        }
+        let uniforms = RectUniforms {
+            resolution,
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    fn render(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
+        pass.draw(0..4, 0..self.count);
+    }
+}
+
+// ─── Grid / terminal ────────────────────────────────────────────────────────
+
 fn compute_grid_size(
     physical_width: f32,
     physical_height: f32,
@@ -180,9 +390,6 @@ fn compute_grid_size(
     (cols.max(2), rows.max(2))
 }
 
-/// Measure the actual monospace cell advance by shaping a single character and
-/// reading its laid-out width. Replaces the old `font_size × 0.6` guess, which
-/// drifted across a line on the font cosmic-text actually picks.
 fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
     let mut probe = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
     probe.set_size(font_system, Some(1000.0), Some(LINE_HEIGHT * 2.0));
@@ -202,8 +409,6 @@ fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
         .unwrap_or(FONT_SIZE * 0.6)
 }
 
-/// Grid dimensions for `Term::new`. `alacritty_terminal` asks for any
-/// `Dimensions` implementor; one of our own keeps the rows/cols intent clear.
 struct GridSize {
     cols: usize,
     rows: usize,
@@ -221,9 +426,6 @@ impl Dimensions for GridSize {
     }
 }
 
-/// A no-op listener for terminal events. In a later slice this becomes the
-/// bridge that wakes the render thread on `Event::Wakeup` and dispatches
-/// title / bell / exit. For now we redraw every frame and read the grid fresh.
 #[derive(Clone)]
 struct Notifier;
 
@@ -231,8 +433,6 @@ impl EventListener for Notifier {
     fn send_event(&self, _event: TermEvent) {}
 }
 
-/// The live terminal: the shared `Term`, the I/O thread driving its PTY, and
-/// the channel used to push bytes back into the shell.
 struct LiveTerm {
     term: Arc<FairMutex<Term<Notifier>>>,
     sender: EventLoopSender,
@@ -252,9 +452,6 @@ impl LiveTerm {
             cell_height: LINE_HEIGHT as u16,
         };
 
-        // Explicit terminal capabilities for the shell. Most modern programs key
-        // off TERM for color depth and feature support; "xterm-256color" is the
-        // safe deterministic value until terminite owns a terminfo entry.
         let mut tty_options = tty::Options::default();
         tty_options
             .env
@@ -269,8 +466,6 @@ impl LiveTerm {
         let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
         let sender = event_loop.channel();
-        // Detach the I/O thread; we keep the channel sender to drive input,
-        // resize, and (eventually) shutdown.
         let _ = event_loop.spawn();
 
         Self {
@@ -280,7 +475,6 @@ impl LiveTerm {
         }
     }
 
-    /// Resize the underlying `Term` and notify the PTY.
     fn resize(&self, cols: usize, rows: usize) {
         {
             let mut term = self.term.lock();
@@ -294,17 +488,13 @@ impl LiveTerm {
         }));
     }
 
-    /// Send bytes to the shell over the PTY.
     fn write(&self, bytes: Vec<u8>) {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
-    /// Snapshot the visible grid as a list of styled runs plus the cursor
-    /// position. Each run merges adjacent cells with identical
-    /// (color, bold, italic). Wide-char spacers are skipped so emoji and CJK
-    /// stay on their natural advance; zero-width marks are appended to the
-    /// base char so combining accents and ZWJ sequences shape together.
-    fn snapshot(&self) -> (Vec<(String, SpanStyle)>, i32, usize) {
+    /// Snapshot the visible grid: styled text runs, background runs, cursor.
+    /// One lock per frame.
+    fn snapshot(&self) -> (Vec<(String, SpanStyle)>, Vec<BgRun>, i32, usize) {
         let term = self.term.lock();
         let grid = term.grid();
         let rows = grid.screen_lines();
@@ -312,8 +502,8 @@ impl LiveTerm {
         let cursor_line = grid.cursor.point.line.0;
         let cursor_col = grid.cursor.point.column.0;
 
-        let bg_color = Color::rgb(10, 10, 15);
-        let mut runs: Vec<(String, SpanStyle)> = Vec::new();
+        let mut text_runs: Vec<(String, SpanStyle)> = Vec::new();
+        let mut bg_runs: Vec<BgRun> = Vec::new();
         let mut current_style = SpanStyle {
             color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
             bold: false,
@@ -323,33 +513,71 @@ impl LiveTerm {
 
         for line in 0..rows {
             let row = &grid[Line(line as i32)];
-            // Trim trailing default-fg blank cells so glyphon doesn't shape
-            // miles of invisible content. A colored or styled blank counts.
+
+            // Trim trailing default-fg, default-bg, no-flag cells.
             let mut last_content = 0;
             for col in (0..cols).rev() {
                 let cell = &row[Column(col)];
-                let is_blank = cell.c == ' '
+                let plain = cell.c == ' '
                     && matches!(cell.fg, AnsiColor::Named(NamedColor::Foreground))
+                    && matches!(cell.bg, AnsiColor::Named(NamedColor::Background))
                     && cell.flags.is_empty();
-                if !is_blank {
+                if !plain {
                     last_content = col + 1;
                     break;
                 }
             }
-            for col in 0..last_content {
+
+            // Background runs walk *all* cells in this row so wide-char spacers
+            // contribute to the bg under an emoji or CJK glyph. Track an open run.
+            let mut bg_open: Option<(usize, Color)> = None; // (start_col, color)
+            let flush_bg = |bg_runs: &mut Vec<BgRun>, open: &mut Option<(usize, Color)>, end: usize| {
+                if let Some((start, color)) = open.take() {
+                    bg_runs.push(BgRun {
+                        line,
+                        start_col: start,
+                        width: end - start,
+                        color,
+                    });
+                }
+            };
+
+            for col in 0..cols {
                 let cell = &row[Column(col)];
-                // Skip the trailing half of a double-width glyph; the wide
-                // glyph itself takes both cells of advance naturally.
-                if cell
+
+                // Background side: every cell contributes.
+                let inverse = cell.flags.contains(Flags::INVERSE);
+                let bg_ansi = if inverse { cell.fg } else { cell.bg };
+                let bg_color_opt = match bg_ansi {
+                    AnsiColor::Named(NamedColor::Background) => None,
+                    other => Some(resolve_color(other)),
+                };
+                match (bg_open, bg_color_opt) {
+                    (Some((_, prev)), Some(new)) if prev == new => {
+                        // Continue the current run.
+                    }
+                    _ => {
+                        flush_bg(&mut bg_runs, &mut bg_open, col);
+                        if let Some(c) = bg_color_opt {
+                            bg_open = Some((col, c));
+                        }
+                    }
+                }
+
+                // Text side: skip spacers, and stop accumulating past last_content.
+                if col >= last_content {
+                    continue;
+                }
+                let is_spacer = cell
                     .flags
-                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
-                {
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+                if is_spacer {
                     continue;
                 }
 
-                let style = cell_style(cell, bg_color);
+                let style = cell_style(cell);
                 if !current_text.is_empty() && style != current_style {
-                    runs.push((std::mem::take(&mut current_text), current_style));
+                    text_runs.push((std::mem::take(&mut current_text), current_style));
                 }
                 if current_text.is_empty() {
                     current_style = style;
@@ -361,25 +589,28 @@ impl LiveTerm {
                     }
                 }
             }
+            // Flush any open bg run at end-of-row.
+            flush_bg(&mut bg_runs, &mut bg_open, cols);
             current_text.push('\n');
         }
         if !current_text.is_empty() {
-            runs.push((current_text, current_style));
+            text_runs.push((current_text, current_style));
         }
 
-        (runs, cursor_line, cursor_col)
+        (text_runs, bg_runs, cursor_line, cursor_col)
     }
 }
 
-/// Translate a cell into the visual style its glyphs should render with.
-fn cell_style(cell: &alacritty_terminal::term::cell::Cell, bg_color: Color) -> SpanStyle {
-    let mut color = resolve_color(cell.fg);
+/// Translate a cell into its text visual style, honoring inverse, dim, hidden.
+fn cell_style(cell: &Cell) -> SpanStyle {
+    let inverse = cell.flags.contains(Flags::INVERSE);
+    let fg_ansi = if inverse { cell.bg } else { cell.fg };
+    let mut color = resolve_color(fg_ansi);
     if cell.flags.contains(Flags::DIM) {
         color = dim_color(color);
     }
     if cell.flags.contains(Flags::HIDDEN) {
-        // Effectively invisible: paint with the background color.
-        color = bg_color;
+        color = Color::rgb(BACKGROUND_RGB.0, BACKGROUND_RGB.1, BACKGROUND_RGB.2);
     }
     SpanStyle {
         color,
@@ -388,13 +619,10 @@ fn cell_style(cell: &alacritty_terminal::term::cell::Cell, bg_color: Color) -> S
     }
 }
 
-/// Translate a winit key press into the bytes a shell expects on stdin.
 fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
     if event.state != ElementState::Pressed {
         return None;
     }
-    // Ctrl + letter — translate to the corresponding control byte (Ctrl-C = 3,
-    // Ctrl-D = 4, …). Driven by the logical key so keyboard layout is honored.
     if modifiers.control_key() {
         if let Key::Character(text) = &event.logical_key {
             let mut chars = text.chars();
@@ -424,7 +652,8 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
     }
 }
 
-/// Everything needed to put pixels on the window.
+// ─── Renderer ───────────────────────────────────────────────────────────────
+
 struct Renderer {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -439,15 +668,12 @@ struct Renderer {
     text_renderer: TextRenderer,
     text_buffer: Buffer,
     cursor_buffer: Buffer,
-    /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
-    /// terminal hasn't changed between frames.
+    rect_renderer: RectRenderer,
     last_snapshot: Vec<(String, SpanStyle)>,
-    /// Measured monospace cell advance in physical pixels.
     cell_advance: f32,
 
     live_term: LiveTerm,
 
-    // Window last: winit/wgpu want it dropped after the surface.
     window: Arc<Window>,
 }
 
@@ -494,8 +720,6 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut font_system = FontSystem::new();
-        // Measure the real cell advance from the font cosmic-text picks. Every
-        // bit of cell/cursor math downstream uses this number.
         let cell_advance = measure_cell_advance(&mut font_system);
 
         let swash_cache = SwashCache::new();
@@ -504,6 +728,7 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let rect_renderer = RectRenderer::new(&device, format);
 
         let physical_width = (width as f64 * scale_factor) as f32;
         let physical_height = (height as f64 * scale_factor) as f32;
@@ -519,8 +744,6 @@ impl Renderer {
         );
         text_buffer.shape_until_scroll(&mut font_system, false);
 
-        // Cursor: a separate buffer holding a single filled block at a slightly
-        // larger font size so the cursor wraps the character it's on top of.
         let mut cursor_buffer = Buffer::new(
             &mut font_system,
             Metrics::new(CURSOR_FONT_SIZE, CURSOR_LINE_HEIGHT),
@@ -539,7 +762,6 @@ impl Renderer {
         );
         cursor_buffer.shape_until_scroll(&mut font_system, false);
 
-        // The grid sized for this window, using the measured advance.
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
         let live_term = LiveTerm::new(cols, rows, cell_advance);
 
@@ -556,6 +778,7 @@ impl Renderer {
             text_renderer,
             text_buffer,
             cursor_buffer,
+            rect_renderer,
             last_snapshot: Vec::new(),
             cell_advance,
             live_term,
@@ -581,16 +804,13 @@ impl Renderer {
         self.text_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
-        // Recompute grid dimensions and push them through to Term + PTY.
         let (cols, rows) = compute_grid_size(physical_width, physical_height, self.cell_advance);
         self.live_term.resize(cols, rows);
-        // Invalidate the snapshot cache so the next frame re-shapes the buffer
-        // at the new size.
         self.last_snapshot.clear();
     }
 
     fn render(&mut self) {
-        let (snapshot, cursor_line, cursor_col) = self.live_term.snapshot();
+        let (snapshot, bg_runs, cursor_line, cursor_col) = self.live_term.snapshot();
         if snapshot != self.last_snapshot {
             let default_attrs = Attrs::new().family(Family::Monospace);
             self.text_buffer.set_rich_text(
@@ -622,9 +842,32 @@ impl Renderer {
             },
         );
 
+        // Convert bg_runs (cell coords) into pixel-space RectInstances.
+        let cell_advance = self.cell_advance;
+        let rect_instances: Vec<RectInstance> = bg_runs
+            .iter()
+            .map(|run| {
+                let x = TEXT_LEFT + run.start_col as f32 * cell_advance;
+                let y = TEXT_TOP + run.line as f32 * LINE_HEIGHT;
+                let w = run.width as f32 * cell_advance;
+                let h = LINE_HEIGHT;
+                RectInstance {
+                    rect: [x, y, w, h],
+                    color: color_to_floats(run.color),
+                }
+            })
+            .collect();
+        self.rect_renderer.prepare(
+            &self.queue,
+            &rect_instances,
+            [
+                self.surface_config.width as f32,
+                self.surface_config.height as f32,
+            ],
+        );
+
         let cursor_left = TEXT_LEFT + (cursor_col as f32) * self.cell_advance + CURSOR_X_OFFSET;
-        let cursor_top =
-            TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
+        let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
         let bounds = TextBounds {
             left: 0,
             top: 0,
@@ -716,6 +959,8 @@ impl Renderer {
                 multiview_mask: None,
             });
 
+            // Backgrounds first, then text on top.
+            self.rect_renderer.render(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("terminite: text render failed");
@@ -727,7 +972,6 @@ impl Renderer {
     }
 }
 
-/// The terminite application.
 #[derive(Default)]
 struct Terminite {
     renderer: Option<Renderer>,
