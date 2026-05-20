@@ -319,23 +319,21 @@ impl Renderer {
 
     // ── Mouse / keyboard input routing ────────────────────────────────────
 
-    fn pixel_to_cell(&self, px: f32, py: f32) -> (usize, usize) {
-        let cx = (px - TEXT_LEFT).max(0.0);
-        let cy = (py - TEXT_TOP).max(0.0);
-        let col = (cx / self.cell_advance) as usize;
-        let line = (cy / LINE_HEIGHT) as usize;
-        (
-            line.min(self.grid_rows.saturating_sub(1)),
-            col.min(self.grid_cols.saturating_sub(1)),
-        )
-    }
-
     /// Convert a mouse pixel position into an absolute (Line, Column) using
     /// the current display_offset. Used for both selection start and extend.
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
-        let (vl, col) = self.pixel_to_cell(x, y);
+        let cx = (x - TEXT_LEFT).max(0.0);
+        let col = ((cx / self.cell_advance) as usize)
+            .min(self.grid_cols.saturating_sub(1));
+        // Same pixel_offset correction as pixel_to_cell, but with a signed
+        // floor so a click just inside the top of viewport while the buffer
+        // is shifted down resolves to row -1 (the extra row above the
+        // viewport) when appropriate.
+        let cy = (y - TEXT_TOP - self.pixel_offset) / LINE_HEIGHT;
+        let vl = cy.floor() as i32;
+        let vl = vl.max(-1).min(self.grid_rows as i32 - 1);
         let display_offset = self.live_term.offset_and_history().0 as i32;
-        (vl as i32 - display_offset, col)
+        (vl - display_offset, col)
     }
 
     pub fn mouse_moved(&mut self, x: f32, y: f32, modifiers: ModifiersState) {
@@ -719,11 +717,17 @@ impl Renderer {
     /// 1-indexed (col, row) inside the visible viewport, for mouse-reporting
     /// protocols. Returns `None` if the pointer is outside the text area.
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
-        if x < TEXT_LEFT || y < TEXT_TOP {
+        if x < TEXT_LEFT {
+            return None;
+        }
+        // Match pixel_to_cell's pixel_offset correction so the reported cell
+        // is the one the user visually clicked on, not the natural-grid cell.
+        let row_f = (y - TEXT_TOP - self.pixel_offset) / LINE_HEIGHT;
+        if row_f < 0.0 {
             return None;
         }
         let col = ((x - TEXT_LEFT) / self.cell_advance) as u32 + 1;
-        let row = ((y - TEXT_TOP) / LINE_HEIGHT) as u32 + 1;
+        let row = row_f as u32 + 1;
         if col as usize > self.grid_cols || row as usize > self.grid_rows {
             return None;
         }
@@ -858,7 +862,13 @@ impl Renderer {
         // Cursor last in the below layer so it sits on top of selection and bgs.
         // Shape (CSI 0–6 q): block / underline / beam, plus hollow + hidden.
         // Blink phase: drawn only while window has focus and blink is enabled.
-        let blink_on = if cursor_blinking && self.focused {
+        // Default to blink-on whenever the window is focused. alacritty's
+        // CursorStyle.blinking is false unless the shell explicitly sends
+        // `\e[1/3/5 q`; respecting that strictly leaves the cursor frozen
+        // in default zsh/bash, which is not the 2026 expectation. We always
+        // blink when focused for v1; a config flag can opt out later.
+        let _ = cursor_blinking;
+        let blink_on = if self.focused {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             elapsed_ms % CURSOR_BLINK_PERIOD_MS < CURSOR_BLINK_PERIOD_MS / 2
         } else {
@@ -909,7 +919,7 @@ impl Renderer {
 
         // Surface the next blink phase change as a deadline so the main
         // loop's WaitUntil wakes us — no per-frame thread spawn.
-        self.next_blink_deadline = if cursor_blinking && self.focused {
+        self.next_blink_deadline = if self.focused {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             let half = CURSOR_BLINK_PERIOD_MS / 2;
             let into_half = elapsed_ms % half;
