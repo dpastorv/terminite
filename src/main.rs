@@ -1,8 +1,11 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! Foreground colors now flow from the cell grid into glyphon as rich-text
-//! spans. Backgrounds and styles (bold/italic/underline) follow when the rect
-//! renderer arrives — they need pixel boxes, not glyph runs.
+//! Text-pass: foreground color, bold, italic, dim, hidden, wide characters
+//! (emoji and CJK), zero-width combining marks, the 256-color cube, and the
+//! dim ANSI variants all flow from `alacritty_terminal`'s cell grid into
+//! glyphon as rich-text spans. Still missing: background colors, inverse,
+//! underline, strikethrough — they need pixel rectangles, not glyph runs, so
+//! they wait on the rect renderer.
 
 use std::sync::Arc;
 
@@ -11,12 +14,13 @@ use alacritty_terminal::event_loop::{EventLoop as TermEventLoop, EventLoopSender
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -82,6 +86,12 @@ const PALETTE_16: [(u8, u8, u8); 16] = [
 
 const DEFAULT_FG: (u8, u8, u8) = (220, 220, 220);
 
+/// Halve an RGB triple. Used to derive the dim ANSI named colors and the DIM
+/// cell flag at a single, consistent factor.
+const fn half(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
+    (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
+}
+
 /// Map a vte ANSI color into a glyphon Color through terminite's palette.
 fn resolve_color(color: AnsiColor) -> Color {
     let (r, g, b) = match color {
@@ -110,9 +120,19 @@ fn named_rgb(name: NamedColor) -> (u8, u8, u8) {
         NamedColor::BrightMagenta => PALETTE_16[13],
         NamedColor::BrightCyan => PALETTE_16[14],
         NamedColor::BrightWhite => PALETTE_16[15],
+        NamedColor::DimBlack => half(PALETTE_16[0]),
+        NamedColor::DimRed => half(PALETTE_16[1]),
+        NamedColor::DimGreen => half(PALETTE_16[2]),
+        NamedColor::DimYellow => half(PALETTE_16[3]),
+        NamedColor::DimBlue => half(PALETTE_16[4]),
+        NamedColor::DimMagenta => half(PALETTE_16[5]),
+        NamedColor::DimCyan => half(PALETTE_16[6]),
+        NamedColor::DimWhite => half(PALETTE_16[7]),
+        NamedColor::DimForeground => half(DEFAULT_FG),
+        NamedColor::BrightForeground => (255, 255, 255),
         NamedColor::Background => (10, 10, 15),
         NamedColor::Cursor => (255, 200, 80),
-        // Foreground, dim variants, bright/dim foreground, and anything new.
+        // Foreground and any new variants — soft default.
         _ => DEFAULT_FG,
     }
 }
@@ -130,6 +150,20 @@ fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
     // Grayscale ramp 232..=255.
     let level = 8 + (idx - 232) * 10;
     (level, level, level)
+}
+
+/// Dim a glyphon color by halving each channel. Used for the cell DIM flag.
+fn dim_color(c: Color) -> Color {
+    Color::rgba(c.r() / 2, c.g() / 2, c.b() / 2, c.a())
+}
+
+/// Visual style of a contiguous run of cells. Two cells join the same run only
+/// when every field matches, so bold/italic/color boundaries break the run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SpanStyle {
+    color: Color,
+    bold: bool,
+    italic: bool,
 }
 
 /// Compute how many columns and rows of monospace cells fit in a surface of
@@ -217,7 +251,19 @@ impl LiveTerm {
             cell_width: cell_advance as u16,
             cell_height: LINE_HEIGHT as u16,
         };
-        let pty = tty::new(&tty::Options::default(), window_size, 0)
+
+        // Explicit terminal capabilities for the shell. Most modern programs key
+        // off TERM for color depth and feature support; "xterm-256color" is the
+        // safe deterministic value until terminite owns a terminfo entry.
+        let mut tty_options = tty::Options::default();
+        tty_options
+            .env
+            .insert("TERM".to_string(), "xterm-256color".to_string());
+        tty_options
+            .env
+            .insert("COLORTERM".to_string(), "truecolor".to_string());
+
+        let pty = tty::new(&tty_options, window_size, 0)
             .expect("terminite: failed to open the PTY");
 
         let event_loop = TermEventLoop::new(term.clone(), Notifier, pty, false, false)
@@ -253,10 +299,12 @@ impl LiveTerm {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
-    /// Snapshot the visible grid as a list of color runs, plus the cursor
-    /// position. Adjacent cells with the same foreground color are merged
-    /// into one run so glyphon shapes them as a single span.
-    fn snapshot(&self) -> (Vec<(String, Color)>, i32, usize) {
+    /// Snapshot the visible grid as a list of styled runs plus the cursor
+    /// position. Each run merges adjacent cells with identical
+    /// (color, bold, italic). Wide-char spacers are skipped so emoji and CJK
+    /// stay on their natural advance; zero-width marks are appended to the
+    /// base char so combining accents and ZWJ sequences shape together.
+    fn snapshot(&self) -> (Vec<(String, SpanStyle)>, i32, usize) {
         let term = self.term.lock();
         let grid = term.grid();
         let rows = grid.screen_lines();
@@ -264,21 +312,25 @@ impl LiveTerm {
         let cursor_line = grid.cursor.point.line.0;
         let cursor_col = grid.cursor.point.column.0;
 
-        let default_color = resolve_color(AnsiColor::Named(NamedColor::Foreground));
-        let mut runs: Vec<(String, Color)> = Vec::new();
-        let mut current_color = default_color;
+        let bg_color = Color::rgb(10, 10, 15);
+        let mut runs: Vec<(String, SpanStyle)> = Vec::new();
+        let mut current_style = SpanStyle {
+            color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+            bold: false,
+            italic: false,
+        };
         let mut current_text = String::new();
 
         for line in 0..rows {
             let row = &grid[Line(line as i32)];
-            // Trim trailing default-fg spaces so glyphon doesn't shape miles of
-            // invisible cells. A non-default-fg space (a colored block) counts
-            // as content and is kept.
+            // Trim trailing default-fg blank cells so glyphon doesn't shape
+            // miles of invisible content. A colored or styled blank counts.
             let mut last_content = 0;
             for col in (0..cols).rev() {
                 let cell = &row[Column(col)];
                 let is_blank = cell.c == ' '
-                    && matches!(cell.fg, AnsiColor::Named(NamedColor::Foreground));
+                    && matches!(cell.fg, AnsiColor::Named(NamedColor::Foreground))
+                    && cell.flags.is_empty();
                 if !is_blank {
                     last_content = col + 1;
                     break;
@@ -286,22 +338,53 @@ impl LiveTerm {
             }
             for col in 0..last_content {
                 let cell = &row[Column(col)];
-                let color = resolve_color(cell.fg);
-                if !current_text.is_empty() && color != current_color {
-                    runs.push((std::mem::take(&mut current_text), current_color));
+                // Skip the trailing half of a double-width glyph; the wide
+                // glyph itself takes both cells of advance naturally.
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+
+                let style = cell_style(cell, bg_color);
+                if !current_text.is_empty() && style != current_style {
+                    runs.push((std::mem::take(&mut current_text), current_style));
                 }
                 if current_text.is_empty() {
-                    current_color = color;
+                    current_style = style;
                 }
                 current_text.push(cell.c);
+                if let Some(zw) = cell.zerowidth() {
+                    for ch in zw {
+                        current_text.push(*ch);
+                    }
+                }
             }
             current_text.push('\n');
         }
         if !current_text.is_empty() {
-            runs.push((current_text, current_color));
+            runs.push((current_text, current_style));
         }
 
         (runs, cursor_line, cursor_col)
+    }
+}
+
+/// Translate a cell into the visual style its glyphs should render with.
+fn cell_style(cell: &alacritty_terminal::term::cell::Cell, bg_color: Color) -> SpanStyle {
+    let mut color = resolve_color(cell.fg);
+    if cell.flags.contains(Flags::DIM) {
+        color = dim_color(color);
+    }
+    if cell.flags.contains(Flags::HIDDEN) {
+        // Effectively invisible: paint with the background color.
+        color = bg_color;
+    }
+    SpanStyle {
+        color,
+        bold: cell.flags.contains(Flags::BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
     }
 }
 
@@ -358,7 +441,7 @@ struct Renderer {
     cursor_buffer: Buffer,
     /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
     /// terminal hasn't changed between frames.
-    last_snapshot: Vec<(String, Color)>,
+    last_snapshot: Vec<(String, SpanStyle)>,
     /// Measured monospace cell advance in physical pixels.
     cell_advance: f32,
 
@@ -512,9 +595,16 @@ impl Renderer {
             let default_attrs = Attrs::new().family(Family::Monospace);
             self.text_buffer.set_rich_text(
                 &mut self.font_system,
-                snapshot
-                    .iter()
-                    .map(|(text, color)| (text.as_str(), default_attrs.clone().color(*color))),
+                snapshot.iter().map(|(text, style)| {
+                    let mut attrs = default_attrs.clone().color(style.color);
+                    if style.bold {
+                        attrs = attrs.weight(Weight::BOLD);
+                    }
+                    if style.italic {
+                        attrs = attrs.style(Style::Italic);
+                    }
+                    (text.as_str(), attrs)
+                }),
                 &default_attrs,
                 Shaping::Advanced,
                 None,
