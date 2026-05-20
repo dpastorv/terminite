@@ -30,9 +30,11 @@ pub struct SpanStyle {
 }
 
 /// A horizontal run of cells sharing a background color, in cell coordinates.
+/// `line` is signed so -1 can represent the "extra row above the viewport"
+/// used for pixel-smooth scrolling.
 #[derive(Clone, Copy, PartialEq)]
 pub struct BgRun {
-    pub line: usize,
+    pub line: i32,
     pub start_col: usize,
     pub width: usize,
     pub color: Color,
@@ -48,7 +50,7 @@ pub enum DecorationKind {
 #[derive(Clone, Copy, PartialEq)]
 pub struct DecorationRun {
     pub kind: DecorationKind,
-    pub line: usize,
+    pub line: i32,
     pub start_col: usize,
     pub width: usize,
     pub color: Color,
@@ -61,6 +63,11 @@ pub struct Snapshot {
     pub deco_runs: Vec<DecorationRun>,
     pub cursor_line: i32,
     pub cursor_col: usize,
+    /// True if the snapshot's first row of text is the "extra row above the
+    /// viewport" used for pixel-smooth scrolling. False when no scrollback is
+    /// available above the current top (history exhausted or display_offset 0
+    /// with empty history).
+    pub has_extra_row: bool,
 }
 
 #[derive(Debug)]
@@ -162,6 +169,13 @@ impl LiveTerm {
         term.scroll_display(scroll);
     }
 
+    /// Current `(display_offset, history_size)` — used by the renderer to
+    /// clamp the sub-line pixel offset to the available scroll range.
+    pub fn offset_and_history(&self) -> (usize, usize) {
+        let term = self.term.lock();
+        (term.grid().display_offset(), term.grid().history_size())
+    }
+
     /// Extract the text from a (line, col) range — start..=end inclusive on
     /// both endpoints, in visible-viewport coordinates. Wide-char spacers are
     /// skipped; zero-width combining marks are appended to their base
@@ -228,8 +242,17 @@ impl LiveTerm {
         let rows = grid.screen_lines();
         let cols = grid.columns();
         let display_offset = grid.display_offset() as i32;
+        let history_size = grid.history_size() as i32;
         let cursor_line = grid.cursor.point.line.0 + display_offset;
         let cursor_col = grid.cursor.point.column.0;
+
+        // We always want the renderer to be able to shift the text by a
+        // sub-line pixel offset. That requires one *extra* row above the
+        // visible viewport — its bottom slides into view as pixel_offset
+        // grows. It's only safe to fetch when there's history beyond the
+        // current scroll position.
+        let has_extra_row = display_offset + 1 <= history_size;
+        let start_vis: i32 = if has_extra_row { -1 } else { 0 };
 
         let mut text_runs: Vec<(String, SpanStyle)> = Vec::new();
         let mut bg_runs: Vec<BgRun> = Vec::new();
@@ -241,8 +264,8 @@ impl LiveTerm {
         };
         let mut current_text = String::new();
 
-        for line in 0..rows {
-            let row = &grid[Line(line as i32 - display_offset)];
+        for line in start_vis..(rows as i32) {
+            let row = &grid[Line(line - display_offset)];
 
             // Trim trailing plain cells from the text side.
             let mut last_content = 0;
@@ -278,7 +301,7 @@ impl LiveTerm {
                     _ => {
                         if let Some((start, color)) = bg_open.take() {
                             bg_runs.push(BgRun {
-                                line,
+                                line: line as i32,
                                 start_col: start,
                                 width: col - start,
                                 color,
@@ -311,7 +334,7 @@ impl LiveTerm {
                                 } else {
                                     DecorationKind::Underline
                                 },
-                                line,
+                                line: line as i32,
                                 start_col: start,
                                 width: col - start,
                                 color,
@@ -334,7 +357,7 @@ impl LiveTerm {
                         if let Some((start, color)) = strike_open.take() {
                             deco_runs.push(DecorationRun {
                                 kind: DecorationKind::Strikeout,
-                                line,
+                                line: line as i32,
                                 start_col: start,
                                 width: col - start,
                                 color,
@@ -373,7 +396,7 @@ impl LiveTerm {
             // Flush open runs at end-of-row.
             if let Some((start, color)) = bg_open.take() {
                 bg_runs.push(BgRun {
-                    line,
+                    line: line as i32,
                     start_col: start,
                     width: cols - start,
                     color,
@@ -386,7 +409,7 @@ impl LiveTerm {
                     } else {
                         DecorationKind::Underline
                     },
-                    line,
+                    line: line as i32,
                     start_col: start,
                     width: cols - start,
                     color,
@@ -395,7 +418,7 @@ impl LiveTerm {
             if let Some((start, color)) = strike_open.take() {
                 deco_runs.push(DecorationRun {
                     kind: DecorationKind::Strikeout,
-                    line,
+                    line: line as i32,
                     start_col: start,
                     width: cols - start,
                     color,
@@ -413,6 +436,7 @@ impl LiveTerm {
             deco_runs,
             cursor_line,
             cursor_col,
+            has_extra_row,
         }
     }
 }

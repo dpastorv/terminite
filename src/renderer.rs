@@ -96,10 +96,11 @@ pub struct Renderer {
     selection: Option<Selection>,
     dragging: bool,
     clipboard: Option<Clipboard>,
-    /// Accumulated fractional scroll lines from trackpad PixelDelta events.
-    /// macOS trackpads deliver pixels per gesture frame, often <1 line each;
-    /// we add them up and flush whole lines into the term.
-    scroll_acc: f32,
+    /// Sub-line pixel offset for smooth scrolling. Always in [0, LINE_HEIGHT).
+    /// Whole lines are popped into `display_offset` as soon as the
+    /// accumulator crosses a line; the remainder is rendered as a vertical
+    /// shift so the viewport slides instead of snapping.
+    pixel_offset: f32,
 
     pub live_term: LiveTerm,
 
@@ -166,6 +167,11 @@ impl Renderer {
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
+        // Force every glyph to exactly one cell wide. Without this, cosmic-text
+        // uses each glyph's natural advance, which drifts slightly even within
+        // a monospace font and breaks column alignment (visible in `ls`,
+        // tables, ASCII art).
+        text_buffer.set_monospace_width(&mut font_system, Some(cell_advance));
         text_buffer.set_text(
             &mut font_system,
             "",
@@ -204,7 +210,7 @@ impl Renderer {
             selection: None,
             dragging: false,
             clipboard,
-            scroll_acc: 0.0,
+            pixel_offset: 0.0,
             live_term,
             window,
         }
@@ -282,20 +288,35 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        // LineDelta is one click of a real wheel; convention is ~3 lines per
-        // click. PixelDelta is trackpad pixels per gesture frame; convert to
-        // line-fractions and accumulate.
-        let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 3.0,
-            MouseScrollDelta::PixelDelta(p) => (p.y as f32) / LINE_HEIGHT,
+        // Work in physical pixels so the renderer can shift by the remainder
+        // for pixel-smooth scrolling. LineDelta is real-wheel "clicks" (~3
+        // lines each, scaled to pixels); PixelDelta is trackpad pixels.
+        let pixels = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0 * LINE_HEIGHT,
+            MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        self.scroll_acc += lines;
-        let whole = self.scroll_acc.trunc() as i32;
+        self.pixel_offset += pixels;
+
+        // Pop whole lines into the term; the remainder stays as a sub-line
+        // pixel shift used at render time. `floor` keeps the remainder in
+        // [0, LINE_HEIGHT) for any input direction.
+        let whole = (self.pixel_offset / LINE_HEIGHT).floor() as i32;
         if whole != 0 {
-            self.scroll_acc -= whole as f32;
+            self.pixel_offset -= whole as f32 * LINE_HEIGHT;
             self.live_term.scroll(TermScroll::Delta(whole));
-            self.window.request_redraw();
         }
+
+        // Clamp pixel_offset to the actually-available scroll range.
+        let (offset, history) = self.live_term.offset_and_history();
+        if offset >= history {
+            // Scrolled to the top of history; no more room upward.
+            self.pixel_offset = 0.0;
+        } else if offset == 0 && self.pixel_offset < 0.0 {
+            // At live bottom; can't go below.
+            self.pixel_offset = 0.0;
+        }
+
+        self.window.request_redraw();
     }
 
     pub fn scroll_page(&self, up: bool) {
@@ -339,6 +360,7 @@ impl Renderer {
             deco_runs,
             cursor_line,
             cursor_col,
+            has_extra_row,
         } = self.live_term.snapshot();
 
         if text_runs != self.last_text_runs {
@@ -373,13 +395,15 @@ impl Renderer {
         );
 
         let cell_advance = self.cell_advance;
+        // Pixel-smooth scroll: every visible Y origin is shifted by this much.
+        let y_shift = self.pixel_offset;
         let mut below: Vec<RectInstance> = Vec::with_capacity(bg_runs.len() + 8);
 
         for run in &bg_runs {
             below.push(RectInstance {
                 rect: [
                     TEXT_LEFT + run.start_col as f32 * cell_advance,
-                    TEXT_TOP + run.line as f32 * LINE_HEIGHT,
+                    TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift,
                     run.width as f32 * cell_advance,
                     LINE_HEIGHT,
                 ],
@@ -404,7 +428,7 @@ impl Renderer {
                     below.push(RectInstance {
                         rect: [
                             TEXT_LEFT + col_start as f32 * cell_advance,
-                            TEXT_TOP + line as f32 * LINE_HEIGHT,
+                            TEXT_TOP + line as f32 * LINE_HEIGHT + y_shift,
                             (col_end - col_start) as f32 * cell_advance,
                             LINE_HEIGHT,
                         ],
@@ -418,7 +442,7 @@ impl Renderer {
         below.push(RectInstance {
             rect: [
                 TEXT_LEFT + cursor_col as f32 * cell_advance - CURSOR_PAD_X,
-                TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT - CURSOR_PAD_Y,
+                TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + y_shift - CURSOR_PAD_Y,
                 cell_advance + 2.0 * CURSOR_PAD_X,
                 LINE_HEIGHT + 2.0 * CURSOR_PAD_Y,
             ],
@@ -429,7 +453,7 @@ impl Renderer {
         for run in &deco_runs {
             let x = TEXT_LEFT + run.start_col as f32 * cell_advance;
             let w = run.width as f32 * cell_advance;
-            let line_y = TEXT_TOP + run.line as f32 * LINE_HEIGHT;
+            let line_y = TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift;
             let (y, h) = match run.kind {
                 DecorationKind::Underline | DecorationKind::DoubleUnderline => (
                     line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
@@ -467,6 +491,16 @@ impl Renderer {
             bottom: self.surface_config.height as i32,
         };
 
+        // text_runs starts with the extra row above the viewport (when
+        // available), so the buffer's top sits one line up; the y_shift
+        // slides it down into view as pixel_offset grows. When there's no
+        // extra row, the buffer starts at the normal top.
+        let text_top = if has_extra_row {
+            TEXT_TOP - LINE_HEIGHT + y_shift
+        } else {
+            TEXT_TOP + y_shift
+        };
+
         self.text_renderer
             .prepare(
                 &self.device,
@@ -477,7 +511,7 @@ impl Renderer {
                 [TextArea {
                     buffer: &self.text_buffer,
                     left: TEXT_LEFT,
-                    top: TEXT_TOP,
+                    top: text_top,
                     scale: 1.0,
                     bounds,
                     default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
