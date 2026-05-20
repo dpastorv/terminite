@@ -62,6 +62,29 @@ friction.
 
 ## Live log
 
+### 2026-05-20 — Spawn-per-render melted the laptop
+
+- **What:** Phase 1 Bundle 1 wired cursor blink, drag-edge auto-scroll, and
+  the visual bell flash by scheduling each next wake with a fresh
+  `std::thread::spawn(|| { sleep(d); send(Wakeup); })` *inside* `render()`.
+  Each OS thread on macOS carries an ~8 MB stack by default. With a busy
+  shell driving renders at 60+ Hz, terminite leaked thread stacks at
+  hundreds of MB per second — a second debugging session caught it at
+  ~76 GB RSS and the kernel watchdog panicked the Mac before the OOM
+  killer could act.
+- **Why it hurt:** Not just a leak. A *hostile-host* leak. terminite didn't
+  crash itself; it took the whole machine down with it. The partnership
+  stopped because the human's laptop was unusable.
+- **Who:** Both. The human lost their session and ate a reboot; the AI
+  shipped the bug and is now writing this entry.
+- **Points at:** The native scheduler is right there. `ControlFlow::WaitUntil
+  (deadline)` is one line, zero threads. The lesson generalizes: any
+  "schedule next thing in N ms" inside a hot loop is a thread leak in
+  disguise — let the event loop's own clock do it. Plus defense-in-depth:
+  an RSS kill-switch (4 GB default, `TERMINITE_RSS_LIMIT_GB` to override,
+  `0` to disable) so the *next* runaway is bounded long before the watchdog
+  is.
+
 ### 2026-05-20 — Mouse-wheel scroll did nothing on a trackpad
 
 - **What:** Initial scrollback implementation cast `f32` scroll lines (from
