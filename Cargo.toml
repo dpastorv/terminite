@@ -8,6 +8,7 @@ alacritty_terminal = "0.26.0"
 arboard = "3.6.1"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 glyphon = "0.11.0"
+libc = "0.2"
 pollster = "0.4.0"
 wgpu = "29.0.3"
 winit = "0.30.13"

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, KeyEvent, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event::{ElementState, Ime, KeyEvent, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
@@ -96,6 +96,29 @@ struct Terminite {
 }
 
 impl ApplicationHandler<UserEvent> for Terminite {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        // A WaitUntil deadline came due — request a redraw so the renderer
+        // can advance the bell flash, cursor blink, or autoscroll tick.
+        if matches!(cause, StartCause::ResumeTimeReached { .. })
+            && let Some(r) = self.renderer.as_ref()
+        {
+            r.window.request_redraw();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drive the renderer's pending deadlines via the native scheduler
+        // instead of detached threads — the latter pinned the machine on
+        // bell storms (2026-05-20 watchdog panic).
+        let flow = self
+            .renderer
+            .as_ref()
+            .and_then(|r| r.next_wakeup())
+            .map(ControlFlow::WaitUntil)
+            .unwrap_or(ControlFlow::Wait);
+        event_loop.set_control_flow(flow);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;

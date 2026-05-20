@@ -49,6 +49,11 @@ const AUTOSCROLL_TICK_MS: u64 = 33;
 /// Pixel margin past the viewport edge that triggers auto-scroll.
 const AUTOSCROLL_MARGIN_PX: f32 = 8.0;
 
+/// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
+/// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
+/// ~76 GB). Override with `TERMINITE_RSS_LIMIT_GB`; set to `0` to disable.
+const DEFAULT_RSS_LIMIT_GB: u64 = 4;
+
 /// Selection coordinates are stored in alacritty's *absolute* `Line`
 /// coordinate (viewport row minus the current display_offset). That way the
 /// selection tracks the underlying grid content as the user scrolls — a
@@ -145,9 +150,17 @@ pub struct Renderer {
     /// In-flight IME preedit text rendered near the cursor.
     preedit: String,
 
-    /// Used to wake the event loop on bell expiry, blink phase changes, and
-    /// the auto-scroll ticker.
-    proxy: EventLoopProxy<UserEvent>,
+    // Deadlines surfaced via `next_wakeup()` to the main loop's
+    // `ControlFlow::WaitUntil(...)`. We used to spawn a fresh OS thread per
+    // bell / blink / autoscroll tick; with `\a`-spam the spawn rate outran
+    // the kernel's thread-destruction rate and pinned the machine (the
+    // 2026-05-20 watchdog panic). Deadlines drive everything now.
+    next_blink_deadline: Option<Instant>,
+    next_autoscroll_deadline: Option<Instant>,
+
+    /// Peak-RSS kill-switch threshold in bytes; `0` disables. Checked once
+    /// per frame in `render()`.
+    rss_kill_bytes: u64,
 
     pub live_term: LiveTerm,
 
@@ -156,7 +169,6 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>, proxy: EventLoopProxy<UserEvent>) -> Self {
-        let proxy_for_term = proxy.clone();
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -234,7 +246,7 @@ impl Renderer {
         text_buffer.shape_until_scroll(&mut font_system, false);
 
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
-        let live_term = LiveTerm::new(cols, rows, cell_advance, proxy_for_term);
+        let live_term = LiveTerm::new(cols, rows, cell_advance, proxy);
 
         // Clipboard is optional; it's possible the platform refuses to give us
         // one (sandboxing, missing service). Copy/paste then become no-ops.
@@ -270,7 +282,9 @@ impl Renderer {
             start_time: Instant::now(),
             autoscroll_dir: None,
             preedit: String::new(),
-            proxy,
+            next_blink_deadline: None,
+            next_autoscroll_deadline: None,
+            rss_kill_bytes: rss_kill_threshold_bytes(),
             live_term,
             window,
         }
@@ -383,8 +397,14 @@ impl Renderer {
             };
             let was_off = self.autoscroll_dir.is_none();
             self.autoscroll_dir = new_dir;
-            if new_dir.is_some() && was_off {
-                self.schedule_autoscroll_tick();
+            match new_dir {
+                Some(_) if was_off => {
+                    self.next_autoscroll_deadline =
+                        Some(Instant::now() + Duration::from_millis(AUTOSCROLL_TICK_MS));
+                    self.window.request_redraw();
+                }
+                None => self.next_autoscroll_deadline = None,
+                _ => {}
             }
         }
     }
@@ -481,6 +501,7 @@ impl Renderer {
 
         self.dragging = false;
         self.autoscroll_dir = None;
+        self.next_autoscroll_deadline = None;
         if let Some(sel) = self.selection.as_ref() {
             if sel.is_empty() {
                 self.selection = None;
@@ -646,13 +667,29 @@ impl Renderer {
     }
 
     pub fn ring_bell(&mut self) {
-        self.bell_flash_until = Some(Instant::now() + BELL_DURATION);
-        self.window.request_redraw();
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(BELL_DURATION + Duration::from_millis(16));
-            let _ = proxy.send_event(UserEvent::Wakeup);
-        });
+        // Coalesce: a hostile `\a` storm just extends the deadline; we don't
+        // touch the renderer state otherwise and we don't re-request a
+        // redraw if the flash is already on screen. The expiry render is
+        // scheduled via the main loop's `WaitUntil(next_wakeup())`.
+        let now = Instant::now();
+        let was_active = self.bell_flash_until.is_some_and(|t| t > now);
+        self.bell_flash_until = Some(now + BELL_DURATION);
+        if !was_active {
+            self.window.request_redraw();
+        }
+    }
+
+    /// Earliest pending deadline the main loop should wake on
+    /// (`ControlFlow::WaitUntil`). `None` = sleep until the next real event.
+    pub fn next_wakeup(&self) -> Option<Instant> {
+        [
+            self.bell_flash_until,
+            self.next_blink_deadline,
+            self.next_autoscroll_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn focus_changed(&mut self, focused: bool) {
@@ -693,20 +730,14 @@ impl Renderer {
         Some((col, row))
     }
 
-    /// Schedule a wakeup to drive the next auto-scroll tick. The actual scroll
-    /// happens in `render`, which we drive by requesting a redraw.
-    fn schedule_autoscroll_tick(&self) {
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(AUTOSCROLL_TICK_MS));
-            let _ = proxy.send_event(UserEvent::Wakeup);
-        });
-    }
-
     // ── Frame ────────────────────────────────────────────────────────────
 
     pub fn render(&mut self) {
-        // Auto-scroll while drag-selecting past viewport edge.
+        check_rss_kill_switch(self.rss_kill_bytes);
+
+        // Auto-scroll while drag-selecting past viewport edge. The main loop
+        // wakes us at `next_autoscroll_deadline`; we tick once per wake and
+        // re-arm.
         if let Some(dir) = self.autoscroll_dir {
             self.live_term.scroll(TermScroll::Delta(dir));
             let (after, _history) = self.live_term.offset_and_history();
@@ -721,7 +752,10 @@ impl Renderer {
                 };
                 sel.extend_to(edge.0, edge.1);
             }
-            self.schedule_autoscroll_tick();
+            self.next_autoscroll_deadline =
+                Some(Instant::now() + Duration::from_millis(AUTOSCROLL_TICK_MS));
+        } else {
+            self.next_autoscroll_deadline = None;
         }
 
         let Snapshot {
@@ -873,19 +907,17 @@ impl Renderer {
             }
         }
 
-        // Schedule a wakeup at the next blink phase change so the cursor
-        // updates without polling the render loop.
-        if cursor_blinking && self.focused {
+        // Surface the next blink phase change as a deadline so the main
+        // loop's WaitUntil wakes us — no per-frame thread spawn.
+        self.next_blink_deadline = if cursor_blinking && self.focused {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             let half = CURSOR_BLINK_PERIOD_MS / 2;
             let into_half = elapsed_ms % half;
             let ms_to_next = (half - into_half).max(1);
-            let proxy = self.proxy.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(ms_to_next));
-                let _ = proxy.send_event(UserEvent::Wakeup);
-            });
-        }
+            Some(Instant::now() + Duration::from_millis(ms_to_next))
+        } else {
+            None
+        };
 
         let mut above: Vec<RectInstance> = Vec::with_capacity(deco_runs.len() * 2);
         for run in &deco_runs {
@@ -1157,4 +1189,50 @@ fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
         .and_then(|run| run.glyphs.first())
         .map(|glyph| glyph.w)
         .unwrap_or(FONT_SIZE * 0.6)
+}
+
+// ── Memory kill-switch ────────────────────────────────────────────────────
+
+fn rss_kill_threshold_bytes() -> u64 {
+    let gb = std::env::var("TERMINITE_RSS_LIMIT_GB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_RSS_LIMIT_GB);
+    gb.saturating_mul(1024 * 1024 * 1024)
+}
+
+/// Peak resident set size since the process started, in bytes. Peak-not-
+/// current is intentional: if we ever crossed the limit, we want to bail
+/// even after the spike subsides — recovery from a runaway is not the
+/// kill-switch's job.
+fn process_rss_peak_bytes() -> Option<u64> {
+    use std::mem::MaybeUninit;
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if ret != 0 {
+        return None;
+    }
+    // macOS reports `ru_maxrss` in bytes; Linux in kilobytes.
+    let raw = unsafe { usage.assume_init() }.ru_maxrss as u64;
+    #[cfg(target_os = "linux")]
+    let raw = raw.saturating_mul(1024);
+    Some(raw)
+}
+
+fn check_rss_kill_switch(limit_bytes: u64) {
+    if limit_bytes == 0 {
+        return;
+    }
+    if let Some(rss) = process_rss_peak_bytes()
+        && rss > limit_bytes
+    {
+        let gib = |b: u64| b as f64 / (1024.0 * 1024.0 * 1024.0);
+        eprintln!(
+            "terminite: peak RSS {:.2} GiB exceeded kill-switch limit {:.2} GiB — exiting \
+             to protect the system. Override with TERMINITE_RSS_LIMIT_GB (=0 disables).",
+            gib(rss),
+            gib(limit_bytes),
+        );
+        std::process::exit(2);
+    }
 }
