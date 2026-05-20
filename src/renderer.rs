@@ -98,6 +98,10 @@ pub struct Renderer {
 
     // Mouse / selection state.
     mouse_pos: (f32, f32),
+    /// Pixel position at which the selection head was last updated via mouse
+    /// motion. Used to filter sub-cell trackpad jitter that would otherwise
+    /// clobber the wheel-driven edge extension during a drag-scroll.
+    last_drag_mouse_pos: (f32, f32),
     selection: Option<Selection>,
     dragging: bool,
     clipboard: Option<Clipboard>,
@@ -216,6 +220,7 @@ impl Renderer {
             grid_cols: cols,
             grid_rows: rows,
             mouse_pos: (0.0, 0.0),
+            last_drag_mouse_pos: (0.0, 0.0),
             selection: None,
             dragging: false,
             clipboard,
@@ -276,10 +281,23 @@ impl Renderer {
     pub fn mouse_moved(&mut self, x: f32, y: f32) {
         self.mouse_pos = (x, y);
         if self.dragging {
+            // macOS trackpad scrolling drags the cursor a hair, so we get
+            // tiny mouse_moved events interleaved with wheel events. Without
+            // this filter, every wheel-driven extension to the viewport
+            // edge gets immediately snapped back to whatever cell the
+            // cursor is currently over. Only count motion that crosses
+            // half a cell from the last update.
+            let (last_x, last_y) = self.last_drag_mouse_pos;
+            let dx = (x - last_x).abs();
+            let dy = (y - last_y).abs();
+            if dx < self.cell_advance * 0.5 && dy < LINE_HEIGHT * 0.5 {
+                return;
+            }
             let (line, col) = self.pixel_to_absolute(x, y);
             if let Some(sel) = self.selection.as_mut() {
                 sel.extend_to(line, col);
             }
+            self.last_drag_mouse_pos = (x, y);
             self.window.request_redraw();
         }
     }
@@ -288,6 +306,7 @@ impl Renderer {
         let (line, col) = self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
         self.selection = Some(Selection::from_anchor(line, col));
         self.dragging = true;
+        self.last_drag_mouse_pos = self.mouse_pos;
         self.window.request_redraw();
     }
 
