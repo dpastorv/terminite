@@ -1,8 +1,8 @@
 //! terminite — a terminal emulator for the human-AI pair.
 //!
-//! The cell advance was guessed before; now it is *measured* from the font
-//! cosmic-text actually picks. Cursor and grid math use the same measured
-//! number, so they stay aligned across the line.
+//! Foreground colors now flow from the cell grid into glyphon as rich-text
+//! spans. Backgrounds and styles (bold/italic/underline) follow when the rect
+//! renderer arrives — they need pixel boxes, not glyph runs.
 
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -56,6 +57,80 @@ const CURSOR_VERTICAL_PADDING: f32 = (CURSOR_FONT_SIZE - FONT_SIZE) / 2.0;
 /// the irreducible taste portion. Geometric correctness ≠ visual correctness.
 const CURSOR_X_OFFSET: f32 = 2.0;
 const CURSOR_Y_OFFSET: f32 = -CURSOR_VERTICAL_PADDING - 1.0;
+
+/// Sixteen-color palette tuned in the One Dark family. Indices 0–7 are the
+/// base ANSI colors, 8–15 the bright variants. The 256-color cube and the
+/// grayscale ramp are computed from the standard xterm levels.
+const PALETTE_16: [(u8, u8, u8); 16] = [
+    (40, 44, 52),    //  0  black
+    (224, 108, 117), //  1  red
+    (152, 195, 121), //  2  green
+    (229, 192, 123), //  3  yellow
+    (97, 175, 239),  //  4  blue
+    (198, 120, 221), //  5  magenta
+    (86, 182, 194),  //  6  cyan
+    (171, 178, 191), //  7  white
+    (92, 99, 112),   //  8  bright black
+    (224, 108, 117), //  9  bright red
+    (152, 195, 121), // 10  bright green
+    (229, 192, 123), // 11  bright yellow
+    (97, 175, 239),  // 12  bright blue
+    (198, 120, 221), // 13  bright magenta
+    (86, 182, 194),  // 14  bright cyan
+    (220, 223, 228), // 15  bright white
+];
+
+const DEFAULT_FG: (u8, u8, u8) = (220, 220, 220);
+
+/// Map a vte ANSI color into a glyphon Color through terminite's palette.
+fn resolve_color(color: AnsiColor) -> Color {
+    let (r, g, b) = match color {
+        AnsiColor::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
+        AnsiColor::Named(name) => named_rgb(name),
+        AnsiColor::Indexed(idx) => indexed_rgb(idx),
+    };
+    Color::rgb(r, g, b)
+}
+
+fn named_rgb(name: NamedColor) -> (u8, u8, u8) {
+    match name {
+        NamedColor::Black => PALETTE_16[0],
+        NamedColor::Red => PALETTE_16[1],
+        NamedColor::Green => PALETTE_16[2],
+        NamedColor::Yellow => PALETTE_16[3],
+        NamedColor::Blue => PALETTE_16[4],
+        NamedColor::Magenta => PALETTE_16[5],
+        NamedColor::Cyan => PALETTE_16[6],
+        NamedColor::White => PALETTE_16[7],
+        NamedColor::BrightBlack => PALETTE_16[8],
+        NamedColor::BrightRed => PALETTE_16[9],
+        NamedColor::BrightGreen => PALETTE_16[10],
+        NamedColor::BrightYellow => PALETTE_16[11],
+        NamedColor::BrightBlue => PALETTE_16[12],
+        NamedColor::BrightMagenta => PALETTE_16[13],
+        NamedColor::BrightCyan => PALETTE_16[14],
+        NamedColor::BrightWhite => PALETTE_16[15],
+        NamedColor::Background => (10, 10, 15),
+        NamedColor::Cursor => (255, 200, 80),
+        // Foreground, dim variants, bright/dim foreground, and anything new.
+        _ => DEFAULT_FG,
+    }
+}
+
+fn indexed_rgb(idx: u8) -> (u8, u8, u8) {
+    if (idx as usize) < PALETTE_16.len() {
+        return PALETTE_16[idx as usize];
+    }
+    if idx < 232 {
+        // 6×6×6 RGB cube starting at 16.
+        let levels: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        let i = (idx - 16) as usize;
+        return (levels[i / 36], levels[(i / 6) % 6], levels[i % 6]);
+    }
+    // Grayscale ramp 232..=255.
+    let level = 8 + (idx - 232) * 10;
+    (level, level, level)
+}
 
 /// Compute how many columns and rows of monospace cells fit in a surface of
 /// the given physical size, accounting for terminite's padding.
@@ -178,25 +253,55 @@ impl LiveTerm {
         let _ = self.sender.send(Msg::Input(bytes.into()));
     }
 
-    /// Snapshot the visible grid and the cursor position. One lock per frame.
-    fn snapshot(&self) -> (String, i32, usize) {
+    /// Snapshot the visible grid as a list of color runs, plus the cursor
+    /// position. Adjacent cells with the same foreground color are merged
+    /// into one run so glyphon shapes them as a single span.
+    fn snapshot(&self) -> (Vec<(String, Color)>, i32, usize) {
         let term = self.term.lock();
         let grid = term.grid();
         let rows = grid.screen_lines();
         let cols = grid.columns();
         let cursor_line = grid.cursor.point.line.0;
         let cursor_col = grid.cursor.point.column.0;
-        let mut out = String::with_capacity((cols + 1) * rows);
+
+        let default_color = resolve_color(AnsiColor::Named(NamedColor::Foreground));
+        let mut runs: Vec<(String, Color)> = Vec::new();
+        let mut current_color = default_color;
+        let mut current_text = String::new();
+
         for line in 0..rows {
             let row = &grid[Line(line as i32)];
-            let mut line_text = String::with_capacity(cols);
-            for col in 0..cols {
-                line_text.push(row[Column(col)].c);
+            // Trim trailing default-fg spaces so glyphon doesn't shape miles of
+            // invisible cells. A non-default-fg space (a colored block) counts
+            // as content and is kept.
+            let mut last_content = 0;
+            for col in (0..cols).rev() {
+                let cell = &row[Column(col)];
+                let is_blank = cell.c == ' '
+                    && matches!(cell.fg, AnsiColor::Named(NamedColor::Foreground));
+                if !is_blank {
+                    last_content = col + 1;
+                    break;
+                }
             }
-            out.push_str(line_text.trim_end());
-            out.push('\n');
+            for col in 0..last_content {
+                let cell = &row[Column(col)];
+                let color = resolve_color(cell.fg);
+                if !current_text.is_empty() && color != current_color {
+                    runs.push((std::mem::take(&mut current_text), current_color));
+                }
+                if current_text.is_empty() {
+                    current_color = color;
+                }
+                current_text.push(cell.c);
+            }
+            current_text.push('\n');
         }
-        (out, cursor_line, cursor_col)
+        if !current_text.is_empty() {
+            runs.push((current_text, current_color));
+        }
+
+        (runs, cursor_line, cursor_col)
     }
 }
 
@@ -253,7 +358,7 @@ struct Renderer {
     cursor_buffer: Buffer,
     /// Cached last-rendered grid snapshot; lets us skip re-shaping when the
     /// terminal hasn't changed between frames.
-    last_snapshot: String,
+    last_snapshot: Vec<(String, Color)>,
     /// Measured monospace cell advance in physical pixels.
     cell_advance: f32,
 
@@ -321,11 +426,7 @@ impl Renderer {
         let physical_height = (height as f64 * scale_factor) as f32;
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        text_buffer.set_size(
-            &mut font_system,
-            Some(physical_width),
-            Some(physical_height),
-        );
+        text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
         text_buffer.set_text(
             &mut font_system,
             "",
@@ -372,7 +473,7 @@ impl Renderer {
             text_renderer,
             text_buffer,
             cursor_buffer,
-            last_snapshot: String::new(),
+            last_snapshot: Vec::new(),
             cell_advance,
             live_term,
             window,
@@ -408,10 +509,13 @@ impl Renderer {
     fn render(&mut self) {
         let (snapshot, cursor_line, cursor_col) = self.live_term.snapshot();
         if snapshot != self.last_snapshot {
-            self.text_buffer.set_text(
+            let default_attrs = Attrs::new().family(Family::Monospace);
+            self.text_buffer.set_rich_text(
                 &mut self.font_system,
-                &snapshot,
-                &Attrs::new().family(Family::Monospace),
+                snapshot
+                    .iter()
+                    .map(|(text, color)| (text.as_str(), default_attrs.clone().color(*color))),
+                &default_attrs,
                 Shaping::Advanced,
                 None,
             );
@@ -429,7 +533,8 @@ impl Renderer {
         );
 
         let cursor_left = TEXT_LEFT + (cursor_col as f32) * self.cell_advance + CURSOR_X_OFFSET;
-        let cursor_top = TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
+        let cursor_top =
+            TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + CURSOR_Y_OFFSET;
         let bounds = TextBounds {
             left: 0,
             top: 0,
@@ -451,7 +556,7 @@ impl Renderer {
                         top: TEXT_TOP,
                         scale: 1.0,
                         bounds,
-                        default_color: Color::rgb(220, 220, 220),
+                        default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                         custom_glyphs: &[],
                     },
                     TextArea {
@@ -474,7 +579,8 @@ impl Renderer {
                 self.window.request_redraw();
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
                 self.window.request_redraw();
                 return;
@@ -555,7 +661,12 @@ impl ApplicationHandler for Terminite {
         self.renderer = Some(renderer);
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _id: WindowId,
+        event: WindowEvent,
+    ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::ModifiersChanged(mods) => self.modifiers = mods.state(),
