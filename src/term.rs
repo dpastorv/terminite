@@ -163,14 +163,17 @@ impl LiveTerm {
     }
 
     /// Extract the text from a (line, col) range — start..=end inclusive on
-    /// both endpoints. Wide-char spacers are skipped; zero-width combining
-    /// marks are appended to their base character. Per-row trailing spaces are
-    /// trimmed before joining with newlines.
+    /// both endpoints, in visible-viewport coordinates. Wide-char spacers are
+    /// skipped; zero-width combining marks are appended to their base
+    /// character. Per-row trailing spaces are trimmed before joining with
+    /// newlines. Visible lines are mapped to absolute lines via the current
+    /// `display_offset`, so selecting works correctly while scrolled back.
     pub fn extract_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let term = self.term.lock();
         let grid = term.grid();
         let cols = grid.columns();
         let rows = grid.screen_lines();
+        let display_offset = grid.display_offset() as i32;
         if start.0 >= rows || cols == 0 {
             return String::new();
         }
@@ -180,7 +183,7 @@ impl LiveTerm {
 
         let mut out = String::new();
         for line in start_line..=end_line {
-            let row = &grid[Line(line as i32)];
+            let row = &grid[Line(line as i32 - display_offset)];
             let col_start = if line == start_line { start_col } else { 0 };
             let col_end_raw = if line == end_line { end_col.saturating_add(1) } else { cols };
             let col_start = col_start.min(cols);
@@ -215,12 +218,17 @@ impl LiveTerm {
     /// Snapshot the visible grid: styled text runs, background runs, decoration
     /// runs (underline / double-underline / strikeout), and cursor position.
     /// One lock per frame; all four products emerge in a single walk.
+    ///
+    /// `display_offset` is the number of lines scrolled up into history. We
+    /// shift `Line(N)` lookups by `-display_offset` so the snapshot follows
+    /// the viewport when the user scrolls back.
     pub fn snapshot(&self) -> Snapshot {
         let term = self.term.lock();
         let grid = term.grid();
         let rows = grid.screen_lines();
         let cols = grid.columns();
-        let cursor_line = grid.cursor.point.line.0;
+        let display_offset = grid.display_offset() as i32;
+        let cursor_line = grid.cursor.point.line.0 + display_offset;
         let cursor_col = grid.cursor.point.column.0;
 
         let mut text_runs: Vec<(String, SpanStyle)> = Vec::new();
@@ -234,7 +242,7 @@ impl LiveTerm {
         let mut current_text = String::new();
 
         for line in 0..rows {
-            let row = &grid[Line(line as i32)];
+            let row = &grid[Line(line as i32 - display_offset)];
 
             // Trim trailing plain cells from the text side.
             let mut last_content = 0;
