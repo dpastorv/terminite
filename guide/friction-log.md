@@ -62,6 +62,23 @@ friction.
 
 ## Live log
 
+### 2026-05-20 — terminite was burning 50% CPU on no work
+
+- **What:** Idle terminite (no shell output, no input) consumed ~50% of one
+  CPU core. The render loop self-triggered — every `RedrawRequested` ended
+  with `window.request_redraw()`, so terminite ran at the monitor's refresh
+  rate whether anything had changed or not.
+- **Why it hurt:** A terminal that wakes the CPU constantly is the opposite
+  of *quiet*. Heat, fan noise, battery drain — and measurably worse than
+  Terminal.app doing nothing on the same machine. It contradicts the
+  loveliness bar at the level of the laptop's chassis.
+- **Who:** Both. The human feels the warm machine; the AI sees the cost as
+  shared (the partnership runs on the human's battery).
+- **Points at:** Render loops must be **event-driven by default**. Polling is
+  friction-log fodder. Any future thread that signals "redraw" should fire on
+  a real event, not on every frame. The same principle will apply to the
+  multiplexer's input/output loops when they arrive.
+
 ### 2026-05-19 — The cursor was geometrically correct and visually wrong
 
 - **What:** After measuring the cell advance, the cursor sat exactly where the

@@ -1,0 +1,12 @@
+# Dev profile tuned for the watch loop: lightly optimized terminite, fully
+# optimized dependencies. Builds the realistic memory/CPU footprint without
+# flipping to --release manually.
+
+[profile.dev]
+opt-level = 1
+debug-assertions = true
+overflow-checks = false
+
+# Dependencies are cached, so full optimization is a one-time cost.
+[profile.dev.package."*"]
+opt-level = 3
