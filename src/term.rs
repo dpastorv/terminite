@@ -1,6 +1,7 @@
 //! The live terminal: PTY thread, snapshot of the cell grid into rendering-
 //! friendly data (styled text runs, background runs, decoration runs).
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
@@ -151,6 +152,10 @@ pub struct LiveTerm {
     term: Arc<FairMutex<Term<Notifier>>>,
     sender: EventLoopSender,
     cell_advance: f32,
+    /// PID of the shell process at the other end of the PTY. Captured before
+    /// the `Pty` was moved into the I/O thread so we can query `proc_pidinfo`
+    /// later (e.g., for cwd inheritance into new tabs).
+    shell_pid: i32,
 }
 
 impl LiveTerm {
@@ -160,6 +165,7 @@ impl LiveTerm {
         cell_advance: f32,
         proxy: EventLoopProxy<UserEvent>,
         tab_id: TabId,
+        cwd: Option<PathBuf>,
     ) -> Self {
         let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
         let notifier = Notifier {
@@ -186,9 +192,16 @@ impl LiveTerm {
         tty_options
             .env
             .insert("COLORTERM".to_string(), "truecolor".to_string());
+        if let Some(cwd) = cwd {
+            tty_options.working_directory = Some(cwd);
+        }
 
         let pty = tty::new(&tty_options, window_size, 0)
             .expect("terminite: failed to open the PTY");
+        // Capture the shell's PID before the Pty is moved into the I/O
+        // thread — we want to be able to query its cwd later (for "Cmd+T
+        // inherits cwd").
+        let shell_pid = pty.child().id() as i32;
 
         let event_loop = TermEventLoop::new(term.clone(), notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
@@ -204,7 +217,15 @@ impl LiveTerm {
             term,
             sender,
             cell_advance,
+            shell_pid,
         }
+    }
+
+    /// Query the OS for the shell's current working directory. macOS uses
+    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)`; other platforms return None
+    /// until we add an equivalent path (Linux: `/proc/<pid>/cwd`).
+    pub fn current_dir(&self) -> Option<PathBuf> {
+        proc_cwd(self.shell_pid)
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -603,6 +624,43 @@ impl LiveTerm {
             has_extra_row,
         }
     }
+}
+
+/// Resolve a process's current working directory via the OS. macOS-only for
+/// now; other platforms could read `/proc/<pid>/cwd` etc.
+#[cfg(target_os = "macos")]
+fn proc_cwd(pid: i32) -> Option<PathBuf> {
+    use std::mem::MaybeUninit;
+    let mut info: MaybeUninit<libc::proc_vnodepathinfo> = MaybeUninit::uninit();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let raw = info.pvi_cdir.vip_path;
+    let bytes: &[u8] = unsafe {
+        std::slice::from_raw_parts(raw.as_ptr() as *const u8, raw.len())
+    };
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let s = std::str::from_utf8(&bytes[..nul]).ok()?;
+    if s.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(s))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn proc_cwd(_pid: i32) -> Option<PathBuf> {
+    None
 }
 
 /// Translate a cell into its text visual style, honoring inverse, dim, hidden.

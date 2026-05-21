@@ -296,7 +296,14 @@ impl Renderer {
 
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
         let first_tab_id = TabId(0);
-        let live_term = LiveTerm::new(cols, rows, cell_advance, proxy.clone(), first_tab_id);
+        let live_term = LiveTerm::new(
+            cols,
+            rows,
+            cell_advance,
+            proxy.clone(),
+            first_tab_id,
+            None,
+        );
 
         // Clipboard is optional; it's possible the platform refuses to give us
         // one (sandboxing, missing service). Copy/paste then become no-ops.
@@ -341,6 +348,11 @@ impl Renderer {
     }
 
     pub fn new_tab(&mut self) {
+        // Inherit the active tab's shell cwd into the new shell.
+        let cwd = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.live_term.current_dir());
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         let live_term = LiveTerm::new(
@@ -349,6 +361,7 @@ impl Renderer {
             self.cell_advance,
             self.proxy.clone(),
             id,
+            cwd,
         );
         let tab = Tab::new(id, "terminite".to_string(), live_term);
         self.tabs.push(tab);
