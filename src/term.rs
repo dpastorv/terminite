@@ -160,14 +160,21 @@ pub struct LiveTerm {
     cell_advance: f32,
     /// PID of the shell process at the other end of the PTY. Captured before
     /// the `Pty` was moved into the I/O thread so we can query `proc_pidinfo`
-    /// later (e.g., for cwd inheritance into new tabs).
+    /// (cwd inheritance, name) later.
     shell_pid: i32,
-    /// Master tty fd. Used with `tcgetpgrp` to find the foreground process
-    /// group — when that differs from the shell PID, something else is
-    /// running (vim, claude, htop) and Cmd+W should prompt for confirmation.
-    /// The fd lives as long as alacritty's I/O thread holds the `Pty`,
-    /// which lives for the full session.
+    /// A read-only fd to the SLAVE end of the PTY (opened via ptsname +
+    /// O_NOCTTY). Used with `tcgetpgrp` to find the foreground process
+    /// group — `tcgetpgrp` on the master end is unreliable on macOS. We
+    /// close it in `Drop`.
     tty_fd: RawFd,
+}
+
+impl Drop for LiveTerm {
+    fn drop(&mut self) {
+        if self.tty_fd >= 0 {
+            unsafe { libc::close(self.tty_fd) };
+        }
+    }
 }
 
 impl LiveTerm {
@@ -210,11 +217,21 @@ impl LiveTerm {
 
         let pty = tty::new(&tty_options, window_size, 0)
             .expect("terminite: failed to open the PTY");
-        // Capture the shell's PID and the tty master fd before the Pty is
-        // moved into the I/O thread — we want to query cwd, foreground
-        // process group, and process name later.
+        // Capture the shell's PID before the Pty is moved into the I/O
+        // thread. We also want a tty fd we can `tcgetpgrp` on — and on
+        // macOS that's unreliable on the master end, so open the slave
+        // ourselves via ptsname (O_NOCTTY keeps it from becoming *our*
+        // controlling terminal).
         let shell_pid = pty.child().id() as i32;
-        let tty_fd = pty.file().as_raw_fd();
+        let master_fd = pty.file().as_raw_fd();
+        let tty_fd = unsafe {
+            let slave_path = libc::ptsname(master_fd);
+            if slave_path.is_null() {
+                -1
+            } else {
+                libc::open(slave_path, libc::O_RDONLY | libc::O_NOCTTY)
+            }
+        };
 
         let event_loop = TermEventLoop::new(term.clone(), notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
@@ -244,14 +261,20 @@ impl LiveTerm {
 
     /// Foreground process group ID of the tty. When it's the shell, the
     /// user is at a prompt. When it's something else, that PID names the
-    /// running process (vim, claude, htop, etc.).
+    /// running process (vim, claude, htop, etc.). Returns None if we never
+    /// got a valid slave fd (very unlikely) or the tty has no foreground.
     pub fn foreground_pid(&self) -> Option<i32> {
+        if self.tty_fd < 0 {
+            return None;
+        }
         let pgid = unsafe { libc::tcgetpgrp(self.tty_fd) };
         if pgid > 0 { Some(pgid) } else { None }
     }
 
     /// True when something other than the shell is in the foreground —
-    /// used to gate the "press Cmd+W again to close" confirmation.
+    /// gates the "close confirmation" dialog. If we can't read the tty
+    /// (somehow), don't warn: better to occasionally over-trust than to
+    /// pop the dialog on every prompt.
     pub fn has_active_process(&self) -> bool {
         match self.foreground_pid() {
             Some(pid) => pid != self.shell_pid,
@@ -711,21 +734,27 @@ fn proc_cwd(_pid: i32) -> Option<PathBuf> {
     None
 }
 
-/// Basename of `pid`'s executable, e.g. `"zsh"`, `"vim"`, `"claude"`.
+/// Short process name (`comm`), e.g. `"zsh"`, `"vim"`, `"claude"`. Uses
+/// macOS's `proc_name` rather than the executable path's basename — the
+/// latter sometimes lands on a version-numbered directory ("2.1.146") when
+/// a CLI is installed in a versioned layout, which makes terrible tab labels.
 #[cfg(target_os = "macos")]
 fn proc_basename(pid: i32) -> Option<String> {
-    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let mut buf = [0u8; 256];
     let n = unsafe {
-        libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+        libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
     };
     if n <= 0 {
         return None;
     }
-    let path_str = std::str::from_utf8(&buf[..n as usize]).ok()?;
-    Path::new(path_str)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
+    let len = n as usize;
+    let bytes = &buf[..len];
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(len);
+    let s = std::str::from_utf8(&bytes[..nul]).ok()?;
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.to_string())
 }
 
 #[cfg(not(target_os = "macos"))]

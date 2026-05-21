@@ -1609,23 +1609,24 @@ fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
     buf
 }
 
-/// Convenience wrapper for `proc_basename` available to `renderer.rs` without
-/// re-exposing the libc machinery from `term.rs`.
+/// Convenience wrapper for `proc_name` used in close-confirmation copy.
 fn proc_name_of(pid: i32) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let mut buf = [0u8; 256];
         let n = unsafe {
-            libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+            libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
         };
         if n <= 0 {
             return None;
         }
-        let path_str = std::str::from_utf8(&buf[..n as usize]).ok()?;
-        return std::path::Path::new(path_str)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
+        let bytes = &buf[..n as usize];
+        let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        let s = std::str::from_utf8(&bytes[..nul]).ok()?;
+        if s.is_empty() {
+            return None;
+        }
+        return Some(s.to_string());
     }
     #[cfg(not(target_os = "macos"))]
     {
