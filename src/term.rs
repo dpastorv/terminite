@@ -162,17 +162,20 @@ pub struct LiveTerm {
     /// the `Pty` was moved into the I/O thread so we can query `proc_pidinfo`
     /// (cwd inheritance, name) later.
     shell_pid: i32,
+    /// Master PTY fd (alacritty owns it through the I/O thread; we just
+    /// borrow the int). Used as a `tcgetpgrp` fallback when our slave open
+    /// failed.
+    master_fd: RawFd,
     /// A read-only fd to the SLAVE end of the PTY (opened via ptsname +
     /// O_NOCTTY). Used with `tcgetpgrp` to find the foreground process
-    /// group — `tcgetpgrp` on the master end is unreliable on macOS. We
-    /// close it in `Drop`.
-    tty_fd: RawFd,
+    /// group. We close it in `Drop`. `-1` when the open failed.
+    slave_fd: RawFd,
 }
 
 impl Drop for LiveTerm {
     fn drop(&mut self) {
-        if self.tty_fd >= 0 {
-            unsafe { libc::close(self.tty_fd) };
+        if self.slave_fd >= 0 {
+            unsafe { libc::close(self.slave_fd) };
         }
     }
 }
@@ -224,7 +227,7 @@ impl LiveTerm {
         // controlling terminal).
         let shell_pid = pty.child().id() as i32;
         let master_fd = pty.file().as_raw_fd();
-        let tty_fd = unsafe {
+        let slave_fd = unsafe {
             let slave_path = libc::ptsname(master_fd);
             if slave_path.is_null() {
                 -1
@@ -248,9 +251,12 @@ impl LiveTerm {
             sender,
             cell_advance,
             shell_pid,
-            tty_fd,
+            master_fd,
+            slave_fd,
         }
     }
+
+    pub fn shell_pid(&self) -> i32 { self.shell_pid }
 
     /// Query the OS for the shell's current working directory. macOS uses
     /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)`; other platforms return None
@@ -260,15 +266,37 @@ impl LiveTerm {
     }
 
     /// Foreground process group ID of the tty. When it's the shell, the
-    /// user is at a prompt. When it's something else, that PID names the
-    /// running process (vim, claude, htop, etc.). Returns None if we never
-    /// got a valid slave fd (very unlikely) or the tty has no foreground.
+    /// user is at a prompt; when it's something else, that PID names the
+    /// running process (vim, claude, htop, etc.). We try the slave fd first
+    /// (most reliable on macOS) and fall back to the master if the slave
+    /// open didn't succeed.
     pub fn foreground_pid(&self) -> Option<i32> {
-        if self.tty_fd < 0 {
-            return None;
+        for &fd in &[self.slave_fd, self.master_fd] {
+            if fd < 0 {
+                continue;
+            }
+            let pgid = unsafe { libc::tcgetpgrp(fd) };
+            if pgid > 0 {
+                return Some(pgid);
+            }
         }
-        let pgid = unsafe { libc::tcgetpgrp(self.tty_fd) };
-        if pgid > 0 { Some(pgid) } else { None }
+        None
+    }
+
+    /// Diagnostic: returns `(slave_fd, master_fd, slave_pgid, master_pgid)`
+    /// so we can see what each fd is actually reporting.
+    pub fn pgid_debug(&self) -> (i32, i32, i32, i32) {
+        let s_pgid = if self.slave_fd >= 0 {
+            unsafe { libc::tcgetpgrp(self.slave_fd) }
+        } else {
+            -1
+        };
+        let m_pgid = if self.master_fd >= 0 {
+            unsafe { libc::tcgetpgrp(self.master_fd) }
+        } else {
+            -1
+        };
+        (self.slave_fd, self.master_fd, s_pgid, m_pgid)
     }
 
     /// True when something other than the shell is in the foreground —

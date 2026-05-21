@@ -73,6 +73,19 @@ const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
 const TAB_CLOSE_WIDTH: f32 = 32.0;
 
+// Modal dialog (in-window). Centered card with Cancel/Confirm buttons.
+const MODAL_BG_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+const MODAL_CARD_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
+const MODAL_CARD_BORDER: [f32; 4] = [0.18, 0.18, 0.24, 1.0];
+const MODAL_BTN_BG: [f32; 4] = [0.06, 0.06, 0.08, 1.0];
+const MODAL_BTN_CONFIRM_BG: [f32; 4] = [0.55, 0.15, 0.15, 1.0];
+const MODAL_CARD_W: f32 = 520.0;
+const MODAL_CARD_H: f32 = 220.0;
+const MODAL_BTN_H: f32 = 56.0;
+const MODAL_BTN_W: f32 = 140.0;
+const MODAL_FONT_SIZE: f32 = 22.0;
+const MODAL_LINE_HEIGHT: f32 = 32.0;
+
 /// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
 /// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
 /// ~76 GB). Override with `TERMINITE_RSS_LIMIT_GB`; set to `0` to disable.
@@ -145,6 +158,27 @@ struct Tab {
     autoscroll_dir: Option<i32>,
 }
 
+/// What the user is being asked to confirm. Generalized so we can reuse the
+/// same modal for future yes/no decisions.
+#[derive(Debug)]
+enum ModalAction {
+    CloseTab,
+}
+
+/// In-window modal dialog. Built when the user attempts to do something
+/// destructive while a non-trivial process is running.
+struct Modal {
+    action: ModalAction,
+    title_buf: Buffer,
+    body_buf: Buffer,
+    cancel_buf: Buffer,
+    confirm_buf: Buffer,
+    /// Hit boxes computed at layout time (origin x, y, w, h). Live for the
+    /// frame; updated each render.
+    cancel_rect: (f32, f32, f32, f32),
+    confirm_rect: (f32, f32, f32, f32),
+}
+
 impl Tab {
     fn new(id: TabId, title: String, title_buffer: Buffer, live_term: LiveTerm) -> Self {
         Self {
@@ -183,9 +217,16 @@ pub struct Renderer {
     rects_above: RectRenderer,
     /// Tab bar rendered with a separate scissor zone above the text area.
     rects_tab_bar: RectRenderer,
+    /// Modal overlay/card rendered on top of everything else.
+    rects_modal: RectRenderer,
     /// Second text pipeline for tab bar labels — same atlas, separate prepare/
     /// render cycle so it can use a different scissor than the content text.
     tab_text_renderer: TextRenderer,
+    /// Third text pipeline used exclusively for the in-window modal so its
+    /// text can be drawn ON TOP of the modal background. (We can't share
+    /// tab_text_renderer here — a second prepare would clobber the tab
+    /// labels' vertex buffer before they render.)
+    modal_text_renderer: TextRenderer,
     /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
     /// (one per tab) at different positions.
     close_buffer: Buffer,
@@ -220,6 +261,10 @@ pub struct Renderer {
     start_time: Instant,
     /// In-flight IME preedit text rendered near the cursor.
     preedit: String,
+    /// When Some, an in-window confirmation modal is up. While it's set,
+    /// keyboard / mouse routing goes to the modal first; the PTY and tabs
+    /// don't receive input.
+    modal: Option<Modal>,
 
     // Deadlines surfaced via `next_wakeup()` to the main loop's
     // `ControlFlow::WaitUntil(...)`. We used to spawn a fresh OS thread per
@@ -294,7 +339,10 @@ impl Renderer {
         let rects_below = RectRenderer::new(&device, format, "below");
         let rects_above = RectRenderer::new(&device, format, "above");
         let rects_tab_bar = RectRenderer::new(&device, format, "tab_bar");
+        let rects_modal = RectRenderer::new(&device, format, "modal");
         let tab_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let modal_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
         // winit's PhysicalSize is already in physical pixels — earlier code
@@ -356,7 +404,9 @@ impl Renderer {
             rects_below,
             rects_above,
             rects_tab_bar,
+            rects_modal,
             tab_text_renderer,
+            modal_text_renderer,
             close_buffer,
             cell_advance,
             grid_cols: cols,
@@ -371,6 +421,7 @@ impl Renderer {
             focused: true,
             start_time: Instant::now(),
             preedit: String::new(),
+            modal: None,
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
             rss_kill_bytes: rss_kill_threshold_bytes(),
@@ -404,31 +455,43 @@ impl Renderer {
         self.window.request_redraw();
     }
 
-    /// Close the active tab. Returns true if the window should exit (no
-    /// tabs remain). When a non-shell process is in the foreground, a
-    /// native confirmation dialog blocks until the user picks Close or
-    /// Cancel — Cancel returns false and leaves the tab alone.
+    /// Request closing the active tab. If a non-shell process is in the
+    /// foreground, opens an in-window modal — the caller observes `false`
+    /// (didn't close) and the actual close happens when the user confirms.
+    /// Otherwise closes immediately. Returns true if the window should
+    /// exit (no tabs remain).
     pub fn close_active_tab(&mut self) -> bool {
-        if self.tabs[self.active].live_term.has_active_process() {
-            let proc_name = self.tabs[self.active]
-                .live_term
-                .foreground_pid()
-                .and_then(|p| proc_name_of(p))
-                .unwrap_or_else(|| "A process".to_string());
-            let msg = format!(
-                "{proc_name} is running in this tab.\n\nClose anyway?"
-            );
-            let result = rfd::MessageDialog::new()
-                .set_title("Close tab")
-                .set_description(&msg)
-                .set_buttons(rfd::MessageButtons::OkCancel)
-                .set_level(rfd::MessageLevel::Warning)
-                .show();
-            if !matches!(result, rfd::MessageDialogResult::Ok) {
-                self.window.request_redraw();
-                return false;
-            }
+        if self.modal.is_some() {
+            return false;
         }
+        let live = &self.tabs[self.active].live_term;
+        let (s_fd, m_fd, s_pgid, m_pgid) = live.pgid_debug();
+        eprintln!(
+            "[close] tab={} shell_pid={} slave_fd={} master_fd={} \
+             slave_pgid={} master_pgid={} fg={:?}",
+            self.active,
+            live.shell_pid(),
+            s_fd,
+            m_fd,
+            s_pgid,
+            m_pgid,
+            live.foreground_pid()
+        );
+        if live.has_active_process() {
+            let proc_name = live
+                .foreground_pid()
+                .and_then(proc_name_of)
+                .unwrap_or_else(|| "A process".to_string());
+            let title = "Close tab?".to_string();
+            let body = format!("{proc_name} is running in this tab.");
+            self.open_modal(ModalAction::CloseTab, title, body, "Cancel", "Close");
+            return false;
+        }
+        self.do_close_active_tab()
+    }
+
+    /// Actually close the active tab. Returns true if the window should exit.
+    fn do_close_active_tab(&mut self) -> bool {
         if self.tabs.len() <= 1 {
             return true;
         }
@@ -440,6 +503,66 @@ impl Renderer {
         self.window.set_title(&self.tabs[self.active].title);
         self.window.request_redraw();
         false
+    }
+
+    /// True while an in-window modal is up — callers (main.rs) should route
+    /// keyboard / mouse input to the modal handlers below.
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    pub fn modal_cancel(&mut self) {
+        self.modal = None;
+        self.window.request_redraw();
+    }
+
+    /// Confirm the open modal. Returns true if the window should exit.
+    pub fn modal_confirm(&mut self) -> bool {
+        let Some(modal) = self.modal.take() else { return false };
+        self.window.request_redraw();
+        match modal.action {
+            ModalAction::CloseTab => self.do_close_active_tab(),
+        }
+    }
+
+    /// Mouse click while the modal is up. Returns true if the window should
+    /// exit (confirm hit on the last tab).
+    pub fn modal_click(&mut self, x: f32, y: f32) -> bool {
+        let Some(modal) = self.modal.as_ref() else { return false };
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+        };
+        if in_rect(modal.confirm_rect) {
+            return self.modal_confirm();
+        }
+        if in_rect(modal.cancel_rect) {
+            self.modal_cancel();
+        }
+        false
+    }
+
+    fn open_modal(
+        &mut self,
+        action: ModalAction,
+        title: String,
+        body: String,
+        cancel: &str,
+        confirm: &str,
+    ) {
+        let title_buf = make_modal_buffer(&mut self.font_system, &title);
+        let body_buf = make_modal_buffer(&mut self.font_system, &body);
+        let cancel_buf = make_modal_buffer(&mut self.font_system, cancel);
+        let confirm_buf = make_modal_buffer(&mut self.font_system, confirm);
+        self.modal = Some(Modal {
+            action,
+            title_buf,
+            body_buf,
+            cancel_buf,
+            confirm_buf,
+            cancel_rect: (0.0, 0.0, 0.0, 0.0),
+            confirm_rect: (0.0, 0.0, 0.0, 0.0),
+        });
+        self.window.request_redraw();
     }
 
     pub fn switch_to_tab(&mut self, idx: usize) {
@@ -595,6 +718,17 @@ impl Renderer {
     }
 
     pub fn mouse_down(&mut self, button: MouseButton, modifiers: ModifiersState) {
+        // Modal eats input — clicks hit-test modal buttons; everything else
+        // is swallowed until the user picks Cancel or Confirm.
+        if self.modal.is_some() {
+            if button == MouseButton::Left {
+                if self.modal_click(self.mouse_pos.0, self.mouse_pos.1) {
+                    let _ = self.proxy.send_event(UserEvent::Exit);
+                }
+            }
+            return;
+        }
+
         // Tab-bar hit test first — left-click in the bar switches tabs
         // (or closes one when the × is hit) and never starts a selection.
         if self.mouse_pos.1 < TAB_BAR_HEIGHT && button == MouseButton::Left {
@@ -948,6 +1082,59 @@ impl Renderer {
     /// Write bytes to the active tab's PTY (keyboard input path).
     pub fn write_active(&self, bytes: Vec<u8>) {
         self.tabs[self.active].live_term.write(bytes);
+    }
+
+    /// Compute the modal's card + button rectangles for the current surface
+    /// size. Also updates the cached hit-boxes on the open modal so mouse
+    /// clicks resolve to the correct button.
+    fn build_modal_rects(&mut self) -> Vec<RectInstance> {
+        let modal = match self.modal.as_mut() {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let card_x = (surface_w - MODAL_CARD_W) * 0.5;
+        let card_y = (surface_h - MODAL_CARD_H) * 0.5;
+        let btn_y = card_y + MODAL_CARD_H - MODAL_BTN_H - 18.0;
+        let gap = 16.0;
+        let confirm_x = card_x + MODAL_CARD_W - MODAL_BTN_W - 18.0;
+        let cancel_x = confirm_x - MODAL_BTN_W - gap;
+        modal.cancel_rect = (cancel_x, btn_y, MODAL_BTN_W, MODAL_BTN_H);
+        modal.confirm_rect = (confirm_x, btn_y, MODAL_BTN_W, MODAL_BTN_H);
+
+        let border = 1.5;
+        vec![
+            // Dim full-surface overlay.
+            RectInstance {
+                rect: [0.0, 0.0, surface_w, surface_h],
+                color: MODAL_BG_DIM,
+            },
+            // Card border (drawn slightly larger; card bg covers the interior).
+            RectInstance {
+                rect: [
+                    card_x - border,
+                    card_y - border,
+                    MODAL_CARD_W + 2.0 * border,
+                    MODAL_CARD_H + 2.0 * border,
+                ],
+                color: MODAL_CARD_BORDER,
+            },
+            RectInstance {
+                rect: [card_x, card_y, MODAL_CARD_W, MODAL_CARD_H],
+                color: MODAL_CARD_BG,
+            },
+            // Cancel button.
+            RectInstance {
+                rect: [cancel_x, btn_y, MODAL_BTN_W, MODAL_BTN_H],
+                color: MODAL_BTN_BG,
+            },
+            // Confirm button (warm red — destructive emphasis).
+            RectInstance {
+                rect: [confirm_x, btn_y, MODAL_BTN_W, MODAL_BTN_H],
+                color: MODAL_BTN_CONFIRM_BG,
+            },
+        ]
     }
 
     /// Return the tab index under a given x coordinate, or None if x falls
@@ -1333,10 +1520,96 @@ impl Renderer {
             self.surface_config.height as f32,
         ];
         let tab_bar_rects = self.build_tab_bar_rects();
+        let modal_rects = self.build_modal_rects();
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
         self.rects_tab_bar
             .prepare(&self.queue, &tab_bar_rects, resolution);
+        self.rects_modal
+            .prepare(&self.queue, &modal_rects, resolution);
+
+        // Modal text preparation — independent renderer so its draw can come
+        // after the modal background rects.
+        if let Some(modal) = self.modal.as_ref() {
+            let surface_w = self.surface_config.width as f32;
+            let surface_h = self.surface_config.height as f32;
+            let card_x = (surface_w - MODAL_CARD_W) * 0.5;
+            let card_y = (surface_h - MODAL_CARD_H) * 0.5;
+            let title_color = Color::rgb(235, 235, 245);
+            let body_color = Color::rgb(180, 180, 195);
+            let cancel_color = Color::rgb(200, 200, 215);
+            let confirm_color = Color::rgb(245, 240, 240);
+            let inset = 28.0;
+            let title_top = card_y + inset;
+            let body_top = title_top + MODAL_LINE_HEIGHT + 8.0;
+            let card_bounds = TextBounds {
+                left: card_x as i32,
+                top: card_y as i32,
+                right: (card_x + MODAL_CARD_W) as i32,
+                bottom: (card_y + MODAL_CARD_H) as i32,
+            };
+            let cr = modal.cancel_rect;
+            let fr = modal.confirm_rect;
+            let areas = [
+                TextArea {
+                    buffer: &modal.title_buf,
+                    left: card_x + inset,
+                    top: title_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: title_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &modal.body_buf,
+                    left: card_x + inset,
+                    top: body_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: body_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &modal.cancel_buf,
+                    left: cr.0 + (cr.2 - MODAL_BTN_W * 0.55) * 0.5,
+                    top: cr.1 + (cr.3 - MODAL_LINE_HEIGHT) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: cr.0 as i32,
+                        top: cr.1 as i32,
+                        right: (cr.0 + cr.2) as i32,
+                        bottom: (cr.1 + cr.3) as i32,
+                    },
+                    default_color: cancel_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &modal.confirm_buf,
+                    left: fr.0 + (fr.2 - MODAL_BTN_W * 0.55) * 0.5,
+                    top: fr.1 + (fr.3 - MODAL_LINE_HEIGHT) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: fr.0 as i32,
+                        top: fr.1 as i32,
+                        right: (fr.0 + fr.2) as i32,
+                        bottom: (fr.1 + fr.3) as i32,
+                    },
+                    default_color: confirm_color,
+                    custom_glyphs: &[],
+                },
+            ];
+            self.modal_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: modal text prepare failed");
+        }
 
         // Clip text rendering to the viewport — keeps the extra row above the
         // viewport invisible when pixel_offset == 0, and only its bottom slides
@@ -1516,6 +1789,15 @@ impl Renderer {
             self.tab_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("terminite: tab bar text render failed");
+
+            // Modal sits on top of *everything* — overlay dims the window
+            // and the card is rendered with its own text pass.
+            if self.modal.is_some() {
+                self.rects_modal.render(&mut pass);
+                self.modal_text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .expect("terminite: modal text render failed");
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.window.pre_present_notify();
@@ -1594,6 +1876,17 @@ fn button_code(button: MouseButton) -> Option<u32> {
         MouseButton::Right => 2,
         _ => return None,
     })
+}
+
+/// Build a `Buffer` for modal-card text at a larger font size.
+fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
+    let metrics = Metrics::new(MODAL_FONT_SIZE, MODAL_LINE_HEIGHT);
+    let mut buf = Buffer::new(font_system, metrics);
+    buf.set_size(font_system, Some(MODAL_CARD_W), Some(MODAL_LINE_HEIGHT * 3.0));
+    let attrs = Attrs::new().family(Family::Monospace);
+    buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+    buf.shape_until_scroll(font_system, false);
+    buf
 }
 
 /// Build a small cosmic-text `Buffer` holding a tab title. Sized to the

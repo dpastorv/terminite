@@ -56,6 +56,9 @@ pub enum UserEvent {
     SetTitle(TabId, String),
     /// Shell emitted `\a` (bell). Visual flash.
     Bell(TabId),
+    /// Exit requested from inside the renderer (e.g., user confirmed
+    /// closing the last tab via the in-window modal).
+    Exit,
 }
 
 // ── Input translation ──────────────────────────────────────────────────────
@@ -146,7 +149,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
         self.renderer = Some(renderer);
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Wakeup => {
                 if let Some(renderer) = self.renderer.as_ref() {
@@ -163,6 +166,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
                     renderer.ring_bell(tab_id);
                 }
             }
+            UserEvent::Exit => event_loop.exit(),
         }
     }
 
@@ -190,6 +194,26 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // Modal eats keyboard input — only Esc / Enter / Return do
+                // anything; everything else is swallowed.
+                if let Some(r) = self.renderer.as_mut() {
+                    if r.has_modal() {
+                        if event.state == ElementState::Pressed {
+                            match &event.logical_key {
+                                Key::Named(NamedKey::Escape) => {
+                                    r.modal_cancel();
+                                }
+                                Key::Named(NamedKey::Enter) => {
+                                    if r.modal_confirm() {
+                                        event_loop.exit();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        return;
+                    }
+                }
                 // Cmd-shortcuts: copy, paste, quit, tab ops (Cmd on macOS =
                 // super_key in winit's ModifiersState).
                 if event.state == ElementState::Pressed && self.modifiers.super_key() {
