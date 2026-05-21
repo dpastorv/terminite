@@ -768,12 +768,30 @@ fn proc_cwd(_pid: i32) -> Option<PathBuf> {
     None
 }
 
-/// Short process name (`comm`), e.g. `"zsh"`, `"vim"`, `"claude"`. Uses
-/// macOS's `proc_name` rather than the executable path's basename — the
-/// latter sometimes lands on a version-numbered directory ("2.1.146") when
-/// a CLI is installed in a versioned layout, which makes terrible tab labels.
-#[cfg(target_os = "macos")]
+/// Best display name for a process. Prefers `proc_name` (the macOS `comm`)
+/// — for most things that's correct ("zsh", "vim", "claude"). When the
+/// comm looks like a version number (claude's bundled binary lives at e.g.
+/// `~/.bun/.../claude-code/2.1.146/cli`, so its file name *is* "2.1.146"),
+/// we walk the executable path and pick the nearest non-version component.
+pub fn process_display_name(pid: i32) -> Option<String> {
+    let comm = proc_comm(pid);
+    if let Some(name) = comm.as_deref() {
+        if !looks_like_version(name) {
+            return comm;
+        }
+    }
+    proc_executable_path(pid)
+        .and_then(|p| best_name_from_path(&p))
+        .or(comm)
+}
+
+#[allow(dead_code)]
 fn proc_basename(pid: i32) -> Option<String> {
+    process_display_name(pid)
+}
+
+#[cfg(target_os = "macos")]
+fn proc_comm(pid: i32) -> Option<String> {
     let mut buf = [0u8; 256];
     let n = unsafe {
         libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
@@ -781,9 +799,8 @@ fn proc_basename(pid: i32) -> Option<String> {
     if n <= 0 {
         return None;
     }
-    let len = n as usize;
-    let bytes = &buf[..len];
-    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(len);
+    let bytes = &buf[..n as usize];
+    let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     let s = std::str::from_utf8(&bytes[..nul]).ok()?;
     if s.is_empty() {
         return None;
@@ -792,8 +809,46 @@ fn proc_basename(pid: i32) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn proc_basename(_pid: i32) -> Option<String> {
+fn proc_comm(_pid: i32) -> Option<String> {
     None
+}
+
+#[cfg(target_os = "macos")]
+fn proc_executable_path(pid: i32) -> Option<String> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    std::str::from_utf8(&buf[..n as usize])
+        .ok()
+        .map(|s| s.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn proc_executable_path(_pid: i32) -> Option<String> {
+    None
+}
+
+fn looks_like_version(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+fn best_name_from_path(path: &str) -> Option<String> {
+    Path::new(path)
+        .components()
+        .rev()
+        .filter_map(|c| c.as_os_str().to_str())
+        .find(|s| {
+            !s.is_empty()
+                && *s != "/"
+                && *s != "bin"
+                && *s != "cli"
+                && !looks_like_version(s)
+        })
+        .map(|s| s.to_string())
 }
 
 /// Human-readable cwd:

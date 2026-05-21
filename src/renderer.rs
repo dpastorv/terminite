@@ -1906,30 +1906,10 @@ fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
     buf
 }
 
-/// Convenience wrapper for `proc_name` used in close-confirmation copy.
+/// Resolve a display name for a PID — same logic the tab titles use, so
+/// the modal body matches what the user sees in the bar.
 fn proc_name_of(pid: i32) -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut buf = [0u8; 256];
-        let n = unsafe {
-            libc::proc_name(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
-        };
-        if n <= 0 {
-            return None;
-        }
-        let bytes = &buf[..n as usize];
-        let nul = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        let s = std::str::from_utf8(&bytes[..nul]).ok()?;
-        if s.is_empty() {
-            return None;
-        }
-        return Some(s.to_string());
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = pid;
-        None
-    }
+    crate::term::process_display_name(pid)
 }
 
 fn compute_grid_size(
