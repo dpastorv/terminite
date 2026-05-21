@@ -1068,6 +1068,10 @@ impl Renderer {
             }
             let new_auto = self.tabs[i].live_term.compute_auto_title();
             if new_auto != self.tabs[i].last_auto_title {
+                eprintln!(
+                    "[auto-title] tab={} {:?} -> {:?}",
+                    i, self.tabs[i].last_auto_title, new_auto
+                );
                 let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
                 self.tabs[i].last_auto_title = new_auto.clone();
                 self.tabs[i].title = new_auto;

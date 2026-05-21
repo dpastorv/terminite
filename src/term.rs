@@ -299,14 +299,20 @@ impl LiveTerm {
         (self.slave_fd, self.master_fd, s_pgid, m_pgid)
     }
 
-    /// True when something other than the shell is in the foreground —
-    /// gates the "close confirmation" dialog. If we can't read the tty
-    /// (somehow), don't warn: better to occasionally over-trust than to
-    /// pop the dialog on every prompt.
+    /// True when something other than a shell is in the foreground —
+    /// gates the close-confirmation modal. Comparing PID isn't enough: the
+    /// shell can re-exec or fork into a sub-shell that's still "at a
+    /// prompt" semantically. So we also treat known shell binaries as
+    /// "idle" regardless of which PID they happen to be.
     pub fn has_active_process(&self) -> bool {
-        match self.foreground_pid() {
-            Some(pid) => pid != self.shell_pid,
-            None => false,
+        let Some(fg) = self.foreground_pid() else { return false };
+        if fg == self.shell_pid {
+            return false;
+        }
+        match proc_basename(fg).as_deref() {
+            Some("zsh") | Some("bash") | Some("fish") | Some("sh") | Some("dash")
+            | Some("ksh") | Some("tcsh") | Some("csh") => false,
+            _ => true,
         }
     }
 
@@ -790,22 +796,41 @@ fn proc_basename(_pid: i32) -> Option<String> {
     None
 }
 
-/// Human-readable cwd: `~` for HOME, `~/foo/bar` for paths under HOME, last
-/// path component otherwise.
+/// Human-readable cwd:
+/// - `~` for HOME exactly
+/// - `~/foo/bar` for paths under HOME up to ~40 chars
+/// - `.../grandparent/parent/leaf` when the full path gets too long
+/// - the bare last component when there's no HOME context
 fn display_cwd(cwd: &Path) -> String {
-    if let Some(home) = std::env::var_os("HOME") {
+    let s = if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
         if cwd == home {
             return "~".to_string();
         }
         if let Ok(rel) = cwd.strip_prefix(&home) {
-            return format!("~/{}", rel.display());
+            format!("~/{}", rel.display())
+        } else {
+            cwd.display().to_string()
         }
+    } else {
+        cwd.display().to_string()
+    };
+    // Long paths: keep the last three components prefixed with `…/`. Keeps
+    // the title scannable in the tab bar without truncating mid-segment.
+    const MAX: usize = 40;
+    if s.chars().count() <= MAX {
+        return s;
     }
-    cwd.file_name()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| cwd.display().to_string())
+    let comps: Vec<&str> = cwd
+        .iter()
+        .filter_map(|c| c.to_str())
+        .filter(|c| !c.is_empty() && *c != "/")
+        .collect();
+    if comps.len() <= 3 {
+        return s;
+    }
+    let tail = comps[comps.len().saturating_sub(3)..].join("/");
+    format!("…/{tail}")
 }
 
 /// Translate a cell into its text visual style, honoring inverse, dim, hidden.
