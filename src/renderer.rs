@@ -176,6 +176,12 @@ pub struct Renderer {
     active: usize,
     /// Monotonic counter for new TabId allocation.
     next_tab_id: u64,
+    /// Which tab's content the shared `text_buffer` currently holds. When
+    /// this drifts from the active tab, `render()` forces a `set_rich_text`
+    /// regardless of the per-tab cache (otherwise switching back to a tab
+    /// whose cache still matches its grid would leave the buffer showing
+    /// the previously-active tab).
+    text_buffer_tab: Option<TabId>,
 
     // Shared mouse / system state. Mouse position is window-relative.
     mouse_pos: (f32, f32),
@@ -319,6 +325,7 @@ impl Renderer {
             tabs: vec![first_tab],
             active: 0,
             next_tab_id: 1,
+            text_buffer_tab: None,
             mouse_pos: (0.0, 0.0),
             clipboard,
             bell_flash_until: None,
@@ -992,7 +999,10 @@ impl Renderer {
             has_extra_row,
         } = self.tabs[self.active].live_term.snapshot();
 
-        if text_runs != self.tabs[self.active].last_text_runs {
+        let active_id = self.tabs[self.active].id;
+        let buffer_holds_other_tab = self.text_buffer_tab != Some(active_id);
+        let cache_stale = text_runs != self.tabs[self.active].last_text_runs;
+        if buffer_holds_other_tab || cache_stale {
             let default_attrs = Attrs::new().family(Family::Monospace);
             self.text_buffer.set_rich_text(
                 &mut self.font_system,
@@ -1013,6 +1023,7 @@ impl Renderer {
             self.text_buffer
                 .shape_until_scroll(&mut self.font_system, false);
             self.tabs[self.active].last_text_runs = text_runs;
+            self.text_buffer_tab = Some(active_id);
         }
 
         self.viewport.update(
