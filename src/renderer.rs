@@ -64,6 +64,15 @@ const TAB_ACTIVE_UNDERLINE: [f32; 4] =
     [1.0, 200.0 / 255.0, 80.0 / 255.0, 1.0];
 const TAB_SEPARATOR: [f32; 4] = [0.16, 0.16, 0.20, 1.0];
 
+/// Font size for tab titles, smaller than content text so they fit in the
+/// bar nicely.
+const TAB_FONT_SIZE: f32 = 18.0;
+const TAB_LINE_HEIGHT: f32 = 26.0;
+/// Horizontal inset from the tab's left edge to where the title text starts.
+const TAB_LABEL_INSET: f32 = 18.0;
+/// Right-edge space reserved for the `×` close affordance.
+const TAB_CLOSE_WIDTH: f32 = 32.0;
+
 /// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
 /// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
 /// ~76 GB). Override with `TERMINITE_RSS_LIMIT_GB`; set to `0` to disable.
@@ -114,10 +123,14 @@ impl Selection {
 }
 
 /// One tab in the window. Owns a PTY + everything that's conceptually
-/// per-shell — scroll state, selection, click history, snapshot cache.
+/// per-shell — scroll state, selection, click history, snapshot cache, and
+/// a small cosmic-text `Buffer` for the title shown in the tab bar.
 struct Tab {
     id: TabId,
     title: String,
+    /// Tab bar label buffer; rebuilt by `Renderer::rebuild_title_buffer`
+    /// whenever the title changes.
+    title_buffer: Buffer,
     live_term: LiveTerm,
 
     pixel_offset: f32,
@@ -130,10 +143,11 @@ struct Tab {
 }
 
 impl Tab {
-    fn new(id: TabId, title: String, live_term: LiveTerm) -> Self {
+    fn new(id: TabId, title: String, title_buffer: Buffer, live_term: LiveTerm) -> Self {
         Self {
             id,
             title,
+            title_buffer,
             live_term,
             pixel_offset: 0.0,
             selection: None,
@@ -164,6 +178,12 @@ pub struct Renderer {
     rects_above: RectRenderer,
     /// Tab bar rendered with a separate scissor zone above the text area.
     rects_tab_bar: RectRenderer,
+    /// Second text pipeline for tab bar labels — same atlas, separate prepare/
+    /// render cycle so it can use a different scissor than the content text.
+    tab_text_renderer: TextRenderer,
+    /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
+    /// (one per tab) at different positions.
+    close_buffer: Buffer,
 
     cell_advance: f32,
     grid_cols: usize,
@@ -269,6 +289,8 @@ impl Renderer {
         let rects_below = RectRenderer::new(&device, format, "below");
         let rects_above = RectRenderer::new(&device, format, "above");
         let rects_tab_bar = RectRenderer::new(&device, format, "tab_bar");
+        let tab_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
         // winit's PhysicalSize is already in physical pixels — earlier code
         // multiplied by scale_factor a second time, so the grid math thought
@@ -309,7 +331,10 @@ impl Renderer {
         // one (sandboxing, missing service). Copy/paste then become no-ops.
         let clipboard = Clipboard::new().ok();
 
-        let first_tab = Tab::new(first_tab_id, "terminite".to_string(), live_term);
+        let first_title = "terminite".to_string();
+        let first_title_buf = make_title_buffer(&mut font_system, &first_title);
+        let first_tab = Tab::new(first_tab_id, first_title, first_title_buf, live_term);
+        let close_buffer = make_title_buffer(&mut font_system, "×");
 
         Self {
             instance,
@@ -326,6 +351,8 @@ impl Renderer {
             rects_below,
             rects_above,
             rects_tab_bar,
+            tab_text_renderer,
+            close_buffer,
             cell_advance,
             grid_cols: cols,
             grid_rows: rows,
@@ -363,7 +390,9 @@ impl Renderer {
             id,
             cwd,
         );
-        let tab = Tab::new(id, "terminite".to_string(), live_term);
+        let title = "terminite".to_string();
+        let title_buf = make_title_buffer(&mut self.font_system, &title);
+        let tab = Tab::new(id, title, title_buf, live_term);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.window.set_title(&self.tabs[self.active].title);
@@ -539,15 +568,33 @@ impl Renderer {
     }
 
     pub fn mouse_down(&mut self, button: MouseButton, modifiers: ModifiersState) {
-        // Tab-bar hit test first — left-click in the bar switches tabs and
-        // never starts a selection.
+        // Tab-bar hit test first — left-click in the bar switches tabs
+        // (or closes one when the × is hit) and never starts a selection.
         if self.mouse_pos.1 < TAB_BAR_HEIGHT && button == MouseButton::Left {
             if let Some(idx) = self.tab_at_x(self.mouse_pos.0) {
-                if idx != self.active {
-                    self.active = idx;
-                    self.window
-                        .set_title(&self.tabs[idx].title);
-                    self.window.request_redraw();
+                let layout = self.tab_bar_layout();
+                let (x, w, _) = layout[idx];
+                let close_zone_left = x + w - TAB_CLOSE_WIDTH;
+                if self.mouse_pos.0 >= close_zone_left {
+                    // Hit the × — close that tab. If it's the active tab
+                    // and the last one, exit (mouse_up won't fire so we
+                    // close immediately here).
+                    if self.tabs.len() <= 1 {
+                        // Closing the last tab: leave the close to Cmd+W /
+                        // window-close; a click-to-exit feels too easy to
+                        // misfire. Switch to it if it's another tab,
+                        // otherwise no-op.
+                        if idx != self.active {
+                            self.switch_to_tab(idx);
+                        }
+                    } else {
+                        // Switch to the clicked tab first so close_active
+                        // removes the right one.
+                        self.active = idx;
+                        self.close_active_tab();
+                    }
+                } else if idx != self.active {
+                    self.switch_to_tab(idx);
                 }
             }
             return;
@@ -825,12 +872,16 @@ impl Renderer {
     }
 
     /// Apply a tab title (from a per-tab Notifier's `Event::Title`). Also
-    /// updates the window title when the renamed tab is the active one.
+    /// rebuilds the tab bar label buffer and updates the window title when
+    /// the renamed tab is the active one.
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
+        // Build the new buffer first (uses &mut self.font_system) so we can
+        // assign it without re-borrowing self.
+        let new_buf = make_title_buffer(&mut self.font_system, &title);
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.title = title;
+            tab.title_buffer = new_buf;
         }
-        // The window title tracks the active tab.
         if let Some(active) = self.tabs.get(self.active) {
             self.window.set_title(&active.title);
         }
@@ -1268,6 +1319,63 @@ impl Renderer {
             )
             .expect("terminite: text prepare failed");
 
+        // Prepare tab bar labels in a second TextRenderer so it can draw
+        // under a wider scissor in the pass below.
+        let tab_layout = self.tab_bar_layout();
+        let tab_text_top = (TAB_BAR_HEIGHT - TAB_LINE_HEIGHT) / 2.0;
+        let surface_w = self.surface_config.width as i32;
+        let active_color = Color::rgb(230, 230, 240);
+        let inactive_color = Color::rgb(140, 140, 160);
+        let close_color = Color::rgb(160, 160, 170);
+        let mut tab_text_areas: Vec<TextArea> = Vec::with_capacity(tab_layout.len() * 2);
+        for (i, (x, w, is_active)) in tab_layout.iter().enumerate() {
+            let label_right = (*x + *w - TAB_CLOSE_WIDTH) as i32;
+            // Title text — clipped left of the close-zone so long titles
+            // don't run into the ×.
+            tab_text_areas.push(TextArea {
+                buffer: &self.tabs[i].title_buffer,
+                left: *x + TAB_LABEL_INSET,
+                top: tab_text_top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: (*x + TAB_LABEL_INSET) as i32,
+                    top: 0,
+                    right: label_right.max(0),
+                    bottom: TAB_BAR_HEIGHT as i32,
+                },
+                default_color: if *is_active { active_color } else { inactive_color },
+                custom_glyphs: &[],
+            });
+            // × close glyph at the right edge of every tab.
+            let close_left = *x + *w - TAB_CLOSE_WIDTH + 8.0;
+            tab_text_areas.push(TextArea {
+                buffer: &self.close_buffer,
+                left: close_left,
+                top: tab_text_top,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: close_left as i32,
+                    top: 0,
+                    right: (*x + *w) as i32,
+                    bottom: TAB_BAR_HEIGHT as i32,
+                },
+                default_color: close_color,
+                custom_glyphs: &[],
+            });
+        }
+        let _ = surface_w; // reserved for future overflow indicator
+        self.tab_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                tab_text_areas,
+                &mut self.swash_cache,
+            )
+            .expect("terminite: tab bar text prepare failed");
+
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
@@ -1346,6 +1454,9 @@ impl Renderer {
                 self.surface_config.height,
             );
             self.rects_tab_bar.render(&mut pass);
+            self.tab_text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("terminite: tab bar text render failed");
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         self.window.pre_present_notify();
@@ -1424,6 +1535,19 @@ fn button_code(button: MouseButton) -> Option<u32> {
         MouseButton::Right => 2,
         _ => return None,
     })
+}
+
+/// Build a small cosmic-text `Buffer` holding a tab title. Sized to the
+/// maximum tab width so titles never wrap; bounds at render-time clip to the
+/// actual tab area.
+fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
+    let metrics = Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT);
+    let mut buf = Buffer::new(font_system, metrics);
+    buf.set_size(font_system, Some(TAB_MAX_WIDTH * 2.0), Some(TAB_LINE_HEIGHT));
+    let attrs = Attrs::new().family(Family::Monospace);
+    buf.set_text(font_system, title, &attrs, Shaping::Advanced, None);
+    buf.shape_until_scroll(font_system, false);
+    buf
 }
 
 fn compute_grid_size(
