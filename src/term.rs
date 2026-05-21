@@ -761,6 +761,15 @@ fn proc_cwd(pid: i32) -> Option<PathBuf> {
         )
     };
     if n <= 0 {
+        let errno = unsafe { *libc::__error() };
+        // Diagnostic: one-line print so we can see *why* it failed. macOS
+        // recently tightened TCC around proc_pidinfo's VNODE flavor; if
+        // EPERM, an unsigned `cargo run` binary may not have access. If
+        // EINVAL, our struct size doesn't match the kernel's expectation.
+        eprintln!(
+            "[proc_cwd] pid={} n={} errno={} size_of_vnodepathinfo={}",
+            pid, n, errno, size
+        );
         return None;
     }
     let info = unsafe { info.assume_init() };
