@@ -329,21 +329,19 @@ impl LiveTerm {
         }
     }
 
-    /// Auto-generated tab title: `"<process> · <cwd-basename>"`. Uses the
-    /// foreground process when it's not the shell, otherwise the shell name.
-    /// Cwd shows the last path component, with `~` for HOME. We use a middle
-    /// dot (U+00B7) — it lives in Latin-1 and renders in every monospace
-    /// font we'll ever ship, where the em-dash sometimes doesn't.
+    /// Auto-generated tab title. When we can read the shell's cwd:
+    /// `"<process> · <cwd>"`. When we can't (macOS proc_pidinfo VNODE is
+    /// blocked or returns empty on recent OS versions): just `"<process>"`.
+    /// Better to show less than to show a wrong cwd.
     pub fn compute_auto_title(&self) -> String {
         let fg = self.foreground_pid().unwrap_or(self.shell_pid);
         let name = proc_basename(fg)
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "shell".to_string());
-        let cwd_str = self
-            .current_dir()
-            .map(|p| display_cwd(&p))
-            .unwrap_or_else(|| "~".to_string());
-        format!("{name} · {cwd_str}")
+        match self.current_dir() {
+            Some(p) => format!("{name} · {}", display_cwd(&p)),
+            None => name,
+        }
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
