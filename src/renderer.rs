@@ -154,8 +154,6 @@ struct Tab {
     dragging: bool,
     last_drag_mouse_pos: (f32, f32),
     last_click: Option<(Instant, (i32, usize), u8)>,
-    /// Throttled diagnostic timer for raw cwd logging (every ~2 s per tab).
-    last_cwd_log: Option<Instant>,
     last_text_runs: Vec<(String, SpanStyle)>,
     autoscroll_dir: Option<i32>,
 }
@@ -195,7 +193,6 @@ impl Tab {
             dragging: false,
             last_drag_mouse_pos: (0.0, 0.0),
             last_click: None,
-            last_cwd_log: None,
             last_text_runs: Vec::new(),
             autoscroll_dir: None,
         }
@@ -468,25 +465,6 @@ impl Renderer {
             return false;
         }
         let live = &self.tabs[self.active].live_term;
-        let (s_fd, m_fd, s_pgid, m_pgid) = live.pgid_debug();
-        let fg = live.foreground_pid();
-        let (fg_comm, fg_path) = fg
-            .map(crate::term::process_debug_strings)
-            .unwrap_or((None, None));
-        eprintln!(
-            "[close] tab={} shell_pid={} cwd={:?} slave_fd={} master_fd={} \
-             slave_pgid={} master_pgid={} fg={:?} fg_comm={:?} fg_path={:?}",
-            self.active,
-            live.shell_pid(),
-            live.current_dir(),
-            s_fd,
-            m_fd,
-            s_pgid,
-            m_pgid,
-            fg,
-            fg_comm,
-            fg_path,
-        );
         if live.has_active_process() {
             let proc_name = live
                 .foreground_pid()
@@ -1076,28 +1054,8 @@ impl Renderer {
             if self.tabs[i].shell_title.is_some() {
                 continue;
             }
-            // Throttled diagnostic: every ~2 s per tab, print the raw cwd
-            // we got back from the OS so we can see if it's tracking `cd`s.
-            let now = Instant::now();
-            let should_log = self.tabs[i]
-                .last_cwd_log
-                .map(|t| now.duration_since(t) > Duration::from_secs(2))
-                .unwrap_or(true);
-            if should_log {
-                eprintln!(
-                    "[cwd-poll] tab={} shell_pid={} cwd={:?}",
-                    i,
-                    self.tabs[i].live_term.shell_pid(),
-                    self.tabs[i].live_term.current_dir(),
-                );
-                self.tabs[i].last_cwd_log = Some(now);
-            }
             let new_auto = self.tabs[i].live_term.compute_auto_title();
             if new_auto != self.tabs[i].last_auto_title {
-                eprintln!(
-                    "[auto-title] tab={} {:?} -> {:?}",
-                    i, self.tabs[i].last_auto_title, new_auto
-                );
                 let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
                 self.tabs[i].last_auto_title = new_auto.clone();
                 self.tabs[i].title = new_auto;

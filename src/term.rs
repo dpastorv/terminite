@@ -256,6 +256,7 @@ impl LiveTerm {
         }
     }
 
+    #[allow(dead_code)]
     pub fn shell_pid(&self) -> i32 { self.shell_pid }
 
     /// Query the OS for the shell's current working directory. macOS uses
@@ -285,6 +286,7 @@ impl LiveTerm {
 
     /// Diagnostic: returns `(slave_fd, master_fd, slave_pgid, master_pgid)`
     /// so we can see what each fd is actually reporting.
+    #[allow(dead_code)]
     pub fn pgid_debug(&self) -> (i32, i32, i32, i32) {
         let s_pgid = if self.slave_fd >= 0 {
             unsafe { libc::tcgetpgrp(self.slave_fd) }
@@ -744,6 +746,12 @@ impl LiveTerm {
 
 /// Resolve a process's current working directory via the OS. macOS-only for
 /// now; other platforms could read `/proc/<pid>/cwd` etc.
+///
+/// **Known failure on recent macOS:** `proc_pidinfo(PROC_PIDVNODEPATHINFO)`
+/// returns `EPERM` for unsigned binaries (e.g. `cargo run` output) reading
+/// another process's cwd. We surface that as `None`; the real fix is OSC 7
+/// support in the parser (tracked separately — needs a vte +
+/// alacritty_terminal fork because vte 0.15 doesn't dispatch OSC 7).
 #[cfg(target_os = "macos")]
 fn proc_cwd(pid: i32) -> Option<PathBuf> {
     use std::mem::MaybeUninit;
@@ -759,15 +767,6 @@ fn proc_cwd(pid: i32) -> Option<PathBuf> {
         )
     };
     if n <= 0 {
-        let errno = unsafe { *libc::__error() };
-        // Diagnostic: one-line print so we can see *why* it failed. macOS
-        // recently tightened TCC around proc_pidinfo's VNODE flavor; if
-        // EPERM, an unsigned `cargo run` binary may not have access. If
-        // EINVAL, our struct size doesn't match the kernel's expectation.
-        eprintln!(
-            "[proc_cwd] pid={} n={} errno={} size_of_vnodepathinfo={}",
-            pid, n, errno, size
-        );
         return None;
     }
     let info = unsafe { info.assume_init() };
@@ -941,6 +940,7 @@ fn strip_version_suffix(s: &str) -> String {
 /// Diagnostic-only: returns `(comm, executable_path)` for `pid` so we can
 /// see what each lookup reports in stderr without exposing the raw libc
 /// helpers outside this module.
+#[allow(dead_code)]
 pub fn process_debug_strings(pid: i32) -> (Option<String>, Option<String>) {
     (proc_comm(pid), proc_executable_path(pid))
 }
