@@ -848,7 +848,52 @@ fn best_name_from_path(path: &str) -> Option<String> {
                 && *s != "cli"
                 && !looks_like_version(s)
         })
-        .map(|s| s.to_string())
+        .map(strip_version_suffix)
+}
+
+/// Strip a trailing `-1.2.3` / `_v1.2.3` style version suffix from a name,
+/// so e.g. `"claude-code-2.1.145"` becomes `"claude-code"`. Leaves names
+/// without such a suffix untouched.
+fn strip_version_suffix(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return s.to_string();
+    }
+    let mut i = bytes.len();
+    while i > 0 {
+        let b = bytes[i - 1];
+        if b.is_ascii_digit() || b == b'.' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    // Did we eat any version-y trailer at all?
+    if i == bytes.len() {
+        return s.to_string();
+    }
+    // Optional v before the digits.
+    let mut j = i;
+    if j > 0 && (bytes[j - 1] == b'v' || bytes[j - 1] == b'V') {
+        j -= 1;
+    }
+    // Require a `-` or `_` separator immediately before the version.
+    if j == 0 || (bytes[j - 1] != b'-' && bytes[j - 1] != b'_') {
+        return s.to_string();
+    }
+    let stem = &s[..j - 1];
+    if stem.is_empty() {
+        s.to_string()
+    } else {
+        stem.to_string()
+    }
+}
+
+/// Diagnostic-only: returns `(comm, executable_path)` for `pid` so we can
+/// see what each lookup reports in stderr without exposing the raw libc
+/// helpers outside this module.
+pub fn process_debug_strings(pid: i32) -> (Option<String>, Option<String>) {
+    (proc_comm(pid), proc_executable_path(pid))
 }
 
 /// Human-readable cwd:
