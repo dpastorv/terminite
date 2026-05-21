@@ -299,20 +299,33 @@ impl LiveTerm {
         (self.slave_fd, self.master_fd, s_pgid, m_pgid)
     }
 
-    /// True when something other than a shell is in the foreground —
-    /// gates the close-confirmation modal. Comparing PID isn't enough: the
-    /// shell can re-exec or fork into a sub-shell that's still "at a
-    /// prompt" semantically. So we also treat known shell binaries as
-    /// "idle" regardless of which PID they happen to be.
+    /// True when something other than a shell is in the foreground.
+    ///
+    /// Three layers of "not really running" detection, because the raw
+    /// `foreground_pid() == shell_pid` test misfires:
+    /// 1. Trivially equal — at a prompt, foreground is the shell.
+    /// 2. The foreground process's process group matches the shell's PID
+    ///    (so it's a subshell that shares the shell's job-control group).
+    /// 3. The foreground process's name is one of the known shell binaries
+    ///    (zsh, bash, fish, …). Also covers the case where the foreground
+    ///    PID is one off from `shell_pid` because zsh forked briefly for
+    ///    `.zshrc` and didn't reclaim the tty's foreground PGID.
+    /// 4. We couldn't look up the foreground's name at all (zombie /
+    ///    permission). We err toward *not* warning here — better than
+    ///    over-warning on every Cmd+W.
     pub fn has_active_process(&self) -> bool {
         let Some(fg) = self.foreground_pid() else { return false };
         if fg == self.shell_pid {
             return false;
         }
-        match proc_basename(fg).as_deref() {
+        if proc_pgid(fg) == Some(self.shell_pid) {
+            return false;
+        }
+        match process_display_name(fg).as_deref() {
             Some("zsh") | Some("bash") | Some("fish") | Some("sh") | Some("dash")
-            | Some("ksh") | Some("tcsh") | Some("csh") => false,
-            _ => true,
+            | Some("ksh") | Some("tcsh") | Some("csh") | Some("login") => false,
+            Some(_) => true,
+            None => false,
         }
     }
 
@@ -810,6 +823,35 @@ fn proc_comm(pid: i32) -> Option<String> {
 
 #[cfg(not(target_os = "macos"))]
 fn proc_comm(_pid: i32) -> Option<String> {
+    None
+}
+
+/// Process group ID of `pid`, via `proc_pidinfo(PROC_PIDTBSDINFO)`. Used to
+/// recognise the shell's subshells (which share its PGID) as "still at the
+/// prompt" for close-warning purposes.
+#[cfg(target_os = "macos")]
+fn proc_pgid(pid: i32) -> Option<i32> {
+    use std::mem::MaybeUninit;
+    let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_pgid as i32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn proc_pgid(_pid: i32) -> Option<i32> {
     None
 }
 

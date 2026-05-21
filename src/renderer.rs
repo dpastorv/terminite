@@ -154,6 +154,8 @@ struct Tab {
     dragging: bool,
     last_drag_mouse_pos: (f32, f32),
     last_click: Option<(Instant, (i32, usize), u8)>,
+    /// Throttled diagnostic timer for raw cwd logging (every ~2 s per tab).
+    last_cwd_log: Option<Instant>,
     last_text_runs: Vec<(String, SpanStyle)>,
     autoscroll_dir: Option<i32>,
 }
