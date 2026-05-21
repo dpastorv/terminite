@@ -72,10 +72,6 @@ const TAB_LINE_HEIGHT: f32 = 26.0;
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
 const TAB_CLOSE_WIDTH: f32 = 32.0;
-/// How long a Cmd+W / × click "arms" a close before disarming itself when
-/// the foreground process isn't the shell. Press again within this window
-/// to actually close.
-const CLOSE_ARM_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
 /// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
@@ -138,10 +134,6 @@ struct Tab {
     shell_title: Option<String>,
     /// Last auto-title we computed; rebuild the buffer only on changes.
     last_auto_title: String,
-    /// `Some(t)` after a close attempt while a non-shell process is in the
-    /// foreground; another Cmd+W / × within `CLOSE_ARM_WINDOW` actually
-    /// closes. The active tab's title gets a `● ` prefix while armed.
-    close_armed_at: Option<Instant>,
     live_term: LiveTerm,
 
     pixel_offset: f32,
@@ -161,7 +153,6 @@ impl Tab {
             title_buffer,
             shell_title: None,
             last_auto_title: String::new(),
-            close_armed_at: None,
             live_term,
             pixel_offset: 0.0,
             selection: None,
@@ -414,23 +405,30 @@ impl Renderer {
     }
 
     /// Close the active tab. Returns true if the window should exit (no
-    /// tabs remain). When a non-shell process is in the foreground, the
-    /// first call only *arms* the close — caller should observe `false` and
-    /// the user must press again within `CLOSE_ARM_WINDOW` to actually
-    /// close. Closing the last tab also requires confirmation.
+    /// tabs remain). When a non-shell process is in the foreground, a
+    /// native confirmation dialog blocks until the user picks Close or
+    /// Cancel — Cancel returns false and leaves the tab alone.
     pub fn close_active_tab(&mut self) -> bool {
-        let needs_confirm = self.tabs[self.active].live_term.has_active_process();
-        let now = Instant::now();
-        let armed = self.tabs[self.active]
-            .close_armed_at
-            .map(|t| now.duration_since(t) < CLOSE_ARM_WINDOW)
-            .unwrap_or(false);
-        if needs_confirm && !armed {
-            self.tabs[self.active].close_armed_at = Some(now);
-            self.window.request_redraw();
-            return false;
+        if self.tabs[self.active].live_term.has_active_process() {
+            let proc_name = self.tabs[self.active]
+                .live_term
+                .foreground_pid()
+                .and_then(|p| proc_name_of(p))
+                .unwrap_or_else(|| "A process".to_string());
+            let msg = format!(
+                "{proc_name} is running in this tab.\n\nClose anyway?"
+            );
+            let result = rfd::MessageDialog::new()
+                .set_title("Close tab")
+                .set_description(&msg)
+                .set_buttons(rfd::MessageButtons::OkCancel)
+                .set_level(rfd::MessageLevel::Warning)
+                .show();
+            if !matches!(result, rfd::MessageDialogResult::Ok) {
+                self.window.request_redraw();
+                return false;
+            }
         }
-        self.tabs[self.active].close_armed_at = None;
         if self.tabs.len() <= 1 {
             return true;
         }
@@ -901,8 +899,20 @@ impl Renderer {
     }
 
     /// Apply a tab title from a shell `OSC 0/1/2`. This wins over the
-    /// auto-title for as long as the shell keeps setting one.
+    /// auto-title for as long as the shell keeps setting one. An empty or
+    /// whitespace-only title is treated as "unset" — the auto-title takes
+    /// over again on the next render. This is what TUIs that emit an empty
+    /// title or a ResetTitle escape on exit (claude, vim, ssh) expect.
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
+        if title.trim().is_empty() {
+            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+                tab.shell_title = None;
+                // Force refresh_auto_titles to rebuild on the next render.
+                tab.last_auto_title.clear();
+            }
+            self.window.request_redraw();
+            return;
+        }
         let new_buf = make_title_buffer(&mut self.font_system, &title);
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
             tab.shell_title = Some(title.clone());
@@ -922,17 +932,7 @@ impl Renderer {
             if self.tabs[i].shell_title.is_some() {
                 continue;
             }
-            let mut new_auto = self.tabs[i].live_term.compute_auto_title();
-            // Disarm close after the window passes.
-            if let Some(t) = self.tabs[i].close_armed_at {
-                if t.elapsed() >= CLOSE_ARM_WINDOW {
-                    self.tabs[i].close_armed_at = None;
-                }
-            }
-            // Decorate with the close-armed dot.
-            if self.tabs[i].close_armed_at.is_some() {
-                new_auto = format!("● {new_auto}");
-            }
+            let new_auto = self.tabs[i].live_term.compute_auto_title();
             if new_auto != self.tabs[i].last_auto_title {
                 let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
                 self.tabs[i].last_auto_title = new_auto.clone();
@@ -1607,6 +1607,31 @@ fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
     buf.set_text(font_system, title, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
     buf
+}
+
+/// Convenience wrapper for `proc_basename` available to `renderer.rs` without
+/// re-exposing the libc machinery from `term.rs`.
+fn proc_name_of(pid: i32) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let n = unsafe {
+            libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+        };
+        if n <= 0 {
+            return None;
+        }
+        let path_str = std::str::from_utf8(&buf[..n as usize]).ok()?;
+        return std::path::Path::new(path_str)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 fn compute_grid_size(

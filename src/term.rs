@@ -134,9 +134,14 @@ impl EventListener for Notifier {
                     .send_event(UserEvent::SetTitle(self.tab_id, title.clone()));
             }
             TermEvent::ResetTitle => {
+                // Treat this as "shell wants the auto-title back" — handled
+                // by sending an empty SetTitle, which our renderer reads as
+                // "clear the shell-set title and let the auto-title take
+                // over." Without this, exiting a TUI that set its own title
+                // (claude, vim, ssh) would leave the stale title on the tab.
                 let _ = self
                     .proxy
-                    .send_event(UserEvent::SetTitle(self.tab_id, "terminite".to_string()));
+                    .send_event(UserEvent::SetTitle(self.tab_id, String::new()));
             }
             TermEvent::Bell => {
                 let _ = self.proxy.send_event(UserEvent::Bell(self.tab_id));
@@ -254,17 +259,21 @@ impl LiveTerm {
         }
     }
 
-    /// Auto-generated tab title: `"<process> — <cwd-basename>"`. Uses the
+    /// Auto-generated tab title: `"<process> · <cwd-basename>"`. Uses the
     /// foreground process when it's not the shell, otherwise the shell name.
-    /// Cwd shows the last path component, with `~` for HOME.
+    /// Cwd shows the last path component, with `~` for HOME. We use a middle
+    /// dot (U+00B7) — it lives in Latin-1 and renders in every monospace
+    /// font we'll ever ship, where the em-dash sometimes doesn't.
     pub fn compute_auto_title(&self) -> String {
         let fg = self.foreground_pid().unwrap_or(self.shell_pid);
-        let name = proc_basename(fg).unwrap_or_else(|| "shell".to_string());
+        let name = proc_basename(fg)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "shell".to_string());
         let cwd_str = self
             .current_dir()
             .map(|p| display_cwd(&p))
             .unwrap_or_else(|| "~".to_string());
-        format!("{name} — {cwd_str}")
+        format!("{name} · {cwd_str}")
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
