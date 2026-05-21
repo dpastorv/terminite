@@ -72,6 +72,10 @@ const TAB_LINE_HEIGHT: f32 = 26.0;
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
 const TAB_CLOSE_WIDTH: f32 = 32.0;
+/// How long a Cmd+W / × click "arms" a close before disarming itself when
+/// the foreground process isn't the shell. Press again within this window
+/// to actually close.
+const CLOSE_ARM_WINDOW: Duration = Duration::from_millis(1500);
 
 /// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
 /// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
@@ -128,9 +132,16 @@ impl Selection {
 struct Tab {
     id: TabId,
     title: String,
-    /// Tab bar label buffer; rebuilt by `Renderer::rebuild_title_buffer`
-    /// whenever the title changes.
+    /// Tab bar label buffer; rebuilt whenever the displayed title changes.
     title_buffer: Buffer,
+    /// Shell-set title (OSC 0/1/2) — when present, wins over the auto title.
+    shell_title: Option<String>,
+    /// Last auto-title we computed; rebuild the buffer only on changes.
+    last_auto_title: String,
+    /// `Some(t)` after a close attempt while a non-shell process is in the
+    /// foreground; another Cmd+W / × within `CLOSE_ARM_WINDOW` actually
+    /// closes. The active tab's title gets a `● ` prefix while armed.
+    close_armed_at: Option<Instant>,
     live_term: LiveTerm,
 
     pixel_offset: f32,
@@ -148,6 +159,9 @@ impl Tab {
             id,
             title,
             title_buffer,
+            shell_title: None,
+            last_auto_title: String::new(),
+            close_armed_at: None,
             live_term,
             pixel_offset: 0.0,
             selection: None,
@@ -400,8 +414,23 @@ impl Renderer {
     }
 
     /// Close the active tab. Returns true if the window should exit (no
-    /// tabs remain).
+    /// tabs remain). When a non-shell process is in the foreground, the
+    /// first call only *arms* the close — caller should observe `false` and
+    /// the user must press again within `CLOSE_ARM_WINDOW` to actually
+    /// close. Closing the last tab also requires confirmation.
     pub fn close_active_tab(&mut self) -> bool {
+        let needs_confirm = self.tabs[self.active].live_term.has_active_process();
+        let now = Instant::now();
+        let armed = self.tabs[self.active]
+            .close_armed_at
+            .map(|t| now.duration_since(t) < CLOSE_ARM_WINDOW)
+            .unwrap_or(false);
+        if needs_confirm && !armed {
+            self.tabs[self.active].close_armed_at = Some(now);
+            self.window.request_redraw();
+            return false;
+        }
+        self.tabs[self.active].close_armed_at = None;
         if self.tabs.len() <= 1 {
             return true;
         }
@@ -871,19 +900,48 @@ impl Renderer {
         }
     }
 
-    /// Apply a tab title (from a per-tab Notifier's `Event::Title`). Also
-    /// rebuilds the tab bar label buffer and updates the window title when
-    /// the renamed tab is the active one.
+    /// Apply a tab title from a shell `OSC 0/1/2`. This wins over the
+    /// auto-title for as long as the shell keeps setting one.
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
-        // Build the new buffer first (uses &mut self.font_system) so we can
-        // assign it without re-borrowing self.
         let new_buf = make_title_buffer(&mut self.font_system, &title);
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.shell_title = Some(title.clone());
             tab.title = title;
             tab.title_buffer = new_buf;
         }
         if let Some(active) = self.tabs.get(self.active) {
             self.window.set_title(&active.title);
+        }
+    }
+
+    /// Refresh each tab's auto-title from the OS each frame. Cheap (a few
+    /// syscalls) and only rebuilds the label buffer when the title actually
+    /// changes. Tabs that received an OSC title from their shell keep that.
+    fn refresh_auto_titles(&mut self) {
+        for i in 0..self.tabs.len() {
+            if self.tabs[i].shell_title.is_some() {
+                continue;
+            }
+            let mut new_auto = self.tabs[i].live_term.compute_auto_title();
+            // Disarm close after the window passes.
+            if let Some(t) = self.tabs[i].close_armed_at {
+                if t.elapsed() >= CLOSE_ARM_WINDOW {
+                    self.tabs[i].close_armed_at = None;
+                }
+            }
+            // Decorate with the close-armed dot.
+            if self.tabs[i].close_armed_at.is_some() {
+                new_auto = format!("● {new_auto}");
+            }
+            if new_auto != self.tabs[i].last_auto_title {
+                let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
+                self.tabs[i].last_auto_title = new_auto.clone();
+                self.tabs[i].title = new_auto;
+                self.tabs[i].title_buffer = new_buf;
+                if i == self.active {
+                    self.window.set_title(&self.tabs[i].title);
+                }
+            }
         }
     }
 
@@ -1028,6 +1086,7 @@ impl Renderer {
 
     pub fn render(&mut self) {
         check_rss_kill_switch(self.rss_kill_bytes);
+        self.refresh_auto_titles();
 
         // Auto-scroll while drag-selecting past viewport edge. The main loop
         // wakes us at `next_autoscroll_deadline`; we tick once per wake and

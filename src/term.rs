@@ -1,7 +1,8 @@
 //! The live terminal: PTY thread, snapshot of the cell grid into rendering-
 //! friendly data (styled text runs, background runs, decoration runs).
 
-use std::path::PathBuf;
+use std::os::fd::{AsRawFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
@@ -156,6 +157,12 @@ pub struct LiveTerm {
     /// the `Pty` was moved into the I/O thread so we can query `proc_pidinfo`
     /// later (e.g., for cwd inheritance into new tabs).
     shell_pid: i32,
+    /// Master tty fd. Used with `tcgetpgrp` to find the foreground process
+    /// group — when that differs from the shell PID, something else is
+    /// running (vim, claude, htop) and Cmd+W should prompt for confirmation.
+    /// The fd lives as long as alacritty's I/O thread holds the `Pty`,
+    /// which lives for the full session.
+    tty_fd: RawFd,
 }
 
 impl LiveTerm {
@@ -198,10 +205,11 @@ impl LiveTerm {
 
         let pty = tty::new(&tty_options, window_size, 0)
             .expect("terminite: failed to open the PTY");
-        // Capture the shell's PID before the Pty is moved into the I/O
-        // thread — we want to be able to query its cwd later (for "Cmd+T
-        // inherits cwd").
+        // Capture the shell's PID and the tty master fd before the Pty is
+        // moved into the I/O thread — we want to query cwd, foreground
+        // process group, and process name later.
         let shell_pid = pty.child().id() as i32;
+        let tty_fd = pty.file().as_raw_fd();
 
         let event_loop = TermEventLoop::new(term.clone(), notifier, pty, false, false)
             .expect("terminite: failed to start the PTY event loop");
@@ -218,6 +226,7 @@ impl LiveTerm {
             sender,
             cell_advance,
             shell_pid,
+            tty_fd,
         }
     }
 
@@ -226,6 +235,36 @@ impl LiveTerm {
     /// until we add an equivalent path (Linux: `/proc/<pid>/cwd`).
     pub fn current_dir(&self) -> Option<PathBuf> {
         proc_cwd(self.shell_pid)
+    }
+
+    /// Foreground process group ID of the tty. When it's the shell, the
+    /// user is at a prompt. When it's something else, that PID names the
+    /// running process (vim, claude, htop, etc.).
+    pub fn foreground_pid(&self) -> Option<i32> {
+        let pgid = unsafe { libc::tcgetpgrp(self.tty_fd) };
+        if pgid > 0 { Some(pgid) } else { None }
+    }
+
+    /// True when something other than the shell is in the foreground —
+    /// used to gate the "press Cmd+W again to close" confirmation.
+    pub fn has_active_process(&self) -> bool {
+        match self.foreground_pid() {
+            Some(pid) => pid != self.shell_pid,
+            None => false,
+        }
+    }
+
+    /// Auto-generated tab title: `"<process> — <cwd-basename>"`. Uses the
+    /// foreground process when it's not the shell, otherwise the shell name.
+    /// Cwd shows the last path component, with `~` for HOME.
+    pub fn compute_auto_title(&self) -> String {
+        let fg = self.foreground_pid().unwrap_or(self.shell_pid);
+        let name = proc_basename(fg).unwrap_or_else(|| "shell".to_string());
+        let cwd_str = self
+            .current_dir()
+            .map(|p| display_cwd(&p))
+            .unwrap_or_else(|| "~".to_string());
+        format!("{name} — {cwd_str}")
     }
 
     pub fn resize(&self, cols: usize, rows: usize) {
@@ -661,6 +700,46 @@ fn proc_cwd(pid: i32) -> Option<PathBuf> {
 #[cfg(not(target_os = "macos"))]
 fn proc_cwd(_pid: i32) -> Option<PathBuf> {
     None
+}
+
+/// Basename of `pid`'s executable, e.g. `"zsh"`, `"vim"`, `"claude"`.
+#[cfg(target_os = "macos")]
+fn proc_basename(pid: i32) -> Option<String> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    let path_str = std::str::from_utf8(&buf[..n as usize]).ok()?;
+    Path::new(path_str)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn proc_basename(_pid: i32) -> Option<String> {
+    None
+}
+
+/// Human-readable cwd: `~` for HOME, `~/foo/bar` for paths under HOME, last
+/// path component otherwise.
+fn display_cwd(cwd: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        if cwd == home {
+            return "~".to_string();
+        }
+        if let Ok(rel) = cwd.strip_prefix(&home) {
+            return format!("~/{}", rel.display());
+        }
+    }
+    cwd.file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cwd.display().to_string())
 }
 
 /// Translate a cell into its text visual style, honoring inverse, dim, hidden.
