@@ -844,6 +844,16 @@ impl Renderer {
         self.active_pane_mut().active_tab_mut()
     }
 
+    /// The active tab of a specific pane.
+    fn pane_tab_mut(&mut self, pid: PaneId) -> &mut Tab {
+        self.root
+            .as_mut()
+            .expect("pane tree present")
+            .find_mut(pid)
+            .expect("pane present")
+            .active_tab_mut()
+    }
+
     /// Pixel rect of every pane leaf, filling the whole window.
     fn pane_layout(&self) -> Vec<(PaneId, PaneRect)> {
         let mut v = Vec::new();
@@ -1403,6 +1413,31 @@ impl Renderer {
         }
     }
 
+    /// Move keyboard focus to the neighbouring pane in a direction. `dx` /
+    /// `dy` are -1 / 0 / +1; we probe just past the active pane's edge (in
+    /// the divider gap's far side) and focus whatever pane lands there.
+    pub fn focus_dir(&mut self, dx: f32, dy: f32) {
+        let a = self.active_pane_rect();
+        let past = DIVIDER_THICKNESS + 1.0;
+        let probe_x = if dx > 0.0 {
+            a.x + a.w + past
+        } else if dx < 0.0 {
+            a.x - past
+        } else {
+            a.x + a.w / 2.0
+        };
+        let probe_y = if dy > 0.0 {
+            a.y + a.h + past
+        } else if dy < 0.0 {
+            a.y - past
+        } else {
+            a.y + a.h / 2.0
+        };
+        if let Some((pid, _)) = self.pane_at(probe_x, probe_y) {
+            self.focus_pane(pid);
+        }
+    }
+
     /// Make the pane under a window-relative point the active one. Returns
     /// true if a pane was hit.
     fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
@@ -1699,10 +1734,22 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
+        // The wheel acts on the pane *under the cursor* — you can scroll a
+        // pane's history without stealing keyboard focus from another.
+        let pid = match self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
+            Some((pid, _)) => pid,
+            None => return,
+        };
+
         // If the foreground app wants scroll reports (vim, less, htop in
-        // mouse mode), forward instead of scrolling the viewport.
-        let mode = self.active_tab_mut().live_term.mode_flags();
+        // mouse mode), forward instead of scrolling the viewport. Reporting
+        // only routes when the hovered pane is also the focused one — the
+        // cell math resolves against the active pane's rect.
+        let mode = self.pane_tab_mut(pid).live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
+            if pid != self.active_pane {
+                return;
+            }
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
                 MouseScrollDelta::PixelDelta(p) => p.y as f32 / LINE_HEIGHT,
@@ -1716,7 +1763,7 @@ impl Renderer {
             };
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 if let Some(b) = encode_mouse_report(&mode, direction, modifiers, col, row) {
-                    self.active_tab_mut().live_term.write(b);
+                    self.pane_tab_mut(pid).live_term.write(b);
                 }
             }
             return;
@@ -1729,7 +1776,7 @@ impl Renderer {
             MouseScrollDelta::LineDelta(_, y) => y * 3.0 * LINE_HEIGHT,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        self.active_tab_mut().pixel_offset += pixels;
+        self.pane_tab_mut(pid).pixel_offset += pixels;
 
         // Pop whole lines into the term; the remainder stays as a sub-line
         // pixel shift used at render time. `floor` keeps the remainder in
@@ -1740,16 +1787,16 @@ impl Renderer {
         // and floor's over-pop re-establishes the residual on every event
         // — so the bottom (offset=0) is never reached cleanly. Subtract by
         // the *actual* offset delta instead.
-        let whole = (self.active_tab_mut().pixel_offset / LINE_HEIGHT).floor() as i32;
+        let whole = (self.pane_tab_mut(pid).pixel_offset / LINE_HEIGHT).floor() as i32;
         if whole != 0 {
-            let (before, _) = self.active_tab_mut().live_term.offset_and_history();
-            self.active_tab_mut().live_term.scroll(TermScroll::Delta(whole));
-            let (after, history) = self.active_tab_mut().live_term.offset_and_history();
+            let (before, _) = self.pane_tab_mut(pid).live_term.offset_and_history();
+            self.pane_tab_mut(pid).live_term.scroll(TermScroll::Delta(whole));
+            let (after, history) = self.pane_tab_mut(pid).live_term.offset_and_history();
             let actual = after as i32 - before as i32;
-            self.active_tab_mut().pixel_offset -= actual as f32 * LINE_HEIGHT;
+            self.pane_tab_mut(pid).pixel_offset -= actual as f32 * LINE_HEIGHT;
             if actual != whole {
                 // Clamped at a scrollback boundary; drop the residual.
-                self.active_tab_mut().pixel_offset = 0.0;
+                self.pane_tab_mut(pid).pixel_offset = 0.0;
             }
             let _ = history;
 
@@ -1761,7 +1808,7 @@ impl Renderer {
             // the freshly-revealed lines. Pick whichever extends *further*
             // from the anchor — mouse position still wins when it's already
             // farther.
-            if actual != 0 && self.active_tab_mut().dragging {
+            if actual != 0 && pid == self.active_pane && self.active_tab_mut().dragging {
                 let (mouse_line, mouse_col) =
                     self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
                 let edge = if actual > 0 {

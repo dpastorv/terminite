@@ -263,6 +263,22 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 // Cmd-shortcuts: copy, paste, quit, tab ops (Cmd on macOS =
                 // super_key in winit's ModifiersState).
                 if event.state == ElementState::Pressed && self.modifiers.super_key() {
+                    // Cmd+Opt+Arrow: move keyboard focus between split panes.
+                    if self.modifiers.alt_key() {
+                        let dir = match &event.logical_key {
+                            Key::Named(NamedKey::ArrowLeft) => Some((-1.0, 0.0)),
+                            Key::Named(NamedKey::ArrowRight) => Some((1.0, 0.0)),
+                            Key::Named(NamedKey::ArrowUp) => Some((0.0, -1.0)),
+                            Key::Named(NamedKey::ArrowDown) => Some((0.0, 1.0)),
+                            _ => None,
+                        };
+                        if let Some((dx, dy)) = dir {
+                            if let Some(r) = self.renderer.as_mut() {
+                                r.focus_dir(dx, dy);
+                            }
+                            return;
+                        }
+                    }
                     if let Key::Character(text) = &event.logical_key {
                         let ch = text.chars().next().map(|c| c.to_ascii_lowercase());
                         let shift = self.modifiers.shift_key();
