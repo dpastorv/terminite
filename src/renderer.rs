@@ -558,6 +558,14 @@ fn split_ratio_from_cursor(pane: PaneRect, dir: SplitDir, cx: f32, cy: f32) -> f
     clamp_ratio(raw, span)
 }
 
+/// Hard ceilings on the cell grid. No real terminal approaches these; they
+/// exist so a degenerate font size, window size, or scrollback can't drive
+/// a `Term` allocation (`cols × scrollback × Cell`) into OOM territory. The
+/// per-frame RSS kill switch cannot catch a single runaway allocation, so
+/// the grid must be bounded at the source.
+const MAX_GRID_COLS: usize = 600;
+const MAX_GRID_ROWS: usize = 400;
+
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
 /// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
 fn pane_grid(rect: PaneRect, cell_advance: f32, line_height: f32, pad: f32) -> (usize, usize) {
@@ -565,7 +573,7 @@ fn pane_grid(rect: PaneRect, cell_advance: f32, line_height: f32, pad: f32) -> (
     let avail_h = (rect.h - TAB_BAR_HEIGHT - pad).max(line_height);
     let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
     let rows = (avail_h / line_height).floor().max(1.0) as usize;
-    (cols, rows)
+    (cols.min(MAX_GRID_COLS), rows.min(MAX_GRID_ROWS))
 }
 
 /// Geometry of each tab inside a pane's tab bar: `(x_start, width, is_active)`.
@@ -3555,9 +3563,9 @@ fn compute_grid_size(
     // The full window as a single pane: one tab-bar strip, top-left pad.
     let available_w = (physical_width - pad).max(cell_advance);
     let available_h = (physical_height - TAB_BAR_HEIGHT - pad).max(line_height);
-    let cols = (available_w / cell_advance) as usize;
-    let rows = (available_h / line_height) as usize;
-    (cols.max(2), rows.max(2))
+    let cols = ((available_w / cell_advance) as usize).clamp(2, MAX_GRID_COLS);
+    let rows = ((available_h / line_height) as usize).clamp(2, MAX_GRID_ROWS);
+    (cols, rows)
 }
 
 /// Measure the one-cell advance width of the configured font at the
@@ -3580,6 +3588,8 @@ fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32, family: &s
         .and_then(|run| run.glyphs.first())
         .map(|glyph| glyph.w)
         .unwrap_or(font_size * 0.6)
+        // Floor it: a degenerate measurement must never explode the grid.
+        .max(2.0)
 }
 
 // ── Memory kill-switch ────────────────────────────────────────────────────

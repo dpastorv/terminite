@@ -9,11 +9,11 @@
 # Startup-applied — relaunch to change.
 font_family = ""
 
-# Text size in pixels. Startup-applied.
+# Text size in pixels (clamped to 6–200). Startup-applied.
 font_size = 28
 
-# Inner padding from the pane edge to the text grid, in pixels.
-# Startup-applied.
+# Inner padding from the pane edge to the text grid, in pixels
+# (clamped to 0–400). Startup-applied.
 padding = 24
 
 # Blink the cursor while the window is focused. Applies immediately.
@@ -23,6 +23,7 @@ cursor_blink = true
 # Applies immediately.
 bell_style = "visual"
 
-# Scrollback lines kept per shell. Applies to tabs opened after a reload;
-# tabs already open keep the size they were created with.
+# Scrollback lines kept per shell (clamped to 0–50000). Applies to tabs
+# opened after a reload; tabs already open keep the size they were
+# created with.
 scrollback = 10000

@@ -11,6 +11,16 @@
 
 use std::path::PathBuf;
 
+// Bounds on the numeric fields. A terminal is unusable outside these — and,
+// more importantly, `font_size` (via the cell grid) and `scrollback` both
+// multiply into the per-shell `Term` allocation. One unbounded value there
+// is a single multi-gigabyte allocation that OOMs the machine before the
+// per-frame RSS kill switch can react. Every numeric field is clamped.
+const MIN_FONT_SIZE: f32 = 6.0;
+const MAX_FONT_SIZE: f32 = 200.0;
+const MAX_PADDING: f32 = 400.0;
+const MAX_SCROLLBACK: i64 = 50_000;
+
 /// What `\a` (BEL) does.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum BellStyle {
@@ -80,15 +90,15 @@ impl Config {
                 }
                 "font_size" => {
                     if let Some(n) = val.as_f32() {
-                        if n > 0.0 {
-                            self.font_size = n;
+                        if n.is_finite() {
+                            self.font_size = n.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
                         }
                     }
                 }
                 "padding" => {
                     if let Some(n) = val.as_f32() {
-                        if n >= 0.0 {
-                            self.padding = n;
+                        if n.is_finite() {
+                            self.padding = n.clamp(0.0, MAX_PADDING);
                         }
                     }
                 }
@@ -109,7 +119,7 @@ impl Config {
                 }
                 "scrollback" => {
                     if let Value::Int(n) = val {
-                        self.scrollback = n.max(0) as usize;
+                        self.scrollback = n.clamp(0, MAX_SCROLLBACK) as usize;
                     }
                 }
                 _ => {}
@@ -238,10 +248,16 @@ mod tests {
     }
 
     #[test]
-    fn nonsense_metrics_keep_defaults() {
+    fn out_of_range_metrics_are_clamped() {
+        // Out-of-range numbers clamp to the safe bounds — they can't be
+        // allowed to drive the Term grid allocation to OOM.
         let mut c = Config::default();
-        c.apply("font_size = -3\npadding = huge\n");
-        assert_eq!(c.font_size, 28.0); // negative rejected
+        c.apply("font_size = 2\nscrollback = 9999999\n");
+        assert_eq!(c.font_size, 6.0);
+        assert_eq!(c.scrollback, 50_000);
+        // A non-numeric value is ignored entirely — default kept.
+        let mut c = Config::default();
+        c.apply("padding = huge\n");
         assert_eq!(c.padding, 24.0);
     }
 }
