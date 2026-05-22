@@ -20,7 +20,7 @@ use crate::config::{BellStyle, Config};
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
-use crate::{TabId, UserEvent, BACKGROUND, FONT_SIZE, LINE_HEIGHT, TEXT_LEFT, TEXT_TOP};
+use crate::{TabId, UserEvent, BACKGROUND};
 
 const UNDERLINE_THICKNESS: f32 = 1.5;
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
@@ -75,7 +75,7 @@ const TAB_SEPARATOR: [f32; 4] = [0.16, 0.16, 0.20, 1.0];
 /// Font size for tab titles, smaller than content text so they fit in the
 /// bar nicely.
 const TAB_FONT_SIZE: f32 = 18.0;
-const TAB_LINE_HEIGHT: f32 = 26.0;
+const TAB_LINE_H: f32 = 26.0;
 /// Horizontal inset from the tab's left edge to where the title text starts.
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
@@ -92,7 +92,7 @@ const MODAL_CARD_H: f32 = 220.0;
 const MODAL_BTN_H: f32 = 56.0;
 const MODAL_BTN_W: f32 = 140.0;
 const MODAL_FONT_SIZE: f32 = 22.0;
-const MODAL_LINE_HEIGHT: f32 = 32.0;
+const MODAL_LINE_H: f32 = 32.0;
 
 /// Memory kill-switch. If peak RSS ever crosses this, terminite exits before
 /// the OS does it for us (the 2026-05-20 incident took the whole Mac down at
@@ -467,11 +467,6 @@ impl PaneNode {
     }
 }
 
-/// Inner padding from a pane's content-area edge to where its text grid
-/// begins. Both equal `TEXT_LEFT`.
-const PANE_PAD_X: f32 = TEXT_LEFT;
-const PANE_PAD_Y: f32 = TEXT_LEFT;
-
 /// Colour of the seam drawn in a split's divider gap.
 const DIVIDER_COLOR: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
 
@@ -565,11 +560,11 @@ fn split_ratio_from_cursor(pane: PaneRect, dir: SplitDir, cx: f32, cy: f32) -> f
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
 /// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
-fn pane_grid(rect: PaneRect, cell_advance: f32) -> (usize, usize) {
-    let avail_w = (rect.w - PANE_PAD_X).max(cell_advance);
-    let avail_h = (rect.h - TAB_BAR_HEIGHT - PANE_PAD_Y).max(LINE_HEIGHT);
+fn pane_grid(rect: PaneRect, cell_advance: f32, line_height: f32, pad: f32) -> (usize, usize) {
+    let avail_w = (rect.w - pad).max(cell_advance);
+    let avail_h = (rect.h - TAB_BAR_HEIGHT - pad).max(line_height);
     let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
-    let rows = (avail_h / LINE_HEIGHT).floor().max(1.0) as usize;
+    let rows = (avail_h / line_height).floor().max(1.0) as usize;
     (cols, rows)
 }
 
@@ -772,7 +767,14 @@ pub struct Renderer {
     /// (one per tab) at different positions.
     close_buffer: Buffer,
 
+    /// Layout metrics — derived once at startup from the config and a font
+    /// measurement. font_size / family / padding are startup-applied; the
+    /// config's live values may differ after a focus-reload.
     cell_advance: f32,
+    line_height: f32,
+    pad: f32,
+    font_size: f32,
+    font_family: String,
     grid_cols: usize,
     grid_rows: usize,
 
@@ -882,7 +884,15 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut font_system = FontSystem::new();
-        let cell_advance = measure_cell_advance(&mut font_system);
+
+        // Layout metrics from the config, locked for this run. line_height
+        // derives from font_size; cell_advance is measured from the font.
+        let config = Config::load();
+        let font_size = config.font_size;
+        let font_family = config.font_family.clone();
+        let line_height = (font_size * LINE_H_RATIO).round();
+        let pad = config.padding;
+        let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
@@ -908,14 +918,19 @@ impl Renderer {
         let physical_width = width as f32;
         let physical_height = height as f32;
 
-        let config = Config::load();
-
-        let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
+        let (cols, rows) = compute_grid_size(
+            physical_width,
+            physical_height,
+            cell_advance,
+            line_height,
+            pad,
+        );
         let first_tab_id = TabId(0);
         let live_term = LiveTerm::new(
             cols,
             rows,
             cell_advance,
+            line_height,
             proxy.clone(),
             first_tab_id,
             None,
@@ -928,8 +943,15 @@ impl Renderer {
 
         let first_title = "terminite".to_string();
         let first_title_buf = make_title_buffer(&mut font_system, &first_title);
-        let first_text_buf =
-            make_content_buffer(&mut font_system, cell_advance, physical_width, physical_height);
+        let first_text_buf = make_content_buffer(
+            &mut font_system,
+            cell_advance,
+            line_height,
+            font_size,
+            &font_family,
+            physical_width,
+            physical_height,
+        );
         let first_tab = Tab::new(
             first_tab_id,
             first_title,
@@ -964,6 +986,10 @@ impl Renderer {
             modal_text_renderer,
             close_buffer,
             cell_advance,
+            line_height,
+            pad,
+            font_size,
+            font_family,
             grid_cols: cols,
             grid_rows: rows,
             root: Some(root),
@@ -1060,11 +1086,12 @@ impl Renderer {
         self.next_tab_id += 1;
         // The new tab joins the active pane, sized to that pane's rect.
         let rect = self.active_pane_rect();
-        let (cols, rows) = pane_grid(rect, self.cell_advance);
+        let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad);
         let live_term = LiveTerm::new(
             cols,
             rows,
             self.cell_advance,
+            self.line_height,
             self.proxy.clone(),
             id,
             cwd,
@@ -1072,8 +1099,15 @@ impl Renderer {
         );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let text_buf =
-            make_content_buffer(&mut self.font_system, self.cell_advance, rect.w, rect.h);
+        let text_buf = make_content_buffer(
+            &mut self.font_system,
+            self.cell_advance,
+            self.line_height,
+            self.font_size,
+            &self.font_family,
+            rect.w,
+            rect.h,
+        );
         let tab = Tab::new(id, title, title_buf, live_term, text_buf, cols, rows);
         let pane = self.active_pane_mut();
         pane.tabs.push(tab);
@@ -1509,7 +1543,7 @@ impl Renderer {
     /// SIGWINCH alacritty sends, so they must stay correct for the switch.
     fn relayout(&mut self) {
         for (pid, rect) in self.pane_layout() {
-            let (cols, rows) = pane_grid(rect, self.cell_advance);
+            let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad);
             let content_h = (rect.h - TAB_BAR_HEIGHT).max(1.0);
             let pane = self
                 .root
@@ -1559,6 +1593,7 @@ impl Renderer {
             self.grid_cols.max(1),
             self.grid_rows.max(1),
             self.cell_advance,
+            self.line_height,
             self.proxy.clone(),
             tab_id,
             cwd,
@@ -1566,7 +1601,15 @@ impl Renderer {
         );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let buf = make_content_buffer(&mut self.font_system, self.cell_advance, 100.0, 100.0);
+        let buf = make_content_buffer(
+            &mut self.font_system,
+            self.cell_advance,
+            self.line_height,
+            self.font_size,
+            &self.font_family,
+            100.0,
+            100.0,
+        );
         let new_tab = Tab::new(
             tab_id,
             title,
@@ -1722,9 +1765,10 @@ impl Renderer {
     /// Convert a mouse pixel position into an absolute (Line, Column) using
     /// the current display_offset. Used for both selection start and extend.
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
+        let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
-        let left = apr.x + PANE_PAD_X;
-        let top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
+        let left = apr.x + pad;
+        let top = apr.y + TAB_BAR_HEIGHT + pad;
         let cx = (x - left).max(0.0);
         let col = ((cx / self.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
@@ -1732,7 +1776,7 @@ impl Renderer {
         // floor so a click just inside the top of viewport while the buffer
         // is shifted down resolves to row -1 (the extra row above the
         // viewport) when appropriate.
-        let cy = (y - top - self.active_tab_ref().pixel_offset) / LINE_HEIGHT;
+        let cy = (y - top - self.active_tab_ref().pixel_offset) / line_height;
         let vl = cy.floor() as i32;
         let vl = vl.max(-1).min(self.grid_rows as i32 - 1);
         let display_offset = self.active_tab_ref().live_term.offset_and_history().0 as i32;
@@ -1741,6 +1785,7 @@ impl Renderer {
 
     pub fn mouse_moved(&mut self, x: f32, y: f32, modifiers: ModifiersState) {
         self.mouse_pos = (x, y);
+        let (pad, line_height) = (self.pad, self.line_height);
 
         // Context menu up — just track the hovered item.
         if self.context_menu.is_some() {
@@ -1847,7 +1892,7 @@ impl Renderer {
             let (last_x, last_y) = self.active_tab_mut().last_drag_mouse_pos;
             let dx = (x - last_x).abs();
             let dy = (y - last_y).abs();
-            let big_motion = dx >= self.cell_advance * 0.5 || dy >= LINE_HEIGHT * 0.5;
+            let big_motion = dx >= self.cell_advance * 0.5 || dy >= line_height * 0.5;
             if big_motion {
                 let (line, col) = self.pixel_to_absolute(x, y);
                 if let Some(sel) = self.active_tab_mut().selection.as_mut() {
@@ -1861,7 +1906,7 @@ impl Renderer {
             // bottom edge: keep scrolling while the user holds the button
             // there, extending the selection as new content reveals.
             let apr = self.active_pane_rect();
-            let pane_top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
+            let pane_top = apr.y + TAB_BAR_HEIGHT + pad;
             let pane_bottom = apr.y + apr.h;
             let new_dir = if y < pane_top + AUTOSCROLL_MARGIN_PX {
                 Some(1)
@@ -2100,6 +2145,7 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
+        let line_height = self.line_height;
         // The wheel acts on the pane *under the cursor* — you can scroll a
         // pane's history without stealing keyboard focus from another.
         let pid = match self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
@@ -2118,7 +2164,7 @@ impl Renderer {
             }
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
-                MouseScrollDelta::PixelDelta(p) => p.y as f32 / LINE_HEIGHT,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 / line_height,
             };
             let direction = if pixels > 0.0 {
                 MouseEvent::WheelUp
@@ -2139,27 +2185,27 @@ impl Renderer {
         // for pixel-smooth scrolling. LineDelta is real-wheel "clicks" (~3
         // lines each, scaled to pixels); PixelDelta is trackpad pixels.
         let pixels = match delta {
-            MouseScrollDelta::LineDelta(_, y) => y * 3.0 * LINE_HEIGHT,
+            MouseScrollDelta::LineDelta(_, y) => y * 3.0 * line_height,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
         self.pane_tab_mut(pid).pixel_offset += pixels;
 
         // Pop whole lines into the term; the remainder stays as a sub-line
         // pixel shift used at render time. `floor` keeps the remainder in
-        // [0, LINE_HEIGHT) for any input direction — but only when the
+        // [0, line_height) for any input direction — but only when the
         // requested scroll actually happens. If alacritty clamps (we asked
         // Delta(-2) but were at offset=1), subtracting the full `whole`
         // leaves a residual that renders as motion in the wrong direction,
         // and floor's over-pop re-establishes the residual on every event
         // — so the bottom (offset=0) is never reached cleanly. Subtract by
         // the *actual* offset delta instead.
-        let whole = (self.pane_tab_mut(pid).pixel_offset / LINE_HEIGHT).floor() as i32;
+        let whole = (self.pane_tab_mut(pid).pixel_offset / line_height).floor() as i32;
         if whole != 0 {
             let (before, _) = self.pane_tab_mut(pid).live_term.offset_and_history();
             self.pane_tab_mut(pid).live_term.scroll(TermScroll::Delta(whole));
             let (after, history) = self.pane_tab_mut(pid).live_term.offset_and_history();
             let actual = after as i32 - before as i32;
-            self.pane_tab_mut(pid).pixel_offset -= actual as f32 * LINE_HEIGHT;
+            self.pane_tab_mut(pid).pixel_offset -= actual as f32 * line_height;
             if actual != whole {
                 // Clamped at a scrollback boundary; drop the residual.
                 self.pane_tab_mut(pid).pixel_offset = 0.0;
@@ -2410,7 +2456,7 @@ impl Renderer {
             rect: [rect.x, bar_top, rect.w, TAB_BAR_HEIGHT],
             color: TAB_INACTIVE_BG,
         });
-        let text_top = bar_top + (TAB_BAR_HEIGHT - TAB_LINE_HEIGHT) / 2.0;
+        let text_top = bar_top + (TAB_BAR_HEIGHT - TAB_LINE_H) / 2.0;
         let mut slots = Vec::with_capacity(layout.len());
         for (i, (x, w, is_active)) in layout.iter().enumerate() {
             let (x, w, is_active) = (*x, *w, *is_active);
@@ -2523,15 +2569,16 @@ impl Renderer {
     /// 1-indexed (col, row) inside the visible viewport, for mouse-reporting
     /// protocols. Returns `None` if the pointer is outside the text area.
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
+        let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
-        let left = apr.x + PANE_PAD_X;
-        let top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
+        let left = apr.x + pad;
+        let top = apr.y + TAB_BAR_HEIGHT + pad;
         if x < left {
             return None;
         }
         // pixel_offset correction so the reported cell is the one the user
         // visually clicked on, not the natural-grid cell.
-        let row_f = (y - top - self.active_tab_ref().pixel_offset) / LINE_HEIGHT;
+        let row_f = (y - top - self.active_tab_ref().pixel_offset) / line_height;
         if row_f < 0.0 {
             return None;
         }
@@ -2718,7 +2765,7 @@ impl Renderer {
             let confirm_color = Color::rgb(245, 240, 240);
             let inset = 28.0;
             let title_top = card_y + inset;
-            let body_top = title_top + MODAL_LINE_HEIGHT + 8.0;
+            let body_top = title_top + MODAL_LINE_H + 8.0;
             let card_bounds = TextBounds {
                 left: card_x as i32,
                 top: card_y as i32,
@@ -2749,7 +2796,7 @@ impl Renderer {
                 TextArea {
                     buffer: &modal.cancel_buf,
                     left: cr.0 + (cr.2 - MODAL_BTN_W * 0.55) * 0.5,
-                    top: cr.1 + (cr.3 - MODAL_LINE_HEIGHT) * 0.5,
+                    top: cr.1 + (cr.3 - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: cr.0 as i32,
@@ -2763,7 +2810,7 @@ impl Renderer {
                 TextArea {
                     buffer: &modal.confirm_buf,
                     left: fr.0 + (fr.2 - MODAL_BTN_W * 0.55) * 0.5,
-                    top: fr.1 + (fr.3 - MODAL_LINE_HEIGHT) * 0.5,
+                    top: fr.1 + (fr.3 - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: fr.0 as i32,
@@ -2800,7 +2847,7 @@ impl Renderer {
                     TextArea {
                         buffer: &item.label_buf,
                         left: menu.x + text_inset,
-                        top: row_y + (MENU_ITEM_H - MODAL_LINE_HEIGHT) * 0.5,
+                        top: row_y + (MENU_ITEM_H - MODAL_LINE_H) * 0.5,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: menu.x as i32,
@@ -2883,7 +2930,7 @@ impl Renderer {
                 tab_areas.push(TextArea {
                     buffer: &find.bar_buf,
                     left: bx + 16.0,
-                    top: by + (FIND_BAR_H - MODAL_LINE_HEIGHT) * 0.5,
+                    top: by + (FIND_BAR_H - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: bx as i32,
@@ -3025,12 +3072,14 @@ impl Renderer {
         tab_bar: &mut Vec<RectInstance>,
     ) -> PaneDraw {
         let cell_advance = self.cell_advance;
+        let line_height = self.line_height;
+        let pad = self.pad;
         // This pane's own tab bar fills the top strip of its rect.
         let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
 
         // Content origin and clip box — below this pane's tab bar.
-        let px = rect.x + PANE_PAD_X;
-        let py = rect.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
+        let px = rect.x + pad;
+        let py = rect.y + TAB_BAR_HEIGHT + pad;
         let box_l = px;
         let box_t = py;
         let box_r = rect.x + rect.w;
@@ -3117,7 +3166,8 @@ impl Renderer {
                 .active_tab_mut();
             let stale = tab.buffer_dirty || text_runs != tab.last_text_runs;
             if stale {
-                let default_attrs = Attrs::new().family(Family::Monospace);
+                let default_attrs =
+                    Attrs::new().family(font_family(&self.font_family));
                 tab.text_buffer.set_rich_text(
                     &mut self.font_system,
                     text_runs.iter().map(|(text, style)| {
@@ -3163,9 +3213,9 @@ impl Renderer {
         for run in &bg_runs {
             if let Some(rc) = clip([
                 px + run.start_col as f32 * cell_advance,
-                py + run.line as f32 * LINE_HEIGHT + y_shift,
+                py + run.line as f32 * line_height + y_shift,
                 run.width as f32 * cell_advance,
-                LINE_HEIGHT,
+                line_height,
             ]) {
                 below.push(RectInstance {
                     rect: rc,
@@ -3194,9 +3244,9 @@ impl Renderer {
                     }
                     if let Some(rc) = clip([
                         px + col_start as f32 * cell_advance,
-                        py + vl as f32 * LINE_HEIGHT + y_shift,
+                        py + vl as f32 * line_height + y_shift,
                         (col_end - col_start) as f32 * cell_advance,
-                        LINE_HEIGHT,
+                        line_height,
                     ]) {
                         below.push(RectInstance { rect: rc, color: SELECTION_COLOR });
                     }
@@ -3219,9 +3269,9 @@ impl Renderer {
                     };
                     if let Some(rc) = clip([
                         px + cs as f32 * cell_advance,
-                        py + vl as f32 * LINE_HEIGHT + y_shift,
+                        py + vl as f32 * line_height + y_shift,
                         (ce - cs + 1) as f32 * cell_advance,
-                        LINE_HEIGHT,
+                        line_height,
                     ]) {
                         below.push(RectInstance { rect: rc, color });
                     }
@@ -3233,20 +3283,20 @@ impl Renderer {
         let cursor_visible = !matches!(cursor_shape, CursorShapeKind::Hidden);
         if cursor_visible && blink_on {
             let cx = px + cursor_col as f32 * cell_advance;
-            let cy_base = py + (cursor_line.max(0) as f32) * LINE_HEIGHT + y_shift;
+            let cy_base = py + (cursor_line.max(0) as f32) * line_height + y_shift;
             let (crect, is_hollow) = match cursor_shape {
                 CursorShapeKind::Block | CursorShapeKind::HollowBlock => (
                     [
                         cx - CURSOR_PAD_X,
                         cy_base - CURSOR_PAD_Y,
                         cell_advance + 2.0 * CURSOR_PAD_X,
-                        LINE_HEIGHT + 2.0 * CURSOR_PAD_Y,
+                        line_height + 2.0 * CURSOR_PAD_Y,
                     ],
                     matches!(cursor_shape, CursorShapeKind::HollowBlock),
                 ),
-                CursorShapeKind::Beam => ([cx, cy_base, 2.0, LINE_HEIGHT], false),
+                CursorShapeKind::Beam => ([cx, cy_base, 2.0, line_height], false),
                 CursorShapeKind::Underline => {
-                    ([cx, cy_base + LINE_HEIGHT - 2.0, cell_advance, 2.0], false)
+                    ([cx, cy_base + line_height - 2.0, cell_advance, 2.0], false)
                 }
                 CursorShapeKind::Hidden => ([0.0; 4], false),
             };
@@ -3272,13 +3322,13 @@ impl Renderer {
         for run in &deco_runs {
             let x = px + run.start_col as f32 * cell_advance;
             let w = run.width as f32 * cell_advance;
-            let line_y = py + run.line as f32 * LINE_HEIGHT + y_shift;
+            let line_y = py + run.line as f32 * line_height + y_shift;
             let (y, h) = match run.kind {
                 DecorationKind::Underline | DecorationKind::DoubleUnderline => {
-                    (line_y + LINE_HEIGHT - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS)
+                    (line_y + line_height - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS)
                 }
                 DecorationKind::Strikeout => (
-                    line_y + LINE_HEIGHT / 2.0 - STRIKEOUT_THICKNESS / 2.0,
+                    line_y + line_height / 2.0 - STRIKEOUT_THICKNESS / 2.0,
                     STRIKEOUT_THICKNESS,
                 ),
             };
@@ -3299,10 +3349,10 @@ impl Renderer {
         for run in &link_runs {
             let x = px + run.start_col as f32 * cell_advance;
             let w = run.width as f32 * cell_advance;
-            let line_y = py + run.line as f32 * LINE_HEIGHT + y_shift;
+            let line_y = py + run.line as f32 * line_height + y_shift;
             if let Some(rc) = clip([
                 x,
-                line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
+                line_y + line_height - UNDERLINE_THICKNESS,
                 w,
                 UNDERLINE_THICKNESS,
             ]) {
@@ -3313,7 +3363,7 @@ impl Renderer {
         // The buffer's top sits one line up when an extra row is present; the
         // y_shift slides it into view as pixel_offset grows.
         let text_top = if has_extra_row {
-            py - LINE_HEIGHT + y_shift
+            py - line_height + y_shift
         } else {
             py + y_shift
         };
@@ -3404,21 +3454,39 @@ fn button_code(button: MouseButton) -> Option<u32> {
     })
 }
 
+/// Line height as a multiple of font size — the pre-config ratio (36 at
+/// font size 28). Derives `line_height` from the configured `font_size`.
+const LINE_H_RATIO: f32 = 36.0 / 28.0;
+
+/// The cosmic-text font family for a config `font_family` string — empty
+/// means terminite's built-in monospace default.
+fn font_family(name: &str) -> Family<'_> {
+    if name.is_empty() {
+        Family::Monospace
+    } else {
+        Family::Name(name)
+    }
+}
+
 /// Build a content `Buffer` for a pane — monospace, one-cell glyph advance,
 /// sized to the pane's pixel rect.
+#[allow(clippy::too_many_arguments)]
 fn make_content_buffer(
     font_system: &mut FontSystem,
     cell_advance: f32,
+    line_height: f32,
+    font_size: f32,
+    family: &str,
     w: f32,
     h: f32,
 ) -> Buffer {
-    let mut buf = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
     buf.set_size(font_system, Some(w.max(1.0)), Some(h.max(1.0)));
     buf.set_monospace_width(font_system, Some(cell_advance));
     buf.set_text(
         font_system,
         "",
-        &Attrs::new().family(Family::Monospace),
+        &Attrs::new().family(font_family(family)),
         Shaping::Advanced,
         None,
     );
@@ -3428,9 +3496,9 @@ fn make_content_buffer(
 
 /// Build a `Buffer` for modal-card text at a larger font size.
 fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
-    let metrics = Metrics::new(MODAL_FONT_SIZE, MODAL_LINE_HEIGHT);
+    let metrics = Metrics::new(MODAL_FONT_SIZE, MODAL_LINE_H);
     let mut buf = Buffer::new(font_system, metrics);
-    buf.set_size(font_system, Some(MODAL_CARD_W), Some(MODAL_LINE_HEIGHT * 3.0));
+    buf.set_size(font_system, Some(MODAL_CARD_W), Some(MODAL_LINE_H * 3.0));
     let attrs = Attrs::new().family(Family::Monospace);
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -3441,9 +3509,9 @@ fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
 /// maximum tab width so titles never wrap; bounds at render-time clip to the
 /// actual tab area.
 fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
-    let metrics = Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT);
+    let metrics = Metrics::new(TAB_FONT_SIZE, TAB_LINE_H);
     let mut buf = Buffer::new(font_system, metrics);
-    buf.set_size(font_system, Some(TAB_MAX_WIDTH * 2.0), Some(TAB_LINE_HEIGHT));
+    buf.set_size(font_system, Some(TAB_MAX_WIDTH * 2.0), Some(TAB_LINE_H));
     let attrs = Attrs::new().family(Family::Monospace);
     buf.set_text(font_system, title, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -3481,21 +3549,27 @@ fn compute_grid_size(
     physical_width: f32,
     physical_height: f32,
     cell_advance: f32,
+    line_height: f32,
+    pad: f32,
 ) -> (usize, usize) {
-    let available_w = (physical_width - TEXT_LEFT).max(cell_advance);
-    let available_h = (physical_height - TEXT_TOP).max(LINE_HEIGHT);
+    // The full window as a single pane: one tab-bar strip, top-left pad.
+    let available_w = (physical_width - pad).max(cell_advance);
+    let available_h = (physical_height - TAB_BAR_HEIGHT - pad).max(line_height);
     let cols = (available_w / cell_advance) as usize;
-    let rows = (available_h / LINE_HEIGHT) as usize;
+    let rows = (available_h / line_height) as usize;
     (cols.max(2), rows.max(2))
 }
 
-fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
-    let mut probe = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-    probe.set_size(font_system, Some(1000.0), Some(LINE_HEIGHT * 2.0));
+/// Measure the one-cell advance width of the configured font at the
+/// configured size, by shaping an `M` and reading its glyph advance.
+fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32, family: &str) -> f32 {
+    let line_height = font_size * LINE_H_RATIO;
+    let mut probe = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    probe.set_size(font_system, Some(1000.0), Some(line_height * 2.0));
     probe.set_text(
         font_system,
         "M",
-        &Attrs::new().family(Family::Monospace),
+        &Attrs::new().family(font_family(family)),
         Shaping::Advanced,
         None,
     );
@@ -3505,7 +3579,7 @@ fn measure_cell_advance(font_system: &mut FontSystem) -> f32 {
         .next()
         .and_then(|run| run.glyphs.first())
         .map(|glyph| glyph.w)
-        .unwrap_or(FONT_SIZE * 0.6)
+        .unwrap_or(font_size * 0.6)
 }
 
 // ── Memory kill-switch ────────────────────────────────────────────────────

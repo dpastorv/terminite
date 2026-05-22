@@ -24,6 +24,13 @@ pub enum BellStyle {
 /// swaps it on reload.
 #[derive(Clone)]
 pub struct Config {
+    /// Monospace font family. Empty means terminite's built-in default.
+    /// Startup-applied — changing it needs a relaunch.
+    pub font_family: String,
+    /// Text size in pixels. Startup-applied.
+    pub font_size: f32,
+    /// Inner padding from the pane edge to the text grid. Startup-applied.
+    pub padding: f32,
     /// Blink the cursor while the window is focused.
     pub cursor_blink: bool,
     /// What the bell does.
@@ -36,6 +43,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            font_family: String::new(),
+            font_size: 28.0,
+            padding: 24.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
@@ -63,6 +73,25 @@ impl Config {
     fn apply(&mut self, text: &str) {
         for (key, val) in parse_flat_toml(text) {
             match key.as_str() {
+                "font_family" => {
+                    if let Value::Str(s) = &val {
+                        self.font_family = s.clone();
+                    }
+                }
+                "font_size" => {
+                    if let Some(n) = val.as_f32() {
+                        if n > 0.0 {
+                            self.font_size = n;
+                        }
+                    }
+                }
+                "padding" => {
+                    if let Some(n) = val.as_f32() {
+                        if n >= 0.0 {
+                            self.padding = n;
+                        }
+                    }
+                }
                 "cursor_blink" => {
                     if let Value::Bool(b) = val {
                         self.cursor_blink = b;
@@ -93,7 +122,19 @@ impl Config {
 enum Value {
     Str(String),
     Int(i64),
+    Float(f64),
     Bool(bool),
+}
+
+impl Value {
+    /// A numeric value as `f32`, accepting either an integer or a float.
+    fn as_f32(&self) -> Option<f32> {
+        match self {
+            Value::Int(i) => Some(*i as f32),
+            Value::Float(f) => Some(*f as f32),
+            _ => None,
+        }
+    }
 }
 
 /// Parse a flat `key = value` subset of TOML: no tables, no arrays. `#`
@@ -131,7 +172,11 @@ fn parse_value(rhs: &str) -> Option<Value> {
         "" => None,
         "true" => Some(Value::Bool(true)),
         "false" => Some(Value::Bool(false)),
-        bare => bare.parse::<i64>().ok().map(Value::Int),
+        bare => bare
+            .parse::<i64>()
+            .ok()
+            .map(Value::Int)
+            .or_else(|| bare.parse::<f64>().ok().map(Value::Float)),
     }
 }
 
@@ -177,5 +222,26 @@ mod tests {
         let mut c = Config::default();
         c.apply("bell_style = 'audible'\n");
         assert_eq!(c.bell_style, BellStyle::Visual);
+    }
+
+    #[test]
+    fn metric_fields() {
+        let mut c = Config::default();
+        c.apply(
+            "font_family = \"JetBrains Mono\"\n\
+             font_size = 16\n\
+             padding = 18.5\n",
+        );
+        assert_eq!(c.font_family, "JetBrains Mono");
+        assert_eq!(c.font_size, 16.0); // integer accepted as a float
+        assert_eq!(c.padding, 18.5);
+    }
+
+    #[test]
+    fn nonsense_metrics_keep_defaults() {
+        let mut c = Config::default();
+        c.apply("font_size = -3\npadding = huge\n");
+        assert_eq!(c.font_size, 28.0); // negative rejected
+        assert_eq!(c.padding, 24.0);
     }
 }

@@ -27,17 +27,9 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
-// Sized in physical pixels. On a Retina display (scale=2) these are
-// equivalent to ~14pt logical text — comfortable terminal default.
-pub const FONT_SIZE: f32 = 28.0;
-pub const LINE_HEIGHT: f32 = 36.0;
-
-/// Horizontal padding from the window edge to the text.
-pub const TEXT_LEFT: f32 = 24.0;
-/// Vertical offset from the window top to where the text area begins. This
-/// accounts for the tab bar (renderer-internal) plus inner padding. The
-/// renderer draws the tab bar in `[0, TAB_BAR_HEIGHT)`; text sits below.
-pub const TEXT_TOP: f32 = 68.0;
+// Font size, line height, and text padding are no longer constants — they
+// come from the config (see `config.rs`) and live on the renderer as
+// runtime metrics, measured against the configured font at startup.
 
 // ── Cross-thread event into winit ──────────────────────────────────────────
 

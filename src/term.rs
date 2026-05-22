@@ -22,7 +22,7 @@ use glyphon::Color;
 use winit::event_loop::EventLoopProxy;
 
 use crate::palette::{dim_color, resolve_color, BACKGROUND_RGB, DEFAULT_FG};
-use crate::{TabId, UserEvent, LINE_HEIGHT};
+use crate::{TabId, UserEvent};
 
 /// Visual style of a contiguous text run. Two cells join the same run only
 /// when every field matches.
@@ -187,6 +187,7 @@ pub struct LiveTerm {
     term: Arc<FairMutex<Term<Notifier>>>,
     sender: EventLoopSender,
     cell_advance: f32,
+    line_height: f32,
     /// PID of the shell process at the other end of the PTY. Captured before
     /// the `Pty` was moved into the I/O thread so we can query `proc_pidinfo`
     /// (cwd inheritance, name) later.
@@ -224,6 +225,7 @@ impl LiveTerm {
         cols: usize,
         rows: usize,
         cell_advance: f32,
+        line_height: f32,
         proxy: EventLoopProxy<UserEvent>,
         tab_id: TabId,
         cwd: Option<PathBuf>,
@@ -249,7 +251,7 @@ impl LiveTerm {
             num_lines: rows as u16,
             num_cols: cols as u16,
             cell_width: cell_advance as u16,
-            cell_height: LINE_HEIGHT as u16,
+            cell_height: line_height as u16,
         };
 
         // Explicit terminal capabilities for the shell.
@@ -296,6 +298,7 @@ impl LiveTerm {
             term,
             sender,
             cell_advance,
+            line_height,
             shell_pid,
             master_fd,
             slave_fd,
@@ -408,7 +411,7 @@ impl LiveTerm {
             num_lines: rows as u16,
             num_cols: cols as u16,
             cell_width: self.cell_advance as u16,
-            cell_height: LINE_HEIGHT as u16,
+            cell_height: self.line_height as u16,
         }));
     }
 

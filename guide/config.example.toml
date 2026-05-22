@@ -1,0 +1,28 @@
+# terminite configuration — copy to ~/.config/terminite/config.toml
+#
+# Re-read whenever the window regains focus: edit this file, switch back
+# to terminite, and it applies. Unknown keys are ignored; a missing or
+# unparseable file simply uses the defaults shown here, so terminite can
+# never be broken by its config.
+
+# Monospace font family. Empty string = terminite's built-in default.
+# Startup-applied — relaunch to change.
+font_family = ""
+
+# Text size in pixels. Startup-applied.
+font_size = 28
+
+# Inner padding from the pane edge to the text grid, in pixels.
+# Startup-applied.
+padding = 24
+
+# Blink the cursor while the window is focused. Applies immediately.
+cursor_blink = true
+
+# What the bell (\a) does: "visual" (a brief flash) or "none".
+# Applies immediately.
+bell_style = "visual"
+
+# Scrollback lines kept per shell. Applies to tabs opened after a reload;
+# tabs already open keep the size they were created with.
+scrollback = 10000
