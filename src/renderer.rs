@@ -276,38 +276,41 @@ impl PaneNode {
     }
 
     /// Consume the tree and return a new one where the leaf with `target`
-    /// has been replaced by a Split: the old leaf becomes `first`, a fresh
-    /// leaf `(new_id, new_pane)` becomes `second`.
+    /// has been replaced by a Split at `ratio`: the old leaf becomes
+    /// `first`, a fresh leaf `(new_id, new_pane)` becomes `second`.
     fn into_split(
         self,
         target: PaneId,
         dir: SplitDir,
         new_id: PaneId,
         new_pane: Pane,
+        ratio: f32,
     ) -> PaneNode {
         match self {
             PaneNode::Leaf { id, pane } if id == target => PaneNode::Split {
                 dir,
-                ratio: 0.5,
+                ratio,
                 first: Box::new(PaneNode::Leaf { id, pane }),
                 second: Box::new(PaneNode::Leaf { id: new_id, pane: new_pane }),
             },
             leaf @ PaneNode::Leaf { .. } => leaf,
-            PaneNode::Split { dir: d, ratio, first, second } => {
+            PaneNode::Split { dir: d, ratio: r, first, second } => {
                 if first.find(target).is_some() {
                     PaneNode::Split {
                         dir: d,
-                        ratio,
-                        first: Box::new(first.into_split(target, dir, new_id, new_pane)),
+                        ratio: r,
+                        first: Box::new(
+                            first.into_split(target, dir, new_id, new_pane, ratio),
+                        ),
                         second,
                     }
                 } else {
                     PaneNode::Split {
                         dir: d,
-                        ratio,
+                        ratio: r,
                         first,
                         second: Box::new(
-                            second.into_split(target, dir, new_id, new_pane),
+                            second.into_split(target, dir, new_id, new_pane, ratio),
                         ),
                     }
                 }
@@ -487,22 +490,27 @@ fn clamp_ratio(ratio: f32, span: f32) -> f32 {
 
 /// Hit-box size of the corner split handle (top-right of every pane).
 const SPLIT_HANDLE_SIZE: f32 = 18.0;
-/// Visible grip square drawn inside that hit box.
-const SPLIT_GRIP: f32 = 10.0;
+/// Leg length of the triangular grip drawn in that corner.
+const SPLIT_GRIP: f32 = 14.0;
 /// Resting colour of the split grip.
 const SPLIT_HANDLE_COLOR: [f32; 4] = [0.34, 0.34, 0.40, 1.0];
-/// Minimum drag distance before a corner gesture commits a split.
+/// Minimum drag distance before a corner gesture commits.
 const SPLIT_GESTURE_THRESHOLD: f32 = 24.0;
+/// Translucent wash over a pane the corner gesture would remove.
+const REMOVE_PREVIEW_COLOR: [f32; 4] = [0.55, 0.16, 0.16, 0.38];
 
-/// The drawn grip square inside a pane's top-right corner handle.
-fn split_grip_rect(pane: PaneRect) -> [f32; 4] {
-    let inset = (SPLIT_HANDLE_SIZE - SPLIT_GRIP) / 2.0;
-    [
-        pane.x + pane.w - SPLIT_HANDLE_SIZE + inset,
-        pane.y + inset,
-        SPLIT_GRIP,
-        SPLIT_GRIP,
-    ]
+/// Draw the corner split grip — a small right triangle flush to a pane's
+/// top-right corner (a "peel"), approximated by 1px-tall steps.
+fn push_split_grip(out: &mut Vec<RectInstance>, pane: PaneRect, color: [f32; 4]) {
+    let corner_x = pane.x + pane.w;
+    let steps = SPLIT_GRIP as usize;
+    for i in 0..steps {
+        let w = SPLIT_GRIP - i as f32;
+        out.push(RectInstance {
+            rect: [corner_x - w, pane.y + i as f32, w, 1.0],
+            color,
+        });
+    }
 }
 
 /// True if a point is inside a pane's corner split-handle hit box.
@@ -513,18 +521,45 @@ fn in_split_handle(pane: PaneRect, x: f32, y: f32) -> bool {
         && y <= pane.y + SPLIT_HANDLE_SIZE
 }
 
-/// Decide a split direction from a corner-drag delta: a mostly-vertical
-/// drag (down) stacks the panes; a mostly-horizontal drag (left) sets them
-/// side by side. `None` until the drag passes the commit threshold.
-fn gesture_dir(dx: f32, dy: f32) -> Option<SplitDir> {
+/// What a committed corner-handle gesture does.
+#[derive(Clone, Copy)]
+enum GestureOutcome {
+    Split(SplitDir),
+    Remove,
+}
+
+/// Resolve a corner-drag delta: drag *into* the pane (down → stack,
+/// left → side by side) splits it; drag back *out* (up / right) removes it.
+/// `None` until the drag passes the commit threshold.
+fn gesture_outcome(dx: f32, dy: f32) -> Option<GestureOutcome> {
     if dx.hypot(dy) < SPLIT_GESTURE_THRESHOLD {
         return None;
     }
-    if dy.abs() > dx.abs() {
-        Some(SplitDir::Horizontal)
+    Some(if dy.abs() > dx.abs() {
+        if dy > 0.0 {
+            GestureOutcome::Split(SplitDir::Horizontal)
+        } else {
+            GestureOutcome::Remove
+        }
+    } else if dx < 0.0 {
+        GestureOutcome::Split(SplitDir::Vertical)
     } else {
-        Some(SplitDir::Vertical)
-    }
+        GestureOutcome::Remove
+    })
+}
+
+/// Ratio for a cursor-placed split — where the divider lands inside `pane`,
+/// clamped so neither side falls below `MIN_PANE`.
+fn split_ratio_from_cursor(pane: PaneRect, dir: SplitDir, cx: f32, cy: f32) -> f32 {
+    let (raw, span) = match dir {
+        SplitDir::Vertical => {
+            ((cx - pane.x) / (pane.w - DIVIDER_THICKNESS).max(1.0), pane.w)
+        }
+        SplitDir::Horizontal => {
+            ((cy - pane.y) / (pane.h - DIVIDER_THICKNESS).max(1.0), pane.h)
+        }
+    };
+    clamp_ratio(raw, span)
 }
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
@@ -1484,8 +1519,9 @@ impl Renderer {
         self.grid_rows = rows;
     }
 
-    /// Split the active pane in two; the new pane (one fresh tab) is focused.
-    pub fn split_active(&mut self, dir: SplitDir) {
+    /// Split the active pane in two at `ratio`; the new pane (one fresh tab)
+    /// is focused.
+    pub fn split_active(&mut self, dir: SplitDir, ratio: f32) {
         let target = self.active_pane;
         let cwd = self.active_tab_ref().live_term.current_dir();
         let tab_id = TabId(self.next_tab_id);
@@ -1514,7 +1550,7 @@ impl Renderer {
             self.grid_rows.max(1),
         );
         let root = self.root.take().expect("pane tree present");
-        self.root = Some(root.into_split(target, dir, new_pid, Pane::single(new_tab)));
+        self.root = Some(root.into_split(target, dir, new_pid, Pane::single(new_tab), ratio));
         self.active_pane = new_pid;
         self.relayout();
         self.sync_active_grid();
@@ -1922,14 +1958,34 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
-        // Finish a corner split gesture: a drag past the threshold commits
-        // the split (down → stacked, left → side by side).
+        // Finish a corner gesture: drag in splits the pane at the cursor,
+        // drag back out removes it; a short drag cancels.
         if let Some(g) = self.split_gesture.take() {
             let dx = self.mouse_pos.0 - g.start.0;
             let dy = self.mouse_pos.1 - g.start.1;
-            if let Some(dir) = gesture_dir(dx, dy) {
-                self.focus_pane(g.pid);
-                self.split_active(dir);
+            match gesture_outcome(dx, dy) {
+                Some(GestureOutcome::Split(dir)) => {
+                    let rect = self
+                        .pane_layout()
+                        .into_iter()
+                        .find(|(id, _)| *id == g.pid)
+                        .map(|(_, r)| r);
+                    if let Some(r) = rect {
+                        let ratio = split_ratio_from_cursor(
+                            r,
+                            dir,
+                            self.mouse_pos.0,
+                            self.mouse_pos.1,
+                        );
+                        self.focus_pane(g.pid);
+                        self.split_active(dir, ratio);
+                    }
+                }
+                Some(GestureOutcome::Remove) => {
+                    self.focus_pane(g.pid);
+                    let _ = self.close_active_pane();
+                }
+                None => {}
             }
             self.cursor_icon = CursorIcon::Default;
             self.window.set_cursor(CursorIcon::Default);
@@ -2329,16 +2385,18 @@ impl Renderer {
             rect: [rect.x, bar_top + TAB_BAR_HEIGHT, rect.w, 1.0],
             color: TAB_SEPARATOR,
         });
-        // Corner split handle — drag it to split this pane.
+        // Corner split handle — a "peel" triangle; drag it to split (or,
+        // dragged back out, to remove) this pane.
         let grip_active = self.split_gesture.as_ref().map(|g| g.pid) == Some(pid);
-        out.push(RectInstance {
-            rect: split_grip_rect(rect),
-            color: if grip_active {
+        push_split_grip(
+            out,
+            rect,
+            if grip_active {
                 TAB_ACTIVE_UNDERLINE
             } else {
                 SPLIT_HANDLE_COLOR
             },
-        });
+        );
         slots
     }
 
@@ -2462,25 +2520,46 @@ impl Renderer {
         // Split divider seams drawn on top of pane content.
         collect_dividers(self.root_ref(), self.content_rect(), &mut above);
 
-        // Live preview of a corner-handle split gesture: a gold line where
-        // the split would land once released.
+        // Live preview of a corner-handle gesture: a gold line at the
+        // cursor-placed split, or a red wash over a pane about to be removed.
         if let Some(g) = self.split_gesture.as_ref() {
             let dx = self.mouse_pos.0 - g.start.0;
             let dy = self.mouse_pos.1 - g.start.1;
-            if let Some(dir) = gesture_dir(dx, dy) {
-                if let Some((_, r)) = layout.iter().find(|(id, _)| *id == g.pid) {
-                    let preview = match dir {
-                        SplitDir::Horizontal => {
-                            [r.x, r.y + r.h / 2.0 - 1.0, r.w, 2.0]
-                        }
-                        SplitDir::Vertical => {
-                            [r.x + r.w / 2.0 - 1.0, r.y, 2.0, r.h]
-                        }
-                    };
-                    above.push(RectInstance {
-                        rect: preview,
-                        color: TAB_ACTIVE_UNDERLINE,
-                    });
+            if let Some((_, r)) = layout.iter().find(|(id, _)| *id == g.pid).copied() {
+                match gesture_outcome(dx, dy) {
+                    Some(GestureOutcome::Split(dir)) => {
+                        let ratio = split_ratio_from_cursor(
+                            r,
+                            dir,
+                            self.mouse_pos.0,
+                            self.mouse_pos.1,
+                        );
+                        let preview = match dir {
+                            SplitDir::Horizontal => [
+                                r.x,
+                                r.y + (r.h - DIVIDER_THICKNESS) * ratio,
+                                r.w,
+                                DIVIDER_THICKNESS,
+                            ],
+                            SplitDir::Vertical => [
+                                r.x + (r.w - DIVIDER_THICKNESS) * ratio,
+                                r.y,
+                                DIVIDER_THICKNESS,
+                                r.h,
+                            ],
+                        };
+                        above.push(RectInstance {
+                            rect: preview,
+                            color: TAB_ACTIVE_UNDERLINE,
+                        });
+                    }
+                    Some(GestureOutcome::Remove) => {
+                        above.push(RectInstance {
+                            rect: [r.x, r.y, r.w, r.h],
+                            color: REMOVE_PREVIEW_COLOR,
+                        });
+                    }
+                    None => {}
                 }
             }
         }

@@ -301,7 +301,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 }
                                 Some('d') => {
                                     if let Some(r) = self.renderer.as_mut() {
-                                        r.split_active(SplitDir::Horizontal);
+                                        r.split_active(SplitDir::Horizontal, 0.5);
                                     }
                                     return;
                                 }
@@ -341,7 +341,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
                             // Cmd+D: split the active pane side by side.
                             Some('d') => {
                                 if let Some(r) = self.renderer.as_mut() {
-                                    r.split_active(SplitDir::Vertical);
+                                    r.split_active(SplitDir::Vertical, 0.5);
                                 }
                                 return;
                             }
