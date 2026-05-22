@@ -62,6 +62,38 @@ friction.
 
 ## Live log
 
+### 2026-05-21 — The OS won't tell us where the shell is
+
+- **What:** Tab titles should show the shell's working directory
+  (`zsh · ~/dev/terminite`). The obvious macOS way is
+  `proc_pidinfo(PROC_PIDVNODEPATHINFO)` — ask the kernel for another
+  process's cwd. It returns `EPERM` on every call. macOS's TCC hardening
+  blocks an unsigned binary (anything from `cargo run`) from reading
+  another process's vnode path info — even a direct child, even
+  same-user. A long debugging session went into slave-fd vs master-fd,
+  struct sizes, and finally `errno` before the number (1 = EPERM) made it
+  unambiguous.
+- **Why it hurt:** A small feature with a deep hole behind it. The "just
+  ask the OS" instinct is wrong on modern macOS — the OS now treats
+  process introspection as a privilege. And the failure was *silent*:
+  `proc_pidinfo` returns 0 with no error surfaced unless you go read
+  `errno` yourself. The cost wasn't the feature; it was the time spent
+  assuming our code was wrong while the platform had quietly closed the
+  door.
+- **Who:** Both. The human watched thousands of identical error lines
+  scroll past; the AI chased its own tail through fd plumbing before
+  checking the one number that mattered.
+- **Points at:** The terminal can't introspect the shell from the
+  outside — it has to be *told*. OSC 7 is exactly that channel: the
+  shell announces its cwd in-band, the terminal listens. The catch:
+  `vte` 0.15 (and therefore `alacritty_terminal` 0.26) doesn't dispatch
+  OSC 7 — the case isn't in the parser. The fix is a vendored fork of
+  both: teach `vte` to call a new `Handler::set_current_directory`, teach
+  `alacritty_terminal` to emit a `CwdChanged` event, route it through the
+  `Notifier`. In-band beats out-of-band. The same lesson applies to
+  anything we'd be tempted to "ask the OS" for — prefer what the shell
+  tells us over what we reach in and grab.
+
 ### 2026-05-20 — Spawn-per-render melted the laptop
 
 - **What:** Phase 1 Bundle 1 wired cursor blink, drag-edge auto-scroll, and
