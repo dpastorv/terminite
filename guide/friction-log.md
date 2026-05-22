@@ -62,6 +62,38 @@ friction.
 
 ## Live log
 
+### 2026-05-22 — A config value could allocate the machine to death
+
+- **What:** The third hostile-host crash. The config bundle made
+  `font_size` and `scrollback` user-settable — but the cell grid they
+  feed was never bounded. `compute_grid_size` / `pane_grid` computed
+  `cols = width / cell_advance` with no ceiling, and `Term::new`
+  allocates `cols × scrollback × Cell`. A small font (tiny cell advance
+  → huge column count) or a large `scrollback` is therefore a *single*
+  multi-gigabyte allocation. Because it happens inside one call, between
+  renders, the per-frame RSS kill switch never gets a turn — the machine
+  is gone before the next frame.
+- **Why it hurt:** Three crashes now, all the same family — terminite
+  leaking or over-allocating a *system* resource and taking the computer
+  with it. This one stung extra because the audit two crashes back was
+  supposed to be the leanness gate, and it checked for *leaks* but not
+  for *unbounded single allocations*. And the regression was self-
+  inflicted: making a value configurable quietly removed the implicit
+  bound it used to have. Correctness review — it builds, the tests pass
+  — said nothing, because nothing here is incorrect. It is unbounded.
+- **Who:** Both. The human lost the machine a third time and asked,
+  rightly, that we stop trusting "it compiles" as "it is safe to run."
+  The AI shipped the unbounded allocation and is writing this entry.
+- **Points at:** A **system-impact pass** has to be a standing gate
+  before every change ships, separate from correctness: *does this make
+  any allocation, thread count, process count, or fd count unbounded or
+  user-controllable without a clamp?* All three crashes answer yes to
+  that question and would have been caught by asking it. The RSS kill
+  switch is a backstop, not a strategy — it cannot catch a single
+  runaway allocation, and it cannot see orphaned child processes at all.
+  The real defense is bounding every resource at its source: the grid is
+  now clamped, every numeric config field is clamped.
+
 ### 2026-05-22 — Closing a pane orphaned its shell, and the machine fell over
 
 - **What:** `LiveTerm::Drop` closed one fd and nothing else. It never told
