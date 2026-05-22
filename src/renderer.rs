@@ -14,7 +14,7 @@ use glyphon::{
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
-use winit::window::Window;
+use winit::window::{CursorIcon, Window};
 
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
@@ -406,6 +406,61 @@ impl PaneNode {
             }
         }
     }
+
+    /// Find the split divider under a point. Returns the path to the owning
+    /// `Split`, that split's outer rect, and its orientation.
+    fn divider_at(
+        &self,
+        rect: PaneRect,
+        x: f32,
+        y: f32,
+    ) -> Option<(Vec<usize>, PaneRect, SplitDir)> {
+        let PaneNode::Split { dir, ratio, first, second } = self else {
+            return None;
+        };
+        let (r1, r2) = split_rect(rect, *dir, *ratio);
+        let m = DIVIDER_HIT_MARGIN;
+        let self_hit = match dir {
+            SplitDir::Vertical => {
+                let gx = r1.x + r1.w;
+                x >= gx - m
+                    && x <= gx + DIVIDER_THICKNESS + m
+                    && y >= rect.y
+                    && y <= rect.y + rect.h
+            }
+            SplitDir::Horizontal => {
+                let gy = r1.y + r1.h;
+                y >= gy - m
+                    && y <= gy + DIVIDER_THICKNESS + m
+                    && x >= rect.x
+                    && x <= rect.x + rect.w
+            }
+        };
+        if self_hit {
+            return Some((Vec::new(), rect, *dir));
+        }
+        if let Some((mut p, sr, sd)) = first.divider_at(r1, x, y) {
+            p.insert(0, 0);
+            return Some((p, sr, sd));
+        }
+        if let Some((mut p, sr, sd)) = second.divider_at(r2, x, y) {
+            p.insert(0, 1);
+            return Some((p, sr, sd));
+        }
+        None
+    }
+
+    /// Mutable reference to the ratio of the `Split` at `path`.
+    fn split_ratio_at_mut(&mut self, path: &[usize]) -> Option<&mut f32> {
+        match self {
+            PaneNode::Leaf { .. } => None,
+            PaneNode::Split { ratio, first, second, .. } => match path.split_first() {
+                None => Some(ratio),
+                Some((&0, rest)) => first.split_ratio_at_mut(rest),
+                Some((_, rest)) => second.split_ratio_at_mut(rest),
+            },
+        }
+    }
 }
 
 /// Inner padding from a pane's content-area edge to where its text grid
@@ -415,6 +470,20 @@ const PANE_PAD_Y: f32 = TEXT_LEFT;
 
 /// Colour of the seam drawn in a split's divider gap.
 const DIVIDER_COLOR: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+
+/// Extra grab margin each side of a divider — the seam is thin, so the
+/// hit zone is widened for comfortable dragging.
+const DIVIDER_HIT_MARGIN: f32 = 5.0;
+
+/// Smallest a pane is allowed to be dragged to (tab bar + a row + padding).
+const MIN_PANE: f32 = 140.0;
+
+/// Clamp a split ratio so neither child shrinks below `MIN_PANE`.
+fn clamp_ratio(ratio: f32, span: f32) -> f32 {
+    let usable = (span - DIVIDER_THICKNESS).max(1.0);
+    let min_frac = (MIN_PANE / usable).min(0.45);
+    ratio.clamp(min_frac, 1.0 - min_frac)
+}
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
 /// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
@@ -577,6 +646,14 @@ struct TabLabelSlot {
     text_top: f32,
 }
 
+/// An in-progress divider drag: which `Split` (by path), its outer rect at
+/// drag start, and its orientation.
+struct DividerDrag {
+    path: Vec<usize>,
+    outer: PaneRect,
+    dir: SplitDir,
+}
+
 pub struct Renderer {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -627,6 +704,10 @@ pub struct Renderer {
     // Shared mouse / system state. Mouse position is window-relative.
     mouse_pos: (f32, f32),
     clipboard: Option<Clipboard>,
+    /// When Some, a split divider is being dragged to resize.
+    divider_drag: Option<DividerDrag>,
+    /// Last cursor icon set on the window — set only on change.
+    cursor_icon: CursorIcon,
 
     /// Visual bell deadline; `Some(t)` means draw a flash overlay until `t`.
     bell_flash_until: Option<Instant>,
@@ -793,6 +874,8 @@ impl Renderer {
             next_pane_id: 1,
             mouse_pos: (0.0, 0.0),
             clipboard,
+            divider_drag: None,
+            cursor_icon: CursorIcon::Default,
             bell_flash_until: None,
             focused: true,
             start_time: Instant::now(),
@@ -1516,6 +1599,48 @@ impl Renderer {
             return;
         }
 
+        // Dragging a split divider — resize the split it belongs to.
+        if let Some(drag) = self.divider_drag.as_ref() {
+            let (outer, dir, path) = (drag.outer, drag.dir, drag.path.clone());
+            let raw = match dir {
+                SplitDir::Vertical => {
+                    (x - DIVIDER_THICKNESS / 2.0 - outer.x)
+                        / (outer.w - DIVIDER_THICKNESS).max(1.0)
+                }
+                SplitDir::Horizontal => {
+                    (y - DIVIDER_THICKNESS / 2.0 - outer.y)
+                        / (outer.h - DIVIDER_THICKNESS).max(1.0)
+                }
+            };
+            let span = match dir {
+                SplitDir::Vertical => outer.w,
+                SplitDir::Horizontal => outer.h,
+            };
+            let ratio = clamp_ratio(raw, span);
+            if let Some(r) = self.root_mut().split_ratio_at_mut(&path) {
+                *r = ratio;
+            }
+            self.relayout();
+            self.sync_active_grid();
+            self.window.request_redraw();
+            return;
+        }
+
+        // Resize cursor while hovering a divider (and not dragging one).
+        let desired = match self
+            .root_ref()
+            .divider_at(self.content_rect(), x, y)
+            .map(|(_, _, d)| d)
+        {
+            Some(SplitDir::Vertical) => CursorIcon::ColResize,
+            Some(SplitDir::Horizontal) => CursorIcon::RowResize,
+            None => CursorIcon::Default,
+        };
+        if desired != self.cursor_icon {
+            self.cursor_icon = desired;
+            self.window.set_cursor(desired);
+        }
+
         // Mouse reporting takes precedence over selection / scroll.
         let mode = self.active_tab_mut().live_term.mode_flags();
         let reporting_active = mode.mouse_drag || mode.mouse_motion;
@@ -1602,6 +1727,18 @@ impl Renderer {
         if self.context_menu.is_some() {
             self.context_menu_click(self.mouse_pos.0, self.mouse_pos.1);
             return;
+        }
+
+        // A left-press on a split divider starts a resize drag.
+        if button == MouseButton::Left {
+            if let Some((path, outer, dir)) = self.root_ref().divider_at(
+                self.content_rect(),
+                self.mouse_pos.0,
+                self.mouse_pos.1,
+            ) {
+                self.divider_drag = Some(DividerDrag { path, outer, dir });
+                return;
+            }
         }
 
         // Tab-bar hit test first — a click in a pane's own tab bar strip
@@ -1699,6 +1836,12 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
+        // End a divider drag, if one is in progress.
+        if self.divider_drag.is_some() {
+            self.divider_drag = None;
+            return;
+        }
+
         let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
