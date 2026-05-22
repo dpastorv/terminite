@@ -171,8 +171,92 @@ impl Pane {
     }
 }
 
+/// Identifies one pane (leaf) within a tab's pane tree. Monotonic.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct PaneId(u64);
+
+/// Orientation of a split. `Vertical` puts children side by side (a vertical
+/// divider); `Horizontal` stacks them (a horizontal divider).
+#[derive(Copy, Clone, PartialEq)]
+enum SplitDir {
+    Vertical,
+    Horizontal,
+}
+
+/// A binary tree of panes. Every leaf is a shell; every split divides its
+/// rect between two children by `ratio`.
+enum PaneNode {
+    Leaf { id: PaneId, pane: Pane },
+    Split {
+        dir: SplitDir,
+        /// Fraction of the parent rect given to `first`.
+        ratio: f32,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
+}
+
+impl PaneNode {
+    fn find(&self, target: PaneId) -> Option<&Pane> {
+        match self {
+            PaneNode::Leaf { id, pane } => (*id == target).then_some(pane),
+            PaneNode::Split { first, second, .. } => {
+                first.find(target).or_else(|| second.find(target))
+            }
+        }
+    }
+
+    fn find_mut(&mut self, target: PaneId) -> Option<&mut Pane> {
+        match self {
+            PaneNode::Leaf { id, pane } => (*id == target).then_some(pane),
+            PaneNode::Split { first, second, .. } => {
+                if let Some(p) = first.find_mut(target) {
+                    return Some(p);
+                }
+                second.find_mut(target)
+            }
+        }
+    }
+
+    fn first_leaf_id(&self) -> PaneId {
+        match self {
+            PaneNode::Leaf { id, .. } => *id,
+            PaneNode::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    fn leaf_ids(&self, out: &mut Vec<PaneId>) {
+        match self {
+            PaneNode::Leaf { id, .. } => out.push(*id),
+            PaneNode::Split { first, second, .. } => {
+                first.leaf_ids(out);
+                second.leaf_ids(out);
+            }
+        }
+    }
+
+    fn for_each_pane_mut(&mut self, f: &mut impl FnMut(&mut Pane)) {
+        match self {
+            PaneNode::Leaf { pane, .. } => f(pane),
+            PaneNode::Split { first, second, .. } => {
+                first.for_each_pane_mut(f);
+                second.for_each_pane_mut(f);
+            }
+        }
+    }
+
+    fn leaf_count(&self) -> usize {
+        match self {
+            PaneNode::Leaf { .. } => 1,
+            PaneNode::Split { first, second, .. } => {
+                first.leaf_count() + second.leaf_count()
+            }
+        }
+    }
+}
+
 /// One tab in the window. Owns the tab-bar identity (title + label buffer)
-/// and a `Pane` (Stage B: a tree of panes).
+/// and a tree of panes; `active_pane` is the focused leaf.
 struct Tab {
     id: TabId,
     title: String,
@@ -182,7 +266,21 @@ struct Tab {
     shell_title: Option<String>,
     /// Last auto-title we computed; rebuild the buffer only on changes.
     last_auto_title: String,
-    pane: Pane,
+    root: PaneNode,
+    active_pane: PaneId,
+}
+
+impl Tab {
+    fn active_pane_ref(&self) -> &Pane {
+        self.root
+            .find(self.active_pane)
+            .expect("active pane present in tree")
+    }
+
+    fn active_pane_mut(&mut self) -> &mut Pane {
+        let id = self.active_pane;
+        self.root.find_mut(id).expect("active pane present in tree")
+    }
 }
 
 /// What the user is being asked to confirm. Generalized so we can reuse the
@@ -254,16 +352,24 @@ struct Modal {
     confirm_rect: (f32, f32, f32, f32),
 }
 
-impl Tab {
-    fn new(id: TabId, title: String, title_buffer: Buffer, live_term: LiveTerm) -> Self {
-        Self {
-            id,
-            title,
-            title_buffer,
-            shell_title: None,
-            last_auto_title: String::new(),
+fn new_tab_struct(
+    id: TabId,
+    title: String,
+    title_buffer: Buffer,
+    live_term: LiveTerm,
+    pane_id: PaneId,
+) -> Tab {
+    Tab {
+        id,
+        title,
+        title_buffer,
+        shell_title: None,
+        last_auto_title: String::new(),
+        root: PaneNode::Leaf {
+            id: pane_id,
             pane: Pane::new(live_term),
-        }
+        },
+        active_pane: pane_id,
     }
 }
 
@@ -310,6 +416,8 @@ pub struct Renderer {
     active: usize,
     /// Monotonic counter for new TabId allocation.
     next_tab_id: u64,
+    /// Monotonic counter for new PaneId allocation (across all tabs).
+    next_pane_id: u64,
     /// Which tab's content the shared `text_buffer` currently holds. When
     /// this drifts from the active tab, `render()` forces a `set_rich_text`
     /// regardless of the per-tab cache (otherwise switching back to a tab
@@ -458,7 +566,13 @@ impl Renderer {
 
         let first_title = "terminite".to_string();
         let first_title_buf = make_title_buffer(&mut font_system, &first_title);
-        let first_tab = Tab::new(first_tab_id, first_title, first_title_buf, live_term);
+        let first_tab = new_tab_struct(
+            first_tab_id,
+            first_title,
+            first_title_buf,
+            live_term,
+            PaneId(0),
+        );
         let close_buffer = make_title_buffer(&mut font_system, "×");
 
         Self {
@@ -486,6 +600,7 @@ impl Renderer {
             tabs: vec![first_tab],
             active: 0,
             next_tab_id: 1,
+            next_pane_id: 1,
             text_buffer_tab: None,
             mouse_pos: (0.0, 0.0),
             clipboard,
@@ -509,9 +624,11 @@ impl Renderer {
         let cwd = self
             .tabs
             .get(self.active)
-            .and_then(|t| t.pane.live_term.current_dir());
+            .and_then(|t| t.active_pane_ref().live_term.current_dir());
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        let pane_id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
         let live_term = LiveTerm::new(
             self.grid_cols,
             self.grid_rows,
@@ -522,7 +639,7 @@ impl Renderer {
         );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let tab = Tab::new(id, title, title_buf, live_term);
+        let tab = new_tab_struct(id, title, title_buf, live_term, pane_id);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.window.set_title(&self.tabs[self.active].title);
@@ -538,7 +655,7 @@ impl Renderer {
         if self.modal.is_some() {
             return false;
         }
-        let live = &self.tabs[self.active].pane.live_term;
+        let live = &self.tabs[self.active].active_pane_mut().live_term;
         if live.has_active_process() {
             let proc_name = live
                 .foreground_pid()
@@ -608,9 +725,9 @@ impl Renderer {
     /// appears when the click landed on an OSC 8 hyperlink.
     fn open_context_menu(&mut self, x: f32, y: f32) {
         let (line, col) = self.pixel_to_absolute(x, y);
-        let link = self.tabs[self.active].pane.live_term.hyperlink_at(line, col);
+        let link = self.tabs[self.active].active_pane_mut().live_term.hyperlink_at(line, col);
         let has_selection = self.tabs[self.active]
-            .pane.selection
+            .active_pane_mut().selection
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
@@ -690,8 +807,8 @@ impl Renderer {
             MenuAction::OpenLink(uri) => open_uri(uri),
             MenuAction::SelectAll => {
                 let ((sl, sc), (el, ec)) =
-                    self.tabs[self.active].pane.live_term.whole_buffer();
-                self.tabs[self.active].pane.selection = Some(Selection {
+                    self.tabs[self.active].active_pane_mut().live_term.whole_buffer();
+                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
@@ -809,7 +926,7 @@ impl Renderer {
             Some(f) => f.query.clone(),
             None => return,
         };
-        let matches = self.tabs[self.active].pane.live_term.search(&query);
+        let matches = self.tabs[self.active].active_pane_mut().live_term.search(&query);
         if let Some(find) = self.find.as_mut() {
             find.matches = matches;
             find.current = 0;
@@ -843,7 +960,7 @@ impl Renderer {
             .and_then(|f| f.matches.get(f.current).copied());
         if let Some((line, _, _)) = target {
             self.tabs[self.active]
-                .pane.live_term
+                .active_pane_mut().live_term
                 .scroll_to_line(line, self.grid_rows);
         }
     }
@@ -924,14 +1041,14 @@ impl Renderer {
         // back, and shells like ssh / vim resize on the SIGWINCH alacritty
         // sends.
         for tab in &mut self.tabs {
-            tab.pane.live_term.resize(cols, rows);
+            tab.active_pane_mut().live_term.resize(cols, rows);
         }
         self.grid_cols = cols;
         self.grid_rows = rows;
         // A resize invalidates the snapshot cache *and* the selection — the
         // cells the user was selecting may now be in a different place.
-        self.tabs[self.active].pane.last_text_runs.clear();
-        self.tabs[self.active].pane.selection = None;
+        self.tabs[self.active].active_pane_mut().last_text_runs.clear();
+        self.tabs[self.active].active_pane_mut().selection = None;
     }
 
     // ── Mouse / keyboard input routing ────────────────────────────────────
@@ -946,10 +1063,10 @@ impl Renderer {
         // floor so a click just inside the top of viewport while the buffer
         // is shifted down resolves to row -1 (the extra row above the
         // viewport) when appropriate.
-        let cy = (y - TEXT_TOP - self.tabs[self.active].pane.pixel_offset) / LINE_HEIGHT;
+        let cy = (y - TEXT_TOP - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
         let vl = cy.floor() as i32;
         let vl = vl.max(-1).min(self.grid_rows as i32 - 1);
-        let display_offset = self.tabs[self.active].pane.live_term.offset_and_history().0 as i32;
+        let display_offset = self.tabs[self.active].active_pane_ref().live_term.offset_and_history().0 as i32;
         (vl - display_offset, col)
     }
 
@@ -969,11 +1086,11 @@ impl Renderer {
         }
 
         // Mouse reporting takes precedence over selection / scroll.
-        let mode = self.tabs[self.active].pane.live_term.mode_flags();
+        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
         let reporting_active = mode.mouse_drag || mode.mouse_motion;
         if reporting_active {
             // Drag (1002): only when a button is held. Motion (1003): always.
-            let button_held = self.tabs[self.active].pane.dragging || mode.mouse_motion;
+            let button_held = self.tabs[self.active].active_pane_mut().dragging || mode.mouse_motion;
             if mode.mouse_motion || (mode.mouse_drag && button_held) {
                 if let Some((col, row)) = self.cell_at_1indexed(x, y) {
                     let bytes = encode_mouse_report(
@@ -984,30 +1101,30 @@ impl Renderer {
                         row,
                     );
                     if let Some(b) = bytes {
-                        self.tabs[self.active].pane.live_term.write(b);
+                        self.tabs[self.active].active_pane_mut().live_term.write(b);
                     }
                 }
             }
             return;
         }
 
-        if self.tabs[self.active].pane.dragging {
+        if self.tabs[self.active].active_pane_mut().dragging {
             // macOS trackpad scrolling drags the cursor a hair, so we get
             // tiny mouse_moved events interleaved with wheel events. Without
             // this filter, every wheel-driven extension to the viewport
             // edge gets immediately snapped back to whatever cell the
             // cursor is currently over. Only count motion that crosses
             // half a cell from the last update.
-            let (last_x, last_y) = self.tabs[self.active].pane.last_drag_mouse_pos;
+            let (last_x, last_y) = self.tabs[self.active].active_pane_mut().last_drag_mouse_pos;
             let dx = (x - last_x).abs();
             let dy = (y - last_y).abs();
             let big_motion = dx >= self.cell_advance * 0.5 || dy >= LINE_HEIGHT * 0.5;
             if big_motion {
                 let (line, col) = self.pixel_to_absolute(x, y);
-                if let Some(sel) = self.tabs[self.active].pane.selection.as_mut() {
+                if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
                     sel.extend_to(line, col);
                 }
-                self.tabs[self.active].pane.last_drag_mouse_pos = (x, y);
+                self.tabs[self.active].active_pane_mut().last_drag_mouse_pos = (x, y);
                 self.window.request_redraw();
             }
 
@@ -1022,8 +1139,8 @@ impl Renderer {
             } else {
                 None
             };
-            let was_off = self.tabs[self.active].pane.autoscroll_dir.is_none();
-            self.tabs[self.active].pane.autoscroll_dir = new_dir;
+            let was_off = self.tabs[self.active].active_pane_mut().autoscroll_dir.is_none();
+            self.tabs[self.active].active_pane_mut().autoscroll_dir = new_dir;
             match new_dir {
                 Some(_) if was_off => {
                     self.next_autoscroll_deadline =
@@ -1086,7 +1203,7 @@ impl Renderer {
             return;
         }
 
-        let mode = self.tabs[self.active].pane.live_term.mode_flags();
+        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 let bytes = encode_mouse_report(
@@ -1097,7 +1214,7 @@ impl Renderer {
                     row,
                 );
                 if let Some(b) = bytes {
-                    self.tabs[self.active].pane.live_term.write(b);
+                    self.tabs[self.active].active_pane_mut().live_term.write(b);
                 }
             }
             return;
@@ -1118,46 +1235,46 @@ impl Renderer {
 
         // Cmd-click an OSC 8 hyperlink → open it; don't start a selection.
         if modifiers.super_key() {
-            if let Some(uri) = self.tabs[self.active].pane.live_term.hyperlink_at(line, col) {
+            if let Some(uri) = self.tabs[self.active].active_pane_mut().live_term.hyperlink_at(line, col) {
                 open_uri(&uri);
                 return;
             }
         }
         let now = Instant::now();
-        let click_count = match self.tabs[self.active].pane.last_click {
+        let click_count = match self.tabs[self.active].active_pane_mut().last_click {
             Some((t, cell, c)) if now.duration_since(t) < MULTI_CLICK_WINDOW && cell == (line, col) => {
                 (c + 1).min(3)
             }
             _ => 1,
         };
-        self.tabs[self.active].pane.last_click = Some((now, (line, col), click_count));
+        self.tabs[self.active].active_pane_mut().last_click = Some((now, (line, col), click_count));
 
         match click_count {
             1 => {
-                self.tabs[self.active].pane.selection = Some(Selection::from_anchor(line, col));
-                self.tabs[self.active].pane.dragging = true;
-                self.tabs[self.active].pane.last_drag_mouse_pos = self.mouse_pos;
+                self.tabs[self.active].active_pane_mut().selection = Some(Selection::from_anchor(line, col));
+                self.tabs[self.active].active_pane_mut().dragging = true;
+                self.tabs[self.active].active_pane_mut().last_drag_mouse_pos = self.mouse_pos;
             }
             2 => {
-                let ((sl, sc), (el, ec)) = self.tabs[self.active].pane.live_term.word_at(line, col);
-                self.tabs[self.active].pane.selection = Some(Selection {
+                let ((sl, sc), (el, ec)) = self.tabs[self.active].active_pane_mut().live_term.word_at(line, col);
+                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
                     head_col: ec,
                 });
-                self.tabs[self.active].pane.dragging = false;
+                self.tabs[self.active].active_pane_mut().dragging = false;
                 self.copy_selection();
             }
             _ => {
-                let ((sl, sc), (el, ec)) = self.tabs[self.active].pane.live_term.line_at(line);
-                self.tabs[self.active].pane.selection = Some(Selection {
+                let ((sl, sc), (el, ec)) = self.tabs[self.active].active_pane_mut().live_term.line_at(line);
+                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
                     head_col: ec,
                 });
-                self.tabs[self.active].pane.dragging = false;
+                self.tabs[self.active].active_pane_mut().dragging = false;
                 self.copy_selection();
             }
         }
@@ -1165,7 +1282,7 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
-        let mode = self.tabs[self.active].pane.live_term.mode_flags();
+        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 let bytes = encode_mouse_report(
@@ -1176,7 +1293,7 @@ impl Renderer {
                     row,
                 );
                 if let Some(b) = bytes {
-                    self.tabs[self.active].pane.live_term.write(b);
+                    self.tabs[self.active].active_pane_mut().live_term.write(b);
                 }
             }
             return;
@@ -1186,12 +1303,12 @@ impl Renderer {
             return;
         }
 
-        self.tabs[self.active].pane.dragging = false;
-        self.tabs[self.active].pane.autoscroll_dir = None;
+        self.tabs[self.active].active_pane_mut().dragging = false;
+        self.tabs[self.active].active_pane_mut().autoscroll_dir = None;
         self.next_autoscroll_deadline = None;
-        if let Some(sel) = self.tabs[self.active].pane.selection.as_ref() {
+        if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() {
             if sel.is_empty() {
-                self.tabs[self.active].pane.selection = None;
+                self.tabs[self.active].active_pane_mut().selection = None;
             } else {
                 self.copy_selection();
             }
@@ -1202,7 +1319,7 @@ impl Renderer {
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
         // If the foreground app wants scroll reports (vim, less, htop in
         // mouse mode), forward instead of scrolling the viewport.
-        let mode = self.tabs[self.active].pane.live_term.mode_flags();
+        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
@@ -1217,7 +1334,7 @@ impl Renderer {
             };
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 if let Some(b) = encode_mouse_report(&mode, direction, modifiers, col, row) {
-                    self.tabs[self.active].pane.live_term.write(b);
+                    self.tabs[self.active].active_pane_mut().live_term.write(b);
                 }
             }
             return;
@@ -1230,7 +1347,7 @@ impl Renderer {
             MouseScrollDelta::LineDelta(_, y) => y * 3.0 * LINE_HEIGHT,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        self.tabs[self.active].pane.pixel_offset += pixels;
+        self.tabs[self.active].active_pane_mut().pixel_offset += pixels;
 
         // Pop whole lines into the term; the remainder stays as a sub-line
         // pixel shift used at render time. `floor` keeps the remainder in
@@ -1241,16 +1358,16 @@ impl Renderer {
         // and floor's over-pop re-establishes the residual on every event
         // — so the bottom (offset=0) is never reached cleanly. Subtract by
         // the *actual* offset delta instead.
-        let whole = (self.tabs[self.active].pane.pixel_offset / LINE_HEIGHT).floor() as i32;
+        let whole = (self.tabs[self.active].active_pane_mut().pixel_offset / LINE_HEIGHT).floor() as i32;
         if whole != 0 {
-            let (before, _) = self.tabs[self.active].pane.live_term.offset_and_history();
-            self.tabs[self.active].pane.live_term.scroll(TermScroll::Delta(whole));
-            let (after, history) = self.tabs[self.active].pane.live_term.offset_and_history();
+            let (before, _) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
+            self.tabs[self.active].active_pane_mut().live_term.scroll(TermScroll::Delta(whole));
+            let (after, history) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
             let actual = after as i32 - before as i32;
-            self.tabs[self.active].pane.pixel_offset -= actual as f32 * LINE_HEIGHT;
+            self.tabs[self.active].active_pane_mut().pixel_offset -= actual as f32 * LINE_HEIGHT;
             if actual != whole {
                 // Clamped at a boundary; drop the residual.
-                self.tabs[self.active].pane.pixel_offset = 0.0;
+                self.tabs[self.active].active_pane_mut().pixel_offset = 0.0;
                 let at_top = whole > 0 && after >= history;
                 let at_live = whole < 0 && after == 0;
                 if at_top {
@@ -1259,7 +1376,7 @@ impl Renderer {
                         after,
                         history,
                         self.grid_rows,
-                        self.tabs[self.active].pane.live_term.debug_top_row()
+                        self.tabs[self.active].active_pane_mut().live_term.debug_top_row()
                     );
                 } else if at_live {
                     eprintln!(
@@ -1267,7 +1384,7 @@ impl Renderer {
                         after,
                         history,
                         self.grid_rows,
-                        self.tabs[self.active].pane.live_term.debug_bottom_strip(self.grid_rows)
+                        self.tabs[self.active].active_pane_mut().live_term.debug_bottom_strip(self.grid_rows)
                     );
                 }
             }
@@ -1280,7 +1397,7 @@ impl Renderer {
             // the freshly-revealed lines. Pick whichever extends *further*
             // from the anchor — mouse position still wins when it's already
             // farther.
-            if actual != 0 && self.tabs[self.active].pane.dragging {
+            if actual != 0 && self.tabs[self.active].active_pane_mut().dragging {
                 let (mouse_line, mouse_col) =
                     self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
                 let edge = if actual > 0 {
@@ -1293,7 +1410,7 @@ impl Renderer {
                         self.grid_cols.saturating_sub(1),
                     )
                 };
-                if let Some(sel) = self.tabs[self.active].pane.selection.as_mut() {
+                if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
                     let edge_d = (edge.0 - sel.anchor_line).abs();
                     let mouse_d = (mouse_line - sel.anchor_line).abs();
                     let (head_line, head_col) = if edge_d > mouse_d {
@@ -1311,17 +1428,17 @@ impl Renderer {
 
     pub fn scroll_page(&self, up: bool) {
         let s = if up { TermScroll::PageUp } else { TermScroll::PageDown };
-        self.tabs[self.active].pane.live_term.scroll(s);
+        self.tabs[self.active].active_pane_ref().live_term.scroll(s);
         self.window.request_redraw();
     }
 
     pub fn copy_selection(&mut self) {
-        let Some(sel) = self.tabs[self.active].pane.selection.as_ref() else { return };
+        let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() else { return };
         if sel.is_empty() {
             return;
         }
         let (start, end) = sel.normalized();
-        let text = self.tabs[self.active].pane.live_term.extract_text(start, end);
+        let text = self.tabs[self.active].active_pane_mut().live_term.extract_text(start, end);
         if text.is_empty() {
             return;
         }
@@ -1338,7 +1455,7 @@ impl Renderer {
         if text.is_empty() {
             return;
         }
-        if self.tabs[self.active].pane.live_term.mode_flags().bracketed_paste {
+        if self.tabs[self.active].active_pane_mut().live_term.mode_flags().bracketed_paste {
             // Wrap so the shell treats the whole paste as one input, not as
             // typed-and-pressed-enter for each newline. Strips any embedded
             // \e[201~ to keep the framing safe.
@@ -1347,9 +1464,9 @@ impl Renderer {
             bytes.extend_from_slice(b"\x1b[200~");
             bytes.extend_from_slice(safe.as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
-            self.tabs[self.active].pane.live_term.write(bytes);
+            self.tabs[self.active].active_pane_mut().live_term.write(bytes);
         } else {
-            self.tabs[self.active].pane.live_term.write(text.into_bytes());
+            self.tabs[self.active].active_pane_mut().live_term.write(text.into_bytes());
         }
     }
 
@@ -1402,7 +1519,7 @@ impl Renderer {
             if self.tabs[i].shell_title.is_some() {
                 continue;
             }
-            let new_auto = self.tabs[i].pane.live_term.compute_auto_title();
+            let new_auto = self.tabs[i].active_pane_mut().live_term.compute_auto_title();
             if new_auto != self.tabs[i].last_auto_title {
                 let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
                 self.tabs[i].last_auto_title = new_auto.clone();
@@ -1417,7 +1534,7 @@ impl Renderer {
 
     /// Write bytes to the active tab's PTY (keyboard input path).
     pub fn write_active(&self, bytes: Vec<u8>) {
-        self.tabs[self.active].pane.live_term.write(bytes);
+        self.tabs[self.active].active_pane_ref().live_term.write(bytes);
     }
 
     /// Compute the modal's card + button rectangles for the current surface
@@ -1564,10 +1681,10 @@ impl Renderer {
     pub fn focus_changed(&mut self, focused: bool) {
         self.focused = focused;
         // Optionally emit DEC focus reporting when an app asked for it.
-        let mode = self.tabs[self.active].pane.live_term.mode_flags();
+        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
         if mode.focus_in_out {
             let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-            self.tabs[self.active].pane.live_term.write(seq.to_vec());
+            self.tabs[self.active].active_pane_mut().live_term.write(seq.to_vec());
         }
         self.window.request_redraw();
     }
@@ -1580,7 +1697,7 @@ impl Renderer {
     pub fn ime_commit(&mut self, text: String) {
         self.preedit.clear();
         if !text.is_empty() {
-            self.tabs[self.active].pane.live_term.write(text.into_bytes());
+            self.tabs[self.active].active_pane_mut().live_term.write(text.into_bytes());
         }
         self.window.request_redraw();
     }
@@ -1593,7 +1710,7 @@ impl Renderer {
         }
         // Match pixel_to_cell's pixel_offset correction so the reported cell
         // is the one the user visually clicked on, not the natural-grid cell.
-        let row_f = (y - TEXT_TOP - self.tabs[self.active].pane.pixel_offset) / LINE_HEIGHT;
+        let row_f = (y - TEXT_TOP - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
         if row_f < 0.0 {
             return None;
         }
@@ -1614,10 +1731,10 @@ impl Renderer {
         // Auto-scroll while drag-selecting past viewport edge. The main loop
         // wakes us at `next_autoscroll_deadline`; we tick once per wake and
         // re-arm.
-        if let Some(dir) = self.tabs[self.active].pane.autoscroll_dir {
-            self.tabs[self.active].pane.live_term.scroll(TermScroll::Delta(dir));
-            let (after, _history) = self.tabs[self.active].pane.live_term.offset_and_history();
-            if let Some(sel) = self.tabs[self.active].pane.selection.as_mut() {
+        if let Some(dir) = self.tabs[self.active].active_pane_mut().autoscroll_dir {
+            self.tabs[self.active].active_pane_mut().live_term.scroll(TermScroll::Delta(dir));
+            let (after, _history) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
+            if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
                 let edge = if dir > 0 {
                     (-(after as i32), 0)
                 } else {
@@ -1644,11 +1761,11 @@ impl Renderer {
             cursor_shape,
             cursor_blinking,
             has_extra_row,
-        } = self.tabs[self.active].pane.live_term.snapshot();
+        } = self.tabs[self.active].active_pane_mut().live_term.snapshot();
 
         let active_id = self.tabs[self.active].id;
         let buffer_holds_other_tab = self.text_buffer_tab != Some(active_id);
-        let cache_stale = text_runs != self.tabs[self.active].pane.last_text_runs;
+        let cache_stale = text_runs != self.tabs[self.active].active_pane_mut().last_text_runs;
         if buffer_holds_other_tab || cache_stale {
             let default_attrs = Attrs::new().family(Family::Monospace);
             self.text_buffer.set_rich_text(
@@ -1669,7 +1786,7 @@ impl Renderer {
             );
             self.text_buffer
                 .shape_until_scroll(&mut self.font_system, false);
-            self.tabs[self.active].pane.last_text_runs = text_runs;
+            self.tabs[self.active].active_pane_mut().last_text_runs = text_runs;
             self.text_buffer_tab = Some(active_id);
         }
 
@@ -1683,7 +1800,7 @@ impl Renderer {
 
         let cell_advance = self.cell_advance;
         // Pixel-smooth scroll: every visible Y origin is shifted by this much.
-        let y_shift = self.tabs[self.active].pane.pixel_offset;
+        let y_shift = self.tabs[self.active].active_pane_mut().pixel_offset;
         let mut below: Vec<RectInstance> = Vec::with_capacity(bg_runs.len() + 8);
 
         for run in &bg_runs {
@@ -1705,12 +1822,12 @@ impl Renderer {
         // smoothly enters from the top during pixel-smooth scroll — matching
         // the extra-row text/background rendering. Without this, a selected
         // line briefly loses its highlight as it slides through that row.
-        if let Some(sel) = self.tabs[self.active].pane.selection.as_ref() {
+        if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() {
             if !sel.is_empty() {
                 let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
                 let cols = self.grid_cols;
                 let rows = self.grid_rows as i32;
-                let display_offset = self.tabs[self.active].pane.live_term.offset_and_history().0 as i32;
+                let display_offset = self.tabs[self.active].active_pane_mut().live_term.offset_and_history().0 as i32;
                 for abs_line in s_line..=e_line {
                     let vl = abs_line + display_offset;
                     if vl < -1 || vl >= rows {
@@ -1741,7 +1858,7 @@ impl Renderer {
         if let Some(find) = self.find.as_ref() {
             let rows = self.grid_rows as i32;
             let display_offset =
-                self.tabs[self.active].pane.live_term.offset_and_history().0 as i32;
+                self.tabs[self.active].active_pane_mut().live_term.offset_and_history().0 as i32;
             for (i, &(line, cs, ce)) in find.matches.iter().enumerate() {
                 let vl = line + display_offset;
                 if vl < -1 || vl >= rows {
