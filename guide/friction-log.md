@@ -62,6 +62,37 @@ friction.
 
 ## Live log
 
+### 2026-05-22 — Closing a pane orphaned its shell, and the machine fell over
+
+- **What:** `LiveTerm::Drop` closed one fd and nothing else. It never told
+  alacritty's PTY I/O thread to stop — and that thread transitively holds
+  an `EventLoopSender` (`term → Notifier → pty_sender`), so the channel
+  never disconnects on its own and the loop never exits. Every closed tab
+  or pane leaked an OS thread, the master fd, and — worst — the child
+  process, which kept running orphaned. A pane with a live `claude` in it
+  orphaned that whole process on close. The splits work made *close* a
+  frequent action (panes, corner-drag remove, many tabs per pane), so a
+  long session of building and testing splits steadily accumulated leaked
+  threads and orphan shells until the machine went down.
+- **Why it hurt:** The second hostile-host crash of the project, and the
+  same shape as the first: a leak that doesn't crash terminite, it crashes
+  the *computer*. The pre-Phase-2 audit found this exact bug — minutes too
+  late. It hurt because it was latent the whole time (closing a tab leaked
+  even before splits existed); splits just raised the close rate until the
+  latent bug became fatal. The audit gate was right to exist; it just
+  needed to run sooner.
+- **Who:** Both. The human lost the machine and a session; the AI had
+  been building the very feature (splits) that turned a dormant leak into
+  a crash, and is writing this entry.
+- **Points at:** Every `spawn` needs a matching teardown, and `Drop` is
+  where it has to live — not a "shutdown" method someone might forget to
+  call. The fix is one line: `Drop` sends `Msg::Shutdown`, the loop
+  breaks, the `Pty` drops, the shell gets `SIGHUP`. The deeper rule for
+  terminite: any owned OS resource (thread, child process, fd) must have
+  its release wired into `Drop` of the type that owns it — and resource
+  audits belong *before* a feature multiplies the operation that leaks,
+  not after.
+
 ### 2026-05-21 — The OS won't tell us where the shell is
 
 - **What:** Tab titles should show the shell's working directory
