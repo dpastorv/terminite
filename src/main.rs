@@ -10,6 +10,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 mod config;
+mod images;
 mod palette;
 mod rect;
 mod renderer;
