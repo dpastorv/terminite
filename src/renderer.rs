@@ -142,30 +142,50 @@ impl Selection {
     }
 }
 
-/// One shell pane: a PTY plus everything conceptually per-shell — scroll
-/// state, selection, click history, snapshot cache. A `Tab` holds one of
-/// these today; Stage B turns that into a tree of them (splits).
+/// A pane's rectangle in physical pixels (top-left origin).
+#[derive(Clone, Copy)]
+struct PaneRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+/// One shell pane: a PTY, its own text buffer, current grid size, and
+/// everything conceptually per-shell — scroll state, selection, click
+/// history, snapshot cache.
 struct Pane {
     live_term: LiveTerm,
+    /// This pane's own cosmic-text buffer (each pane renders independently).
+    text_buffer: Buffer,
+    /// Grid size this pane's PTY is currently sized to.
+    cols: usize,
+    rows: usize,
     pixel_offset: f32,
     selection: Option<Selection>,
     dragging: bool,
     last_drag_mouse_pos: (f32, f32),
     last_click: Option<(Instant, (i32, usize), u8)>,
     last_text_runs: Vec<(String, SpanStyle)>,
+    /// Whether `text_buffer` currently holds `last_text_runs`'s content.
+    buffer_dirty: bool,
     autoscroll_dir: Option<i32>,
 }
 
 impl Pane {
-    fn new(live_term: LiveTerm) -> Self {
+    fn new(live_term: LiveTerm, text_buffer: Buffer, cols: usize, rows: usize) -> Self {
         Self {
             live_term,
+            text_buffer,
+            cols,
+            rows,
             pixel_offset: 0.0,
             selection: None,
             dragging: false,
             last_drag_mouse_pos: (0.0, 0.0),
             last_click: None,
             last_text_runs: Vec::new(),
+            buffer_dirty: true,
             autoscroll_dir: None,
         }
     }
@@ -196,7 +216,102 @@ enum PaneNode {
     },
 }
 
+/// Pixel gap between split panes — also the divider's hit/draw thickness.
+const DIVIDER_THICKNESS: f32 = 6.0;
+
 impl PaneNode {
+    /// Recursively assign pixel rects to every leaf for a given outer rect.
+    fn layout(&self, rect: PaneRect, out: &mut Vec<(PaneId, PaneRect)>) {
+        match self {
+            PaneNode::Leaf { id, .. } => out.push((*id, rect)),
+            PaneNode::Split { dir, ratio, first, second } => {
+                let (r1, r2) = split_rect(rect, *dir, *ratio);
+                first.layout(r1, out);
+                second.layout(r2, out);
+            }
+        }
+    }
+
+    /// Consume the tree and return a new one where the leaf with `target`
+    /// has been replaced by a Split: the old leaf becomes `first`, a fresh
+    /// leaf `(new_id, new_pane)` becomes `second`.
+    fn into_split(
+        self,
+        target: PaneId,
+        dir: SplitDir,
+        new_id: PaneId,
+        new_pane: Pane,
+    ) -> PaneNode {
+        match self {
+            PaneNode::Leaf { id, pane } if id == target => PaneNode::Split {
+                dir,
+                ratio: 0.5,
+                first: Box::new(PaneNode::Leaf { id, pane }),
+                second: Box::new(PaneNode::Leaf { id: new_id, pane: new_pane }),
+            },
+            leaf @ PaneNode::Leaf { .. } => leaf,
+            PaneNode::Split { dir: d, ratio, first, second } => {
+                if first.find(target).is_some() {
+                    PaneNode::Split {
+                        dir: d,
+                        ratio,
+                        first: Box::new(first.into_split(target, dir, new_id, new_pane)),
+                        second,
+                    }
+                } else {
+                    PaneNode::Split {
+                        dir: d,
+                        ratio,
+                        first,
+                        second: Box::new(
+                            second.into_split(target, dir, new_id, new_pane),
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Consume the tree and return one with the `target` leaf removed —
+    /// its sibling subtree takes the parent's place. Returns `None` if the
+    /// tree was a single leaf == target (i.e. nothing left).
+    fn into_closed(self, target: PaneId) -> Option<PaneNode> {
+        match self {
+            PaneNode::Leaf { id, .. } if id == target => None,
+            leaf @ PaneNode::Leaf { .. } => Some(leaf),
+            PaneNode::Split { dir, ratio, first, second } => {
+                let first_has = first.find(target).is_some();
+                let second_has = second.find(target).is_some();
+                if first_has {
+                    match first.into_closed(target) {
+                        Some(f) => Some(PaneNode::Split {
+                            dir,
+                            ratio,
+                            first: Box::new(f),
+                            second,
+                        }),
+                        None => Some(*second),
+                    }
+                } else if second_has {
+                    match second.into_closed(target) {
+                        Some(s) => Some(PaneNode::Split {
+                            dir,
+                            ratio,
+                            first,
+                            second: Box::new(s),
+                        }),
+                        None => Some(*first),
+                    }
+                } else {
+                    Some(PaneNode::Split { dir, ratio, first, second })
+                }
+            }
+        }
+    }
+
+    /// Walk to the `Split` whose immediate layout produced `divider`-th
+    /// boundary and adjust its ratio. Used by divider drag (Stage D); for
+    /// now only `find`/`layout` are exercised.
     fn find(&self, target: PaneId) -> Option<&Pane> {
         match self {
             PaneNode::Leaf { id, pane } => (*id == target).then_some(pane),
@@ -256,7 +371,9 @@ impl PaneNode {
 }
 
 /// One tab in the window. Owns the tab-bar identity (title + label buffer)
-/// and a tree of panes; `active_pane` is the focused leaf.
+/// and a tree of panes; `active_pane` is the focused leaf. `root` is an
+/// `Option` only so split / close can `take()` it and rebuild — it is
+/// always `Some` between operations.
 struct Tab {
     id: TabId,
     title: String,
@@ -266,20 +383,69 @@ struct Tab {
     shell_title: Option<String>,
     /// Last auto-title we computed; rebuild the buffer only on changes.
     last_auto_title: String,
-    root: PaneNode,
+    root: Option<PaneNode>,
     active_pane: PaneId,
 }
 
 impl Tab {
+    fn root_ref(&self) -> &PaneNode {
+        self.root.as_ref().expect("tab root present")
+    }
+
+    fn root_mut(&mut self) -> &mut PaneNode {
+        self.root.as_mut().expect("tab root present")
+    }
+
     fn active_pane_ref(&self) -> &Pane {
-        self.root
+        self.root_ref()
             .find(self.active_pane)
             .expect("active pane present in tree")
     }
 
     fn active_pane_mut(&mut self) -> &mut Pane {
         let id = self.active_pane;
-        self.root.find_mut(id).expect("active pane present in tree")
+        self.root_mut()
+            .find_mut(id)
+            .expect("active pane present in tree")
+    }
+
+    /// Pixel rects for every pane, given the content area.
+    fn pane_layout(&self, content: PaneRect) -> Vec<(PaneId, PaneRect)> {
+        let mut out = Vec::new();
+        self.root_ref().layout(content, &mut out);
+        out
+    }
+}
+
+fn split_rect(r: PaneRect, dir: SplitDir, ratio: f32) -> (PaneRect, PaneRect) {
+    let d = DIVIDER_THICKNESS;
+    match dir {
+        SplitDir::Vertical => {
+            let first_w = ((r.w - d) * ratio).max(0.0);
+            let second_w = (r.w - d - first_w).max(0.0);
+            (
+                PaneRect { x: r.x, y: r.y, w: first_w, h: r.h },
+                PaneRect {
+                    x: r.x + first_w + d,
+                    y: r.y,
+                    w: second_w,
+                    h: r.h,
+                },
+            )
+        }
+        SplitDir::Horizontal => {
+            let first_h = ((r.h - d) * ratio).max(0.0);
+            let second_h = (r.h - d - first_h).max(0.0);
+            (
+                PaneRect { x: r.x, y: r.y, w: r.w, h: first_h },
+                PaneRect {
+                    x: r.x,
+                    y: r.y + first_h + d,
+                    w: r.w,
+                    h: second_h,
+                },
+            )
+        }
     }
 }
 
@@ -352,11 +518,15 @@ struct Modal {
     confirm_rect: (f32, f32, f32, f32),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_tab_struct(
     id: TabId,
     title: String,
     title_buffer: Buffer,
     live_term: LiveTerm,
+    text_buffer: Buffer,
+    cols: usize,
+    rows: usize,
     pane_id: PaneId,
 ) -> Tab {
     Tab {
@@ -365,10 +535,10 @@ fn new_tab_struct(
         title_buffer,
         shell_title: None,
         last_auto_title: String::new(),
-        root: PaneNode::Leaf {
+        root: Some(PaneNode::Leaf {
             id: pane_id,
-            pane: Pane::new(live_term),
-        },
+            pane: Pane::new(live_term, text_buffer, cols, rows),
+        }),
         active_pane: pane_id,
     }
 }
@@ -566,11 +736,16 @@ impl Renderer {
 
         let first_title = "terminite".to_string();
         let first_title_buf = make_title_buffer(&mut font_system, &first_title);
+        let first_pane_buf =
+            make_content_buffer(&mut font_system, cell_advance, physical_width, physical_height);
         let first_tab = new_tab_struct(
             first_tab_id,
             first_title,
             first_title_buf,
             live_term,
+            first_pane_buf,
+            cols,
+            rows,
             PaneId(0),
         );
         let close_buffer = make_title_buffer(&mut font_system, "×");
@@ -639,7 +814,22 @@ impl Renderer {
         );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let tab = new_tab_struct(id, title, title_buf, live_term, pane_id);
+        let pane_buf = make_content_buffer(
+            &mut self.font_system,
+            self.cell_advance,
+            self.surface_config.width as f32,
+            self.surface_config.height as f32,
+        );
+        let tab = new_tab_struct(
+            id,
+            title,
+            title_buf,
+            live_term,
+            pane_buf,
+            self.grid_cols,
+            self.grid_rows,
+            pane_id,
+        );
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
         self.window.set_title(&self.tabs[self.active].title);
@@ -2462,6 +2652,28 @@ fn button_code(button: MouseButton) -> Option<u32> {
         MouseButton::Right => 2,
         _ => return None,
     })
+}
+
+/// Build a content `Buffer` for a pane — monospace, one-cell glyph advance,
+/// sized to the pane's pixel rect.
+fn make_content_buffer(
+    font_system: &mut FontSystem,
+    cell_advance: f32,
+    w: f32,
+    h: f32,
+) -> Buffer {
+    let mut buf = Buffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+    buf.set_size(font_system, Some(w.max(1.0)), Some(h.max(1.0)));
+    buf.set_monospace_width(font_system, Some(cell_advance));
+    buf.set_text(
+        font_system,
+        "",
+        &Attrs::new().family(Family::Monospace),
+        Shaping::Advanced,
+        None,
+    );
+    buf.shape_until_scroll(font_system, false);
+    buf
 }
 
 /// Build a `Buffer` for modal-card text at a larger font size.
