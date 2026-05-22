@@ -127,6 +127,11 @@ pub struct Notifier {
     pub proxy: EventLoopProxy<UserEvent>,
     pub pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
     pub tab_id: TabId,
+    /// Working directory as last reported by the shell via OSC 7. Shared
+    /// with `LiveTerm` so `current_dir()` can read it. In-band beats the
+    /// `proc_pidinfo` reach-around, which macOS TCC blocks for unsigned
+    /// binaries (see friction-log 2026-05-21).
+    pub reported_cwd: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl EventListener for Notifier {
@@ -157,6 +162,19 @@ impl EventListener for Notifier {
             TermEvent::Bell => {
                 let _ = self.proxy.send_event(UserEvent::Bell(self.tab_id));
             }
+            TermEvent::CwdChanged(uri) => {
+                // OSC 7: the shell told us its working directory in-band.
+                if let Some(path) = parse_osc7_path(uri) {
+                    if let Ok(mut guard) = self.reported_cwd.lock() {
+                        *guard = Some(path);
+                    }
+                }
+            }
+            TermEvent::ShellIntegration { .. } => {
+                // OSC 133 command-lifecycle marks land here. The Phase 2
+                // block Model is built on these; for now the dispatch path
+                // is proven end-to-end and the signal is parked.
+            }
             _ => {}
         }
         let _ = self.proxy.send_event(UserEvent::Wakeup);
@@ -181,6 +199,9 @@ pub struct LiveTerm {
     /// O_NOCTTY). Used with `tcgetpgrp` to find the foreground process
     /// group. We close it in `Drop`. `-1` when the open failed.
     slave_fd: RawFd,
+    /// Working directory as reported by the shell via OSC 7; shared with the
+    /// `Notifier` that writes it. `None` until the shell first emits OSC 7.
+    reported_cwd: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Drop for LiveTerm {
@@ -207,10 +228,12 @@ impl LiveTerm {
         cwd: Option<PathBuf>,
     ) -> Self {
         let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
+        let reported_cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let notifier = Notifier {
             proxy,
             pty_sender: pty_sender.clone(),
             tab_id,
+            reported_cwd: reported_cwd.clone(),
         };
         let size = GridSize { cols, rows };
         let term = Term::new(TermConfig::default(), &size, notifier.clone());
@@ -270,16 +293,23 @@ impl LiveTerm {
             shell_pid,
             master_fd,
             slave_fd,
+            reported_cwd,
         }
     }
 
     #[allow(dead_code)]
     pub fn shell_pid(&self) -> i32 { self.shell_pid }
 
-    /// Query the OS for the shell's current working directory. macOS uses
-    /// `proc_pidinfo(PROC_PIDVNODEPATHINFO)`; other platforms return None
-    /// until we add an equivalent path (Linux: `/proc/<pid>/cwd`).
+    /// The shell's current working directory. Prefers the in-band OSC 7
+    /// report (set by the `Notifier`); falls back to `proc_pidinfo`, which
+    /// macOS TCC blocks for unsigned binaries. macOS zsh emits OSC 7 from
+    /// `/etc/zshrc` out of the box, so the report path is the usual one.
     pub fn current_dir(&self) -> Option<PathBuf> {
+        if let Ok(guard) = self.reported_cwd.lock() {
+            if let Some(path) = guard.as_ref() {
+                return Some(path.clone());
+            }
+        }
         proc_cwd(self.shell_pid)
     }
 
@@ -1098,6 +1128,39 @@ fn display_cwd(cwd: &Path) -> String {
     format!("…/{tail}")
 }
 
+/// Parse the path out of an OSC 7 `file://host/path` URI. The host segment
+/// is dropped (for a local shell it's just the machine name; for a remote
+/// one the path won't resolve locally anyway, which is harmless — an
+/// invalid working directory is ignored on the next `new_tab`).
+fn parse_osc7_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.trim().strip_prefix("file://")?;
+    // `rest` is `host/path` or `/path` (empty host); the path starts at the
+    // first slash.
+    let slash = rest.find('/')?;
+    Some(PathBuf::from(percent_decode(&rest[slash..])))
+}
+
+/// Minimal percent-decoding for OSC 7 paths (spaces etc. arrive as `%20`).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Translate a cell into its text visual style, honoring inverse, dim, hidden.
 pub fn cell_style(cell: &Cell) -> SpanStyle {
     let inverse = cell.flags.contains(Flags::INVERSE);
@@ -1113,5 +1176,45 @@ pub fn cell_style(cell: &Cell) -> SpanStyle {
         color,
         bold: cell.flags.contains(Flags::BOLD),
         italic: cell.flags.contains(Flags::ITALIC),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn osc7_path_parsing() {
+        // host segment dropped, plain path
+        assert_eq!(
+            parse_osc7_path("file://mac.local/Users/d/dev"),
+            Some(PathBuf::from("/Users/d/dev")),
+        );
+        // empty host (file:///...)
+        assert_eq!(
+            parse_osc7_path("file:///Users/d"),
+            Some(PathBuf::from("/Users/d")),
+        );
+        // percent-encoded space
+        assert_eq!(
+            parse_osc7_path("file://h/Users/d/My%20Code"),
+            Some(PathBuf::from("/Users/d/My Code")),
+        );
+        // trailing whitespace tolerated
+        assert_eq!(
+            parse_osc7_path("file://h/tmp\n"),
+            Some(PathBuf::from("/tmp")),
+        );
+        // not OSC 7 / malformed
+        assert_eq!(parse_osc7_path("https://example.com"), None);
+        assert_eq!(parse_osc7_path("file://hostonly"), None);
+    }
+
+    #[test]
+    fn percent_decode_basics() {
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("100%"), "100%"); // dangling % left as-is
+        assert_eq!(percent_decode("%2Fx%2Fy"), "/x/y");
     }
 }
