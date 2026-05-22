@@ -803,6 +803,9 @@ pub struct Renderer {
     focused: bool,
     /// Renderer start time; cursor-blink phase is computed from elapsed.
     start_time: Instant,
+    /// Last time auto-titles were refreshed — throttles the per-tab
+    /// `proc_*` syscalls off the hot render path.
+    last_title_refresh: Instant,
     /// In-flight IME preedit text rendered near the cursor.
     preedit: String,
     /// When Some, an in-window confirmation modal is up. While it's set,
@@ -968,6 +971,7 @@ impl Renderer {
             bell_flash_until: None,
             focused: true,
             start_time: Instant::now(),
+            last_title_refresh: Instant::now(),
             preedit: String::new(),
             modal: None,
             context_menu: None,
@@ -2275,10 +2279,17 @@ impl Renderer {
         }
     }
 
-    /// Refresh every tab's auto-title from the OS each frame. Cheap (a few
-    /// syscalls) and only rebuilds the label buffer when the title actually
-    /// changes. Tabs that received an OSC title from their shell keep that.
+    /// Refresh every tab's auto-title from the OS. Each call does a handful
+    /// of `proc_*` syscalls per tab, so it's throttled well below the render
+    /// rate — a title only changes on `cd` or a foreground-process switch,
+    /// neither of which needs sub-second latency. Tabs that received an OSC
+    /// title from their shell keep that.
     fn refresh_auto_titles(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_title_refresh) < Duration::from_millis(500) {
+            return;
+        }
+        self.last_title_refresh = now;
         let active_id = self.active_tab_ref().id;
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);

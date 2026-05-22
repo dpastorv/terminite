@@ -185,6 +185,12 @@ pub struct LiveTerm {
 
 impl Drop for LiveTerm {
     fn drop(&mut self) {
+        // Wind down alacritty's PTY I/O thread. It owns the master fd and
+        // the child process; `Msg::Shutdown` breaks its loop so it drops the
+        // `Pty`, which closes the master and SIGHUPs the shell. Without this
+        // every closed tab leaks a thread *and* an orphaned shell — the same
+        // family of leak as the 2026-05-20 OOM incident.
+        let _ = self.sender.send(Msg::Shutdown);
         if self.slave_fd >= 0 {
             unsafe { libc::close(self.slave_fd) };
         }
