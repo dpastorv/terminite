@@ -14,7 +14,7 @@ mod rect;
 mod renderer;
 mod term;
 
-use renderer::Renderer;
+use renderer::{Renderer, SplitDir};
 
 // ── Layout constants shared across modules ─────────────────────────────────
 
@@ -268,6 +268,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         let shift = self.modifiers.shift_key();
 
                         // Cmd+Shift+] / Cmd+Shift+[: next / previous tab.
+                        // Cmd+Shift+D: split the active pane stacked.
                         if shift {
                             match ch {
                                 Some(']') => {
@@ -279,6 +280,12 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 Some('[') => {
                                     if let Some(r) = self.renderer.as_mut() {
                                         r.prev_tab();
+                                    }
+                                    return;
+                                }
+                                Some('d') => {
+                                    if let Some(r) = self.renderer.as_mut() {
+                                        r.split_active(SplitDir::Horizontal);
                                     }
                                     return;
                                 }
@@ -315,9 +322,18 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 }
                                 return;
                             }
+                            // Cmd+D: split the active pane side by side.
+                            Some('d') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.split_active(SplitDir::Vertical);
+                                }
+                                return;
+                            }
+                            // Cmd+W: close the active pane; if it was the
+                            // tab's last pane, close the tab.
                             Some('w') => {
                                 if let Some(r) = self.renderer.as_mut() {
-                                    if r.close_active_tab() {
+                                    if r.close_active_pane() && r.close_active_tab() {
                                         event_loop.exit();
                                     }
                                 }

@@ -198,7 +198,7 @@ struct PaneId(u64);
 /// Orientation of a split. `Vertical` puts children side by side (a vertical
 /// divider); `Horizontal` stacks them (a horizontal divider).
 #[derive(Copy, Clone, PartialEq)]
-enum SplitDir {
+pub enum SplitDir {
     Vertical,
     Horizontal,
 }
@@ -340,26 +340,6 @@ impl PaneNode {
         }
     }
 
-    fn leaf_ids(&self, out: &mut Vec<PaneId>) {
-        match self {
-            PaneNode::Leaf { id, .. } => out.push(*id),
-            PaneNode::Split { first, second, .. } => {
-                first.leaf_ids(out);
-                second.leaf_ids(out);
-            }
-        }
-    }
-
-    fn for_each_pane_mut(&mut self, f: &mut impl FnMut(&mut Pane)) {
-        match self {
-            PaneNode::Leaf { pane, .. } => f(pane),
-            PaneNode::Split { first, second, .. } => {
-                first.for_each_pane_mut(f);
-                second.for_each_pane_mut(f);
-            }
-        }
-    }
-
     fn leaf_count(&self) -> usize {
         match self {
             PaneNode::Leaf { .. } => 1,
@@ -414,6 +394,40 @@ impl Tab {
         let mut out = Vec::new();
         self.root_ref().layout(content, &mut out);
         out
+    }
+}
+
+/// Inner padding from a pane's rect edge to where its text grid begins.
+/// Both equal `TEXT_LEFT` so a single (unsplit) pane lands exactly where
+/// the pre-splits layout did.
+const PANE_PAD_X: f32 = TEXT_LEFT;
+const PANE_PAD_Y: f32 = TEXT_TOP - TAB_BAR_HEIGHT;
+
+/// Colour of the seam drawn in a split's divider gap.
+const DIVIDER_COLOR: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+
+/// Grid (cols, rows) that fits inside a pane's pixel rect. Padding is applied
+/// on the top-left only — content runs to the pane's right/bottom edge, which
+/// matches the pre-splits full-window behaviour.
+fn pane_grid(rect: PaneRect, cell_advance: f32) -> (usize, usize) {
+    let avail_w = (rect.w - PANE_PAD_X).max(cell_advance);
+    let avail_h = (rect.h - PANE_PAD_Y).max(LINE_HEIGHT);
+    let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
+    let rows = (avail_h / LINE_HEIGHT).floor().max(1.0) as usize;
+    (cols, rows)
+}
+
+/// Walk the pane tree, emitting one rect per split divider gap.
+fn collect_dividers(node: &PaneNode, rect: PaneRect, out: &mut Vec<RectInstance>) {
+    if let PaneNode::Split { dir, ratio, first, second } = node {
+        let (r1, r2) = split_rect(rect, *dir, *ratio);
+        let gap = match dir {
+            SplitDir::Vertical => [r1.x + r1.w, rect.y, DIVIDER_THICKNESS, rect.h],
+            SplitDir::Horizontal => [rect.x, r1.y + r1.h, rect.w, DIVIDER_THICKNESS],
+        };
+        out.push(RectInstance { rect: gap, color: DIVIDER_COLOR });
+        collect_dividers(first, r1, out);
+        collect_dividers(second, r2, out);
     }
 }
 
@@ -543,6 +557,15 @@ fn new_tab_struct(
     }
 }
 
+/// Where `render_pane` placed one pane's text — handed back to `render` so it
+/// can build the pane's `TextArea` after every pane's buffer is refreshed.
+struct PaneDraw {
+    pid: PaneId,
+    text_left: f32,
+    text_top: f32,
+    bounds: TextBounds,
+}
+
 pub struct Renderer {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -555,7 +578,6 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    text_buffer: Buffer,
 
     rects_below: RectRenderer,
     rects_above: RectRenderer,
@@ -588,12 +610,6 @@ pub struct Renderer {
     next_tab_id: u64,
     /// Monotonic counter for new PaneId allocation (across all tabs).
     next_pane_id: u64,
-    /// Which tab's content the shared `text_buffer` currently holds. When
-    /// this drifts from the active tab, `render()` forces a `set_rich_text`
-    /// regardless of the per-tab cache (otherwise switching back to a tab
-    /// whose cache still matches its grid would leave the buffer showing
-    /// the previously-active tab).
-    text_buffer_tab: Option<TabId>,
 
     // Shared mouse / system state. Mouse position is window-relative.
     mouse_pos: (f32, f32),
@@ -703,22 +719,6 @@ impl Renderer {
         let physical_width = width as f32;
         let physical_height = height as f32;
 
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        text_buffer.set_size(&mut font_system, Some(physical_width), Some(physical_height));
-        // Force every glyph to exactly one cell wide. Without this, cosmic-text
-        // uses each glyph's natural advance, which drifts slightly even within
-        // a monospace font and breaks column alignment (visible in `ls`,
-        // tables, ASCII art).
-        text_buffer.set_monospace_width(&mut font_system, Some(cell_advance));
-        text_buffer.set_text(
-            &mut font_system,
-            "",
-            &Attrs::new().family(Family::Monospace),
-            Shaping::Advanced,
-            None,
-        );
-        text_buffer.shape_until_scroll(&mut font_system, false);
-
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
         let first_tab_id = TabId(0);
         let live_term = LiveTerm::new(
@@ -750,7 +750,7 @@ impl Renderer {
         );
         let close_buffer = make_title_buffer(&mut font_system, "×");
 
-        Self {
+        let mut renderer = Self {
             instance,
             surface,
             surface_config,
@@ -761,7 +761,6 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
-            text_buffer,
             rects_below,
             rects_above,
             rects_tab_bar,
@@ -776,7 +775,6 @@ impl Renderer {
             active: 0,
             next_tab_id: 1,
             next_pane_id: 1,
-            text_buffer_tab: None,
             mouse_pos: (0.0, 0.0),
             clipboard,
             bell_flash_until: None,
@@ -791,7 +789,12 @@ impl Renderer {
             rss_kill_bytes: rss_kill_threshold_bytes(),
             proxy,
             window,
-        }
+        };
+        // Size the first pane's buffer/grid to the content area below the
+        // tab bar (the constructor built it at full surface size).
+        renderer.relayout();
+        renderer.sync_active_grid();
+        renderer
     }
 
     pub fn new_tab(&mut self) {
@@ -804,34 +807,20 @@ impl Renderer {
         self.next_tab_id += 1;
         let pane_id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
-        let live_term = LiveTerm::new(
-            self.grid_cols,
-            self.grid_rows,
-            self.cell_advance,
-            self.proxy.clone(),
-            id,
-            cwd,
-        );
+        // A fresh tab is one full-content pane, regardless of how the
+        // active tab happens to be split.
+        let content = self.content_rect();
+        let (cols, rows) = pane_grid(content, self.cell_advance);
+        let live_term =
+            LiveTerm::new(cols, rows, self.cell_advance, self.proxy.clone(), id, cwd);
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let pane_buf = make_content_buffer(
-            &mut self.font_system,
-            self.cell_advance,
-            self.surface_config.width as f32,
-            self.surface_config.height as f32,
-        );
-        let tab = new_tab_struct(
-            id,
-            title,
-            title_buf,
-            live_term,
-            pane_buf,
-            self.grid_cols,
-            self.grid_rows,
-            pane_id,
-        );
+        let pane_buf =
+            make_content_buffer(&mut self.font_system, self.cell_advance, content.w, content.h);
+        let tab = new_tab_struct(id, title, title_buf, live_term, pane_buf, cols, rows, pane_id);
         self.tabs.push(tab);
         self.active = self.tabs.len() - 1;
+        self.sync_active_grid();
         self.window.set_title(&self.tabs[self.active].title);
         self.window.request_redraw();
     }
@@ -869,6 +858,7 @@ impl Renderer {
         if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         }
+        self.sync_active_grid();
         self.window.set_title(&self.tabs[self.active].title);
         self.window.request_redraw();
         false
@@ -1184,6 +1174,7 @@ impl Renderer {
             return;
         }
         self.active = idx;
+        self.sync_active_grid();
         self.window.set_title(&self.tabs[self.active].title);
         self.window.request_redraw();
     }
@@ -1215,30 +1206,133 @@ impl Renderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        let physical_width = width as f32;
-        let physical_height = height as f32;
-        self.text_buffer.set_size(
-            &mut self.font_system,
-            Some(physical_width),
-            Some(physical_height),
-        );
-        self.text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
+        self.relayout();
+        self.sync_active_grid();
+    }
 
-        let (cols, rows) = compute_grid_size(physical_width, physical_height, self.cell_advance);
-        // Broadcast the new grid size to every tab's PTY; inactive tabs are
-        // still expected to keep accurate state for when the user switches
-        // back, and shells like ssh / vim resize on the SIGWINCH alacritty
-        // sends.
-        for tab in &mut self.tabs {
-            tab.active_pane_mut().live_term.resize(cols, rows);
+    /// The content area below the tab bar — the rect the pane tree fills.
+    fn content_rect(&self) -> PaneRect {
+        PaneRect {
+            x: 0.0,
+            y: TAB_BAR_HEIGHT,
+            w: self.surface_config.width as f32,
+            h: (self.surface_config.height as f32 - TAB_BAR_HEIGHT).max(1.0),
         }
-        self.grid_cols = cols;
-        self.grid_rows = rows;
-        // A resize invalidates the snapshot cache *and* the selection — the
-        // cells the user was selecting may now be in a different place.
-        self.tabs[self.active].active_pane_mut().last_text_runs.clear();
-        self.tabs[self.active].active_pane_mut().selection = None;
+    }
+
+    /// Pixel rect of the active tab's active pane.
+    fn active_pane_rect(&self) -> PaneRect {
+        let content = self.content_rect();
+        let active = self.tabs[self.active].active_pane;
+        self.tabs[self.active]
+            .pane_layout(content)
+            .into_iter()
+            .find(|(id, _)| *id == active)
+            .map(|(_, r)| r)
+            .unwrap_or(content)
+    }
+
+    /// Recompute every pane's pixel rect and resize its PTY / buffer to fit.
+    /// Inactive tabs are kept accurate too — shells resize on the SIGWINCH
+    /// alacritty sends, so they must stay correct for when the user returns.
+    fn relayout(&mut self) {
+        let content = self.content_rect();
+        for ti in 0..self.tabs.len() {
+            for (pid, rect) in self.tabs[ti].pane_layout(content) {
+                let (cols, rows) = pane_grid(rect, self.cell_advance);
+                let pane = self.tabs[ti]
+                    .root_mut()
+                    .find_mut(pid)
+                    .expect("laid-out pane present");
+                pane.text_buffer.set_size(
+                    &mut self.font_system,
+                    Some(rect.w.max(1.0)),
+                    Some(rect.h.max(1.0)),
+                );
+                if pane.cols != cols || pane.rows != rows {
+                    pane.live_term.resize(cols, rows);
+                    pane.cols = cols;
+                    pane.rows = rows;
+                    // A resize invalidates the snapshot cache and selection.
+                    pane.last_text_runs.clear();
+                    pane.buffer_dirty = true;
+                    pane.selection = None;
+                }
+            }
+        }
+    }
+
+    /// Mirror the active pane's grid into `grid_cols` / `grid_rows`, which the
+    /// mouse / autoscroll paths read.
+    fn sync_active_grid(&mut self) {
+        let p = self.tabs[self.active].active_pane_ref();
+        self.grid_cols = p.cols;
+        self.grid_rows = p.rows;
+    }
+
+    /// Split the active pane in two; the new pane becomes active.
+    pub fn split_active(&mut self, dir: SplitDir) {
+        let ti = self.active;
+        let target = self.tabs[ti].active_pane;
+        let cwd = self.tabs[ti]
+            .root_ref()
+            .find(target)
+            .and_then(|p| p.live_term.current_dir());
+        let new_pid = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
+        let tab_id = self.tabs[ti].id;
+        // Provisional size; `relayout` immediately corrects it.
+        let live = LiveTerm::new(
+            self.grid_cols.max(1),
+            self.grid_rows.max(1),
+            self.cell_advance,
+            self.proxy.clone(),
+            tab_id,
+            cwd,
+        );
+        let buf = make_content_buffer(&mut self.font_system, self.cell_advance, 100.0, 100.0);
+        let new_pane = Pane::new(live, buf, self.grid_cols.max(1), self.grid_rows.max(1));
+        let root = self.tabs[ti].root.take().expect("tab root present");
+        self.tabs[ti].root = Some(root.into_split(target, dir, new_pid, new_pane));
+        self.tabs[ti].active_pane = new_pid;
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+    }
+
+    /// Close the active pane. Returns true if it was the tab's last pane —
+    /// the caller should then close the tab itself.
+    pub fn close_active_pane(&mut self) -> bool {
+        let ti = self.active;
+        if self.tabs[ti].root_ref().leaf_count() <= 1 {
+            return true;
+        }
+        let target = self.tabs[ti].active_pane;
+        let root = self.tabs[ti].root.take().expect("tab root present");
+        let new_root = root.into_closed(target).expect("more than one leaf remains");
+        self.tabs[ti].active_pane = new_root.first_leaf_id();
+        self.tabs[ti].root = Some(new_root);
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+        false
+    }
+
+    /// Make the pane under a window-relative point the active one. Returns
+    /// true if a pane was hit.
+    fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
+        let content = self.content_rect();
+        for (pid, r) in self.tabs[self.active].pane_layout(content) {
+            if x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h {
+                if self.tabs[self.active].active_pane != pid {
+                    self.tabs[self.active].active_pane = pid;
+                    self.sync_active_grid();
+                    self.window.request_redraw();
+                }
+                return true;
+            }
+        }
+        false
     }
 
     // ── Mouse / keyboard input routing ────────────────────────────────────
@@ -1246,14 +1340,17 @@ impl Renderer {
     /// Convert a mouse pixel position into an absolute (Line, Column) using
     /// the current display_offset. Used for both selection start and extend.
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
-        let cx = (x - TEXT_LEFT).max(0.0);
+        let apr = self.active_pane_rect();
+        let left = apr.x + PANE_PAD_X;
+        let top = apr.y + PANE_PAD_Y;
+        let cx = (x - left).max(0.0);
         let col = ((cx / self.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
-        // Same pixel_offset correction as pixel_to_cell, but with a signed
+        // Same pixel_offset correction as cell_at_1indexed, but with a signed
         // floor so a click just inside the top of viewport while the buffer
         // is shifted down resolves to row -1 (the extra row above the
         // viewport) when appropriate.
-        let cy = (y - TEXT_TOP - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
+        let cy = (y - top - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
         let vl = cy.floor() as i32;
         let vl = vl.max(-1).min(self.grid_rows as i32 - 1);
         let display_offset = self.tabs[self.active].active_pane_ref().live_term.offset_and_history().0 as i32;
@@ -1321,10 +1418,12 @@ impl Renderer {
             // Auto-scroll if the cursor is past the viewport's top or
             // bottom edge: keep scrolling while the user holds the button
             // there, extending the selection as new content reveals.
-            let surface_h = self.surface_config.height as f32;
-            let new_dir = if y < TEXT_TOP + AUTOSCROLL_MARGIN_PX {
+            let apr = self.active_pane_rect();
+            let pane_top = apr.y + PANE_PAD_Y;
+            let pane_bottom = apr.y + apr.h;
+            let new_dir = if y < pane_top + AUTOSCROLL_MARGIN_PX {
                 Some(1)
-            } else if y > surface_h - AUTOSCROLL_MARGIN_PX {
+            } else if y > pane_bottom - AUTOSCROLL_MARGIN_PX {
                 Some(-1)
             } else {
                 None
@@ -1391,6 +1490,12 @@ impl Renderer {
                 }
             }
             return;
+        }
+
+        // Click in the content area focuses the pane under the cursor before
+        // anything else routes to "the active pane".
+        if self.mouse_pos.1 >= TAB_BAR_HEIGHT {
+            self.focus_pane_at(self.mouse_pos.0, self.mouse_pos.1);
         }
 
         let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
@@ -1895,16 +2000,19 @@ impl Renderer {
     /// 1-indexed (col, row) inside the visible viewport, for mouse-reporting
     /// protocols. Returns `None` if the pointer is outside the text area.
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
-        if x < TEXT_LEFT {
+        let apr = self.active_pane_rect();
+        let left = apr.x + PANE_PAD_X;
+        let top = apr.y + PANE_PAD_Y;
+        if x < left {
             return None;
         }
-        // Match pixel_to_cell's pixel_offset correction so the reported cell
-        // is the one the user visually clicked on, not the natural-grid cell.
-        let row_f = (y - TEXT_TOP - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
+        // pixel_offset correction so the reported cell is the one the user
+        // visually clicked on, not the natural-grid cell.
+        let row_f = (y - top - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
         if row_f < 0.0 {
             return None;
         }
-        let col = ((x - TEXT_LEFT) / self.cell_advance) as u32 + 1;
+        let col = ((x - left) / self.cell_advance) as u32 + 1;
         let row = row_f as u32 + 1;
         if col as usize > self.grid_cols || row as usize > self.grid_rows {
             return None;
@@ -1918,68 +2026,6 @@ impl Renderer {
         check_rss_kill_switch(self.rss_kill_bytes);
         self.refresh_auto_titles();
 
-        // Auto-scroll while drag-selecting past viewport edge. The main loop
-        // wakes us at `next_autoscroll_deadline`; we tick once per wake and
-        // re-arm.
-        if let Some(dir) = self.tabs[self.active].active_pane_mut().autoscroll_dir {
-            self.tabs[self.active].active_pane_mut().live_term.scroll(TermScroll::Delta(dir));
-            let (after, _history) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
-            if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
-                let edge = if dir > 0 {
-                    (-(after as i32), 0)
-                } else {
-                    (
-                        self.grid_rows as i32 - 1 - after as i32,
-                        self.grid_cols.saturating_sub(1),
-                    )
-                };
-                sel.extend_to(edge.0, edge.1);
-            }
-            self.next_autoscroll_deadline =
-                Some(Instant::now() + Duration::from_millis(AUTOSCROLL_TICK_MS));
-        } else {
-            self.next_autoscroll_deadline = None;
-        }
-
-        let Snapshot {
-            text_runs,
-            bg_runs,
-            deco_runs,
-            link_runs,
-            cursor_line,
-            cursor_col,
-            cursor_shape,
-            cursor_blinking,
-            has_extra_row,
-        } = self.tabs[self.active].active_pane_mut().live_term.snapshot();
-
-        let active_id = self.tabs[self.active].id;
-        let buffer_holds_other_tab = self.text_buffer_tab != Some(active_id);
-        let cache_stale = text_runs != self.tabs[self.active].active_pane_mut().last_text_runs;
-        if buffer_holds_other_tab || cache_stale {
-            let default_attrs = Attrs::new().family(Family::Monospace);
-            self.text_buffer.set_rich_text(
-                &mut self.font_system,
-                text_runs.iter().map(|(text, style)| {
-                    let mut attrs = default_attrs.clone().color(style.color);
-                    if style.bold {
-                        attrs = attrs.weight(Weight::BOLD);
-                    }
-                    if style.italic {
-                        attrs = attrs.style(Style::Italic);
-                    }
-                    (text.as_str(), attrs)
-                }),
-                &default_attrs,
-                Shaping::Advanced,
-                None,
-            );
-            self.text_buffer
-                .shape_until_scroll(&mut self.font_system, false);
-            self.tabs[self.active].active_pane_mut().last_text_runs = text_runs;
-            self.text_buffer_tab = Some(active_id);
-        }
-
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -1988,203 +2034,50 @@ impl Renderer {
             },
         );
 
-        let cell_advance = self.cell_advance;
-        // Pixel-smooth scroll: every visible Y origin is shifted by this much.
-        let y_shift = self.tabs[self.active].active_pane_mut().pixel_offset;
-        let mut below: Vec<RectInstance> = Vec::with_capacity(bg_runs.len() + 8);
-
-        for run in &bg_runs {
-            below.push(RectInstance {
-                rect: [
-                    TEXT_LEFT + run.start_col as f32 * cell_advance,
-                    TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift,
-                    run.width as f32 * cell_advance,
-                    LINE_HEIGHT,
-                ],
-                color: color_to_floats(run.color),
-            });
-        }
-
-        // Selection highlight: one rect per row of the selection. Coordinates
-        // are absolute (Line index); convert to viewport rows by adding the
-        // current display_offset so the highlight rides along with content.
-        // We allow vl = -1 (one row above the viewport) so the highlight
-        // smoothly enters from the top during pixel-smooth scroll — matching
-        // the extra-row text/background rendering. Without this, a selected
-        // line briefly loses its highlight as it slides through that row.
-        if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() {
-            if !sel.is_empty() {
-                let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
-                let cols = self.grid_cols;
-                let rows = self.grid_rows as i32;
-                let display_offset = self.tabs[self.active].active_pane_mut().live_term.offset_and_history().0 as i32;
-                for abs_line in s_line..=e_line {
-                    let vl = abs_line + display_offset;
-                    if vl < -1 || vl >= rows {
-                        continue;
-                    }
-                    let col_start = if abs_line == s_line { s_col } else { 0 };
-                    let col_end_raw = if abs_line == e_line { e_col + 1 } else { cols };
-                    let col_end = col_end_raw.min(cols);
-                    let col_start = col_start.min(cols);
-                    if col_start >= col_end {
-                        continue;
-                    }
-                    below.push(RectInstance {
-                        rect: [
-                            TEXT_LEFT + col_start as f32 * cell_advance,
-                            TEXT_TOP + vl as f32 * LINE_HEIGHT + y_shift,
-                            (col_end - col_start) as f32 * cell_advance,
-                            LINE_HEIGHT,
-                        ],
-                        color: SELECTION_COLOR,
-                    });
-                }
-            }
-        }
-
-        // Find-match highlights: all matches in a pale gold, the current one
-        // accented. Absolute Line coords → viewport rows like selection.
-        if let Some(find) = self.find.as_ref() {
-            let rows = self.grid_rows as i32;
-            let display_offset =
-                self.tabs[self.active].active_pane_mut().live_term.offset_and_history().0 as i32;
-            for (i, &(line, cs, ce)) in find.matches.iter().enumerate() {
-                let vl = line + display_offset;
-                if vl < -1 || vl >= rows {
-                    continue;
-                }
-                let color = if i == find.current {
-                    FIND_CURRENT_COLOR
-                } else {
-                    FIND_MATCH_COLOR
-                };
-                below.push(RectInstance {
-                    rect: [
-                        TEXT_LEFT + cs as f32 * cell_advance,
-                        TEXT_TOP + vl as f32 * LINE_HEIGHT + y_shift,
-                        (ce - cs + 1) as f32 * cell_advance,
-                        LINE_HEIGHT,
-                    ],
-                    color,
-                });
-            }
-        }
-
-        // Cursor last in the below layer so it sits on top of selection and bgs.
-        // Shape (CSI 0–6 q): block / underline / beam, plus hollow + hidden.
-        // Blink phase: drawn only while window has focus and blink is enabled.
-        // Default to blink-on whenever the window is focused. alacritty's
-        // CursorStyle.blinking is false unless the shell explicitly sends
-        // `\e[1/3/5 q`; respecting that strictly leaves the cursor frozen
-        // in default zsh/bash, which is not the 2026 expectation. We always
-        // blink when focused for v1; a config flag can opt out later.
-        let _ = cursor_blinking;
+        // Cursor blink — one phase shared by every pane. alacritty's
+        // CursorStyle.blinking is false unless the shell sends `\e[1/3/5 q`;
+        // respecting that strictly freezes the cursor in default zsh/bash,
+        // so we blink whenever the window is focused.
         let blink_on = if self.focused {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             elapsed_ms % CURSOR_BLINK_PERIOD_MS < CURSOR_BLINK_PERIOD_MS / 2
         } else {
             true
         };
-        let cursor_visible = !matches!(cursor_shape, CursorShapeKind::Hidden);
-        if cursor_visible && blink_on {
-            let cx = TEXT_LEFT + cursor_col as f32 * cell_advance;
-            let cy_base =
-                TEXT_TOP + (cursor_line.max(0) as f32) * LINE_HEIGHT + y_shift;
-            let (rect, is_hollow) = match cursor_shape {
-                CursorShapeKind::Block | CursorShapeKind::HollowBlock => (
-                    [
-                        cx - CURSOR_PAD_X,
-                        cy_base - CURSOR_PAD_Y,
-                        cell_advance + 2.0 * CURSOR_PAD_X,
-                        LINE_HEIGHT + 2.0 * CURSOR_PAD_Y,
-                    ],
-                    matches!(cursor_shape, CursorShapeKind::HollowBlock),
-                ),
-                CursorShapeKind::Beam => (
-                    [cx, cy_base, 2.0, LINE_HEIGHT],
-                    false,
-                ),
-                CursorShapeKind::Underline => (
-                    [
-                        cx,
-                        cy_base + LINE_HEIGHT - 2.0,
-                        cell_advance,
-                        2.0,
-                    ],
-                    false,
-                ),
-                CursorShapeKind::Hidden => ([0.0; 4], false),
-            };
-            if is_hollow {
-                // Outline only: draw four 1-px edges of the block.
-                let [x, y, w, h] = rect;
-                let t = 1.5;
-                below.push(RectInstance { rect: [x, y, w, t], color: CURSOR_COLOR });
-                below.push(RectInstance { rect: [x, y + h - t, w, t], color: CURSOR_COLOR });
-                below.push(RectInstance { rect: [x, y, t, h], color: CURSOR_COLOR });
-                below.push(RectInstance { rect: [x + w - t, y, t, h], color: CURSOR_COLOR });
-            } else {
-                below.push(RectInstance { rect, color: CURSOR_COLOR });
-            }
-        }
-
-        // Surface the next blink phase change as a deadline so the main
-        // loop's WaitUntil wakes us — no per-frame thread spawn.
+        // Surface the next blink phase change as a deadline so the main loop's
+        // WaitUntil wakes us — no per-frame thread spawn.
         self.next_blink_deadline = if self.focused {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             let half = CURSOR_BLINK_PERIOD_MS / 2;
             let into_half = elapsed_ms % half;
-            let ms_to_next = (half - into_half).max(1);
-            Some(Instant::now() + Duration::from_millis(ms_to_next))
+            Some(Instant::now() + Duration::from_millis((half - into_half).max(1)))
         } else {
             None
         };
+        // render_pane re-arms this if a pane is autoscrolling.
+        self.next_autoscroll_deadline = None;
 
-        let mut above: Vec<RectInstance> = Vec::with_capacity(deco_runs.len() * 2);
-        for run in &deco_runs {
-            let x = TEXT_LEFT + run.start_col as f32 * cell_advance;
-            let w = run.width as f32 * cell_advance;
-            let line_y = TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift;
-            let (y, h) = match run.kind {
-                DecorationKind::Underline | DecorationKind::DoubleUnderline => (
-                    line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
-                    UNDERLINE_THICKNESS,
-                ),
-                DecorationKind::Strikeout => (
-                    line_y + LINE_HEIGHT / 2.0 - STRIKEOUT_THICKNESS / 2.0,
-                    STRIKEOUT_THICKNESS,
-                ),
-            };
-            let color = color_to_floats(run.color);
-            above.push(RectInstance {
-                rect: [x, y, w, h],
-                color,
-            });
-            if matches!(run.kind, DecorationKind::DoubleUnderline) {
-                above.push(RectInstance {
-                    rect: [x, y - DOUBLE_UNDERLINE_GAP, w, UNDERLINE_THICKNESS],
-                    color,
-                });
-            }
+        // Lay out every pane of the active tab, then render each into its rect.
+        let content = self.content_rect();
+        let layout = self.tabs[self.active].pane_layout(content);
+        let active_pane = self.tabs[self.active].active_pane;
+        let mut below: Vec<RectInstance> = Vec::new();
+        let mut above: Vec<RectInstance> = Vec::new();
+        let mut draws: Vec<PaneDraw> = Vec::with_capacity(layout.len());
+        for (pid, rect) in &layout {
+            let d = self.render_pane(
+                *pid,
+                *rect,
+                *pid == active_pane,
+                blink_on,
+                &mut below,
+                &mut above,
+            );
+            draws.push(d);
         }
 
-        // OSC 8 hyperlinks: a thin underline in a steel-blue so they read as
-        // clickable without shouting. Cmd-click opens them (see mouse_down).
-        for run in &link_runs {
-            let x = TEXT_LEFT + run.start_col as f32 * cell_advance;
-            let w = run.width as f32 * cell_advance;
-            let line_y = TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift;
-            above.push(RectInstance {
-                rect: [
-                    x,
-                    line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
-                    w,
-                    UNDERLINE_THICKNESS,
-                ],
-                color: LINK_UNDERLINE_COLOR,
-            });
-        }
+        // Split divider seams drawn on top of pane content.
+        collect_dividers(self.tabs[self.active].root_ref(), content, &mut above);
 
         // Find bar background — a floating box at the top-right of the
         // content area. The query text is drawn by the tab text renderer.
@@ -2367,45 +2260,37 @@ impl Renderer {
                 .expect("terminite: menu text prepare failed");
         }
 
-        // Clip text rendering to the viewport — keeps the extra row above the
-        // viewport invisible when pixel_offset == 0, and only its bottom slides
-        // into view as pixel_offset grows.
-        let bounds = TextBounds {
-            left: 0,
-            top: TEXT_TOP as i32,
-            right: self.surface_config.width as i32,
-            bottom: self.surface_config.height as i32,
-        };
-
-        // text_runs starts with the extra row above the viewport (when
-        // available), so the buffer's top sits one line up; the y_shift
-        // slides it down into view as pixel_offset grows. When there's no
-        // extra row, the buffer starts at the normal top.
-        let text_top = if has_extra_row {
-            TEXT_TOP - LINE_HEIGHT + y_shift
-        } else {
-            TEXT_TOP + y_shift
-        };
-
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: TEXT_LEFT,
-                    top: text_top,
+        // Content text — one TextArea per pane. Each `PaneDraw` carries the
+        // pane's text origin (already y-shifted, accounting for the extra
+        // row) and a TextBounds clipped to the pane's rect so neighbouring
+        // panes don't bleed into one another.
+        {
+            let tab = &self.tabs[self.active];
+            let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
+            for d in &draws {
+                let pane = tab.root_ref().find(d.pid).expect("drawn pane present");
+                content_areas.push(TextArea {
+                    buffer: &pane.text_buffer,
+                    left: d.text_left,
+                    top: d.text_top,
                     scale: 1.0,
-                    bounds,
+                    bounds: d.bounds,
                     default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                     custom_glyphs: &[],
-                }],
-                &mut self.swash_cache,
-            )
-            .expect("terminite: text prepare failed");
+                });
+            }
+            self.text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    content_areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: text prepare failed");
+        }
 
         // Prepare tab bar labels in a second TextRenderer so it can draw
         // under a wider scissor in the pass below.
@@ -2537,10 +2422,10 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // Scissor: same idea as TextBounds, but for the rect pipelines.
-            // Without this, the extra-row backgrounds and decorations bleed
-            // into the top padding area above the viewport.
-            let scissor_y = TEXT_TOP as u32;
+            // Scissor the content pipelines to the area below the tab bar.
+            // Per-pane bleed is already prevented: render_pane clips every
+            // rect to its pane box and each pane's text has a TextBounds.
+            let scissor_y = TAB_BAR_HEIGHT as u32;
             let scissor_h = self
                 .surface_config
                 .height
@@ -2579,6 +2464,303 @@ impl Renderer {
         self.window.pre_present_notify();
         surface_texture.present();
         self.atlas.trim();
+    }
+
+    /// Render one pane into its pixel rect: tick its autoscroll, snapshot it,
+    /// refresh its text buffer, and emit clipped background / selection /
+    /// cursor / decoration rects into the shared `below` / `above` layers.
+    /// Returns where (and how) to place the pane's text in `text_renderer`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_pane(
+        &mut self,
+        pid: PaneId,
+        rect: PaneRect,
+        is_active: bool,
+        blink_on: bool,
+        below: &mut Vec<RectInstance>,
+        above: &mut Vec<RectInstance>,
+    ) -> PaneDraw {
+        let ti = self.active;
+        let cell_advance = self.cell_advance;
+        // Pane content origin and clip box. Padding is top-left only, so a
+        // single (unsplit) pane lands exactly where the pre-splits code did.
+        let px = rect.x + PANE_PAD_X;
+        let py = rect.y + PANE_PAD_Y;
+        let box_l = px;
+        let box_t = py;
+        let box_r = rect.x + rect.w;
+        let box_b = rect.y + rect.h;
+        // Clip a rect to this pane's content box; `None` if fully outside.
+        // Hides the extra row above the pane until it scrolls into view, and
+        // keeps one pane's rects out of its neighbour.
+        let clip = |r: [f32; 4]| -> Option<[f32; 4]> {
+            let nx = r[0].max(box_l);
+            let ny = r[1].max(box_t);
+            let nr = (r[0] + r[2]).min(box_r);
+            let nb = (r[1] + r[3]).min(box_b);
+            if nr <= nx || nb <= ny {
+                None
+            } else {
+                Some([nx, ny, nr - nx, nb - ny])
+            }
+        };
+
+        // ── Autoscroll tick (only the drag-selecting pane has a direction) ──
+        let autoscroll_dir = self
+            .tabs[ti]
+            .root_mut()
+            .find_mut(pid)
+            .expect("laid-out pane present")
+            .autoscroll_dir;
+        if let Some(dir) = autoscroll_dir {
+            {
+                let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
+                pane.live_term.scroll(TermScroll::Delta(dir));
+                let (after, _history) = pane.live_term.offset_and_history();
+                let (c, r) = (pane.cols, pane.rows);
+                if let Some(sel) = pane.selection.as_mut() {
+                    let edge = if dir > 0 {
+                        (-(after as i32), 0)
+                    } else {
+                        (r as i32 - 1 - after as i32, c.saturating_sub(1))
+                    };
+                    sel.extend_to(edge.0, edge.1);
+                }
+            }
+            self.next_autoscroll_deadline =
+                Some(Instant::now() + Duration::from_millis(AUTOSCROLL_TICK_MS));
+        }
+
+        // ── Snapshot ──
+        let Snapshot {
+            text_runs,
+            bg_runs,
+            deco_runs,
+            link_runs,
+            cursor_line,
+            cursor_col,
+            cursor_shape,
+            cursor_blinking,
+            has_extra_row,
+        } = self
+            .tabs[ti]
+            .root_mut()
+            .find_mut(pid)
+            .expect("pane")
+            .live_term
+            .snapshot();
+        let _ = cursor_blinking;
+
+        // ── Refresh this pane's text buffer if its content changed ──
+        {
+            let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
+            let stale = pane.buffer_dirty || text_runs != pane.last_text_runs;
+            if stale {
+                let default_attrs = Attrs::new().family(Family::Monospace);
+                pane.text_buffer.set_rich_text(
+                    &mut self.font_system,
+                    text_runs.iter().map(|(text, style)| {
+                        let mut attrs = default_attrs.clone().color(style.color);
+                        if style.bold {
+                            attrs = attrs.weight(Weight::BOLD);
+                        }
+                        if style.italic {
+                            attrs = attrs.style(Style::Italic);
+                        }
+                        (text.as_str(), attrs)
+                    }),
+                    &default_attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+                pane.text_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+                pane.last_text_runs = text_runs;
+                pane.buffer_dirty = false;
+            }
+        }
+
+        // ── Per-pane geometry reads ──
+        let (y_shift, selection, display_offset, cols, rows) = {
+            let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
+            (
+                pane.pixel_offset,
+                pane.selection,
+                pane.live_term.offset_and_history().0 as i32,
+                pane.cols,
+                pane.rows,
+            )
+        };
+
+        // ── Background runs ──
+        for run in &bg_runs {
+            if let Some(rc) = clip([
+                px + run.start_col as f32 * cell_advance,
+                py + run.line as f32 * LINE_HEIGHT + y_shift,
+                run.width as f32 * cell_advance,
+                LINE_HEIGHT,
+            ]) {
+                below.push(RectInstance {
+                    rect: rc,
+                    color: color_to_floats(run.color),
+                });
+            }
+        }
+
+        // ── Selection highlight: one rect per row, absolute Line coords
+        // converted to viewport rows via display_offset. vl = -1 is allowed
+        // so the highlight enters smoothly from the top during scroll. ──
+        if let Some(sel) = selection {
+            if !sel.is_empty() {
+                let ((s_line, s_col), (e_line, e_col)) = sel.normalized();
+                for abs_line in s_line..=e_line {
+                    let vl = abs_line + display_offset;
+                    if vl < -1 || vl >= rows as i32 {
+                        continue;
+                    }
+                    let col_start = if abs_line == s_line { s_col } else { 0 };
+                    let col_end_raw = if abs_line == e_line { e_col + 1 } else { cols };
+                    let col_end = col_end_raw.min(cols);
+                    let col_start = col_start.min(cols);
+                    if col_start >= col_end {
+                        continue;
+                    }
+                    if let Some(rc) = clip([
+                        px + col_start as f32 * cell_advance,
+                        py + vl as f32 * LINE_HEIGHT + y_shift,
+                        (col_end - col_start) as f32 * cell_advance,
+                        LINE_HEIGHT,
+                    ]) {
+                        below.push(RectInstance { rect: rc, color: SELECTION_COLOR });
+                    }
+                }
+            }
+        }
+
+        // ── Find-match highlights (active pane's search only) ──
+        if is_active {
+            if let Some(find) = self.find.as_ref() {
+                for (i, &(line, cs, ce)) in find.matches.iter().enumerate() {
+                    let vl = line + display_offset;
+                    if vl < -1 || vl >= rows as i32 {
+                        continue;
+                    }
+                    let color = if i == find.current {
+                        FIND_CURRENT_COLOR
+                    } else {
+                        FIND_MATCH_COLOR
+                    };
+                    if let Some(rc) = clip([
+                        px + cs as f32 * cell_advance,
+                        py + vl as f32 * LINE_HEIGHT + y_shift,
+                        (ce - cs + 1) as f32 * cell_advance,
+                        LINE_HEIGHT,
+                    ]) {
+                        below.push(RectInstance { rect: rc, color });
+                    }
+                }
+            }
+        }
+
+        // ── Cursor (last in `below` so it sits on top of selection/bgs) ──
+        let cursor_visible = !matches!(cursor_shape, CursorShapeKind::Hidden);
+        if cursor_visible && blink_on {
+            let cx = px + cursor_col as f32 * cell_advance;
+            let cy_base = py + (cursor_line.max(0) as f32) * LINE_HEIGHT + y_shift;
+            let (crect, is_hollow) = match cursor_shape {
+                CursorShapeKind::Block | CursorShapeKind::HollowBlock => (
+                    [
+                        cx - CURSOR_PAD_X,
+                        cy_base - CURSOR_PAD_Y,
+                        cell_advance + 2.0 * CURSOR_PAD_X,
+                        LINE_HEIGHT + 2.0 * CURSOR_PAD_Y,
+                    ],
+                    matches!(cursor_shape, CursorShapeKind::HollowBlock),
+                ),
+                CursorShapeKind::Beam => ([cx, cy_base, 2.0, LINE_HEIGHT], false),
+                CursorShapeKind::Underline => {
+                    ([cx, cy_base + LINE_HEIGHT - 2.0, cell_advance, 2.0], false)
+                }
+                CursorShapeKind::Hidden => ([0.0; 4], false),
+            };
+            if is_hollow {
+                let [x, y, w, h] = crect;
+                let t = 1.5;
+                for edge in [
+                    [x, y, w, t],
+                    [x, y + h - t, w, t],
+                    [x, y, t, h],
+                    [x + w - t, y, t, h],
+                ] {
+                    if let Some(rc) = clip(edge) {
+                        below.push(RectInstance { rect: rc, color: CURSOR_COLOR });
+                    }
+                }
+            } else if let Some(rc) = clip(crect) {
+                below.push(RectInstance { rect: rc, color: CURSOR_COLOR });
+            }
+        }
+
+        // ── Decorations (underline / double underline / strikeout) ──
+        for run in &deco_runs {
+            let x = px + run.start_col as f32 * cell_advance;
+            let w = run.width as f32 * cell_advance;
+            let line_y = py + run.line as f32 * LINE_HEIGHT + y_shift;
+            let (y, h) = match run.kind {
+                DecorationKind::Underline | DecorationKind::DoubleUnderline => {
+                    (line_y + LINE_HEIGHT - UNDERLINE_THICKNESS, UNDERLINE_THICKNESS)
+                }
+                DecorationKind::Strikeout => (
+                    line_y + LINE_HEIGHT / 2.0 - STRIKEOUT_THICKNESS / 2.0,
+                    STRIKEOUT_THICKNESS,
+                ),
+            };
+            let color = color_to_floats(run.color);
+            if let Some(rc) = clip([x, y, w, h]) {
+                above.push(RectInstance { rect: rc, color });
+            }
+            if matches!(run.kind, DecorationKind::DoubleUnderline) {
+                if let Some(rc) =
+                    clip([x, y - DOUBLE_UNDERLINE_GAP, w, UNDERLINE_THICKNESS])
+                {
+                    above.push(RectInstance { rect: rc, color });
+                }
+            }
+        }
+
+        // ── OSC 8 hyperlink underlines ──
+        for run in &link_runs {
+            let x = px + run.start_col as f32 * cell_advance;
+            let w = run.width as f32 * cell_advance;
+            let line_y = py + run.line as f32 * LINE_HEIGHT + y_shift;
+            if let Some(rc) = clip([
+                x,
+                line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
+                w,
+                UNDERLINE_THICKNESS,
+            ]) {
+                above.push(RectInstance { rect: rc, color: LINK_UNDERLINE_COLOR });
+            }
+        }
+
+        // The buffer's top sits one line up when an extra row is present; the
+        // y_shift slides it into view as pixel_offset grows.
+        let text_top = if has_extra_row {
+            py - LINE_HEIGHT + y_shift
+        } else {
+            py + y_shift
+        };
+        PaneDraw {
+            pid,
+            text_left: px,
+            text_top,
+            bounds: TextBounds {
+                left: box_l as i32,
+                top: box_t as i32,
+                right: box_r as i32,
+                bottom: box_b as i32,
+            },
+        }
     }
 }
 
