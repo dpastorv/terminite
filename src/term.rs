@@ -551,49 +551,6 @@ impl LiveTerm {
         (term.grid().display_offset(), term.grid().history_size())
     }
 
-    /// Return up to 40 characters of the topmost visible row's content, for
-    /// diagnostic logging. Trimmed.
-    pub fn debug_top_row(&self) -> String {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let display_offset = grid.display_offset() as i32;
-        let row = &grid[Line(0 - display_offset)];
-        let cap = grid.columns().min(40);
-        let mut s = String::with_capacity(cap);
-        for col in 0..cap {
-            s.push(row[Column(col)].c);
-        }
-        s.trim().to_string()
-    }
-
-    /// Diagnostic dump: cursor position plus the content of the last 3 visible
-    /// rows (the cursor row and the two above), so we can see whether
-    /// snapshot is missing the bottom of the viewport.
-    pub fn debug_bottom_strip(&self, rows: usize) -> String {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let display_offset = grid.display_offset() as i32;
-        let cursor = grid.cursor.point;
-        let take = |line: i32| -> String {
-            let row = &grid[Line(line - display_offset)];
-            let cap = grid.columns().min(40);
-            let mut s = String::with_capacity(cap);
-            for col in 0..cap {
-                s.push(row[Column(col)].c);
-            }
-            s.trim().to_string()
-        };
-        let last = rows as i32 - 1;
-        format!(
-            "cursor=Line({}),Col({}) bottom3='{}' / '{}' / '{}'",
-            cursor.line.0,
-            cursor.column.0,
-            take(last - 2),
-            take(last - 1),
-            take(last),
-        )
-    }
-
     /// Extract the text from a (line, col) range — start..=end inclusive on
     /// both endpoints, in *absolute* alacritty Line coordinates. Wide-char
     /// spacers are skipped; zero-width combining marks are appended to their

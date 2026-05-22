@@ -151,14 +151,22 @@ struct PaneRect {
     h: f32,
 }
 
-/// One shell pane: a PTY, its own text buffer, current grid size, and
-/// everything conceptually per-shell — scroll state, selection, click
-/// history, snapshot cache.
-struct Pane {
+/// One shell — a PTY plus its title and view state. The unit you tab
+/// between inside a pane. (Pre-inversion this was `Pane`; the window now
+/// owns the pane tree directly and each pane leaf owns a `Vec<Tab>`.)
+struct Tab {
+    id: TabId,
+    title: String,
+    /// Tab-bar label buffer; rebuilt whenever the displayed title changes.
+    title_buffer: Buffer,
+    /// Shell-set title (OSC 0/1/2) — when present, wins over the auto title.
+    shell_title: Option<String>,
+    /// Last auto-title we computed; rebuild the buffer only on changes.
+    last_auto_title: String,
     live_term: LiveTerm,
-    /// This pane's own cosmic-text buffer (each pane renders independently).
+    /// This tab's own cosmic-text content buffer.
     text_buffer: Buffer,
-    /// Grid size this pane's PTY is currently sized to.
+    /// Grid size this tab's PTY is currently sized to.
     cols: usize,
     rows: usize,
     pixel_offset: f32,
@@ -172,9 +180,23 @@ struct Pane {
     autoscroll_dir: Option<i32>,
 }
 
-impl Pane {
-    fn new(live_term: LiveTerm, text_buffer: Buffer, cols: usize, rows: usize) -> Self {
+impl Tab {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        id: TabId,
+        title: String,
+        title_buffer: Buffer,
+        live_term: LiveTerm,
+        text_buffer: Buffer,
+        cols: usize,
+        rows: usize,
+    ) -> Self {
         Self {
+            id,
+            title,
+            title_buffer,
+            shell_title: None,
+            last_auto_title: String::new(),
             live_term,
             text_buffer,
             cols,
@@ -188,6 +210,27 @@ impl Pane {
             buffer_dirty: true,
             autoscroll_dir: None,
         }
+    }
+}
+
+/// A leaf of the window's pane tree — a self-contained workspace with its
+/// own tab bar. Every leaf is equal; this is the Blender area model.
+struct Pane {
+    tabs: Vec<Tab>,
+    active_tab: usize,
+}
+
+impl Pane {
+    fn single(tab: Tab) -> Self {
+        Self { tabs: vec![tab], active_tab: 0 }
+    }
+
+    fn active_tab_ref(&self) -> &Tab {
+        &self.tabs[self.active_tab]
+    }
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active_tab]
     }
 }
 
@@ -348,73 +391,51 @@ impl PaneNode {
             }
         }
     }
-}
 
-/// One tab in the window. Owns the tab-bar identity (title + label buffer)
-/// and a tree of panes; `active_pane` is the focused leaf. `root` is an
-/// `Option` only so split / close can `take()` it and rebuild — it is
-/// always `Some` between operations.
-struct Tab {
-    id: TabId,
-    title: String,
-    /// Tab bar label buffer; rebuilt whenever the displayed title changes.
-    title_buffer: Buffer,
-    /// Shell-set title (OSC 0/1/2) — when present, wins over the auto title.
-    shell_title: Option<String>,
-    /// Last auto-title we computed; rebuild the buffer only on changes.
-    last_auto_title: String,
-    root: Option<PaneNode>,
-    active_pane: PaneId,
-}
-
-impl Tab {
-    fn root_ref(&self) -> &PaneNode {
-        self.root.as_ref().expect("tab root present")
-    }
-
-    fn root_mut(&mut self) -> &mut PaneNode {
-        self.root.as_mut().expect("tab root present")
-    }
-
-    fn active_pane_ref(&self) -> &Pane {
-        self.root_ref()
-            .find(self.active_pane)
-            .expect("active pane present in tree")
-    }
-
-    fn active_pane_mut(&mut self) -> &mut Pane {
-        let id = self.active_pane;
-        self.root_mut()
-            .find_mut(id)
-            .expect("active pane present in tree")
-    }
-
-    /// Pixel rects for every pane, given the content area.
-    fn pane_layout(&self, content: PaneRect) -> Vec<(PaneId, PaneRect)> {
-        let mut out = Vec::new();
-        self.root_ref().layout(content, &mut out);
-        out
+    /// Collect a mutable reference to every tab in every pane of the tree.
+    fn all_tabs_mut<'a>(&'a mut self, out: &mut Vec<&'a mut Tab>) {
+        match self {
+            PaneNode::Leaf { pane, .. } => {
+                for t in pane.tabs.iter_mut() {
+                    out.push(t);
+                }
+            }
+            PaneNode::Split { first, second, .. } => {
+                first.all_tabs_mut(out);
+                second.all_tabs_mut(out);
+            }
+        }
     }
 }
 
-/// Inner padding from a pane's rect edge to where its text grid begins.
-/// Both equal `TEXT_LEFT` so a single (unsplit) pane lands exactly where
-/// the pre-splits layout did.
+/// Inner padding from a pane's content-area edge to where its text grid
+/// begins. Both equal `TEXT_LEFT`.
 const PANE_PAD_X: f32 = TEXT_LEFT;
-const PANE_PAD_Y: f32 = TEXT_TOP - TAB_BAR_HEIGHT;
+const PANE_PAD_Y: f32 = TEXT_LEFT;
 
 /// Colour of the seam drawn in a split's divider gap.
 const DIVIDER_COLOR: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
 
-/// Grid (cols, rows) that fits inside a pane's pixel rect. Padding is applied
-/// on the top-left only — content runs to the pane's right/bottom edge, which
-/// matches the pre-splits full-window behaviour.
+/// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
+/// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
 fn pane_grid(rect: PaneRect, cell_advance: f32) -> (usize, usize) {
     let avail_w = (rect.w - PANE_PAD_X).max(cell_advance);
-    let avail_h = (rect.h - PANE_PAD_Y).max(LINE_HEIGHT);
+    let avail_h = (rect.h - TAB_BAR_HEIGHT - PANE_PAD_Y).max(LINE_HEIGHT);
     let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
     let rows = (avail_h / LINE_HEIGHT).floor().max(1.0) as usize;
     (cols, rows)
+}
+
+/// Geometry of each tab inside a pane's tab bar: `(x_start, width, is_active)`.
+/// Widths shrink uniformly between TAB_MIN_WIDTH and TAB_MAX_WIDTH.
+fn pane_tab_layout(rect: PaneRect, n: usize, active: usize) -> Vec<(f32, f32, bool)> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let per = (rect.w / n as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+    (0..n)
+        .map(|i| (rect.x + i as f32 * per, per, i == active))
+        .collect()
 }
 
 /// Walk the pane tree, emitting one rect per split divider gap.
@@ -532,38 +553,28 @@ struct Modal {
     confirm_rect: (f32, f32, f32, f32),
 }
 
-#[allow(clippy::too_many_arguments)]
-fn new_tab_struct(
-    id: TabId,
-    title: String,
-    title_buffer: Buffer,
-    live_term: LiveTerm,
-    text_buffer: Buffer,
-    cols: usize,
-    rows: usize,
-    pane_id: PaneId,
-) -> Tab {
-    Tab {
-        id,
-        title,
-        title_buffer,
-        shell_title: None,
-        last_auto_title: String::new(),
-        root: Some(PaneNode::Leaf {
-            id: pane_id,
-            pane: Pane::new(live_term, text_buffer, cols, rows),
-        }),
-        active_pane: pane_id,
-    }
-}
-
-/// Where `render_pane` placed one pane's text — handed back to `render` so it
-/// can build the pane's `TextArea` after every pane's buffer is refreshed.
+/// Where `render_pane` placed one pane's content + tab-bar text — handed
+/// back to `render` so it can build the `TextArea`s after every pane's
+/// buffers are refreshed (phase 2 needs immutable borrows).
 struct PaneDraw {
     pid: PaneId,
+    /// Active tab's content text placement.
     text_left: f32,
     text_top: f32,
     bounds: TextBounds,
+    /// One slot per tab in this pane's tab bar.
+    tabs: Vec<TabLabelSlot>,
+}
+
+/// Placement for one tab's label + close glyph in a pane's tab bar.
+struct TabLabelSlot {
+    index: usize,
+    is_active: bool,
+    label_left: f32,
+    label_bounds: TextBounds,
+    close_left: f32,
+    close_bounds: TextBounds,
+    text_top: f32,
 }
 
 pub struct Renderer {
@@ -601,14 +612,16 @@ pub struct Renderer {
     grid_cols: usize,
     grid_rows: usize,
 
-    /// Tabs and the index of the currently-active one. Per-tab state lives
-    /// inside `Tab`; the renderer's mouse/keyboard/wheel input is routed to
-    /// `self.tabs[self.active]`.
-    tabs: Vec<Tab>,
-    active: usize,
+    /// The window's pane tree. Every leaf is a `Pane` (a workspace with its
+    /// own tab bar). `Option` only so split / close can `take()` and rebuild
+    /// — always `Some` between operations.
+    root: Option<PaneNode>,
+    /// The focused pane; keyboard / mouse / wheel input routes to its active
+    /// tab.
+    active_pane: PaneId,
     /// Monotonic counter for new TabId allocation.
     next_tab_id: u64,
-    /// Monotonic counter for new PaneId allocation (across all tabs).
+    /// Monotonic counter for new PaneId allocation.
     next_pane_id: u64,
 
     // Shared mouse / system state. Mouse position is window-relative.
@@ -736,18 +749,21 @@ impl Renderer {
 
         let first_title = "terminite".to_string();
         let first_title_buf = make_title_buffer(&mut font_system, &first_title);
-        let first_pane_buf =
+        let first_text_buf =
             make_content_buffer(&mut font_system, cell_advance, physical_width, physical_height);
-        let first_tab = new_tab_struct(
+        let first_tab = Tab::new(
             first_tab_id,
             first_title,
             first_title_buf,
             live_term,
-            first_pane_buf,
+            first_text_buf,
             cols,
             rows,
-            PaneId(0),
         );
+        let root = PaneNode::Leaf {
+            id: PaneId(0),
+            pane: Pane::single(first_tab),
+        };
         let close_buffer = make_title_buffer(&mut font_system, "×");
 
         let mut renderer = Self {
@@ -771,8 +787,8 @@ impl Renderer {
             cell_advance,
             grid_cols: cols,
             grid_rows: rows,
-            tabs: vec![first_tab],
-            active: 0,
+            root: Some(root),
+            active_pane: PaneId(0),
             next_tab_id: 1,
             next_pane_id: 1,
             mouse_pos: (0.0, 0.0),
@@ -790,38 +806,79 @@ impl Renderer {
             proxy,
             window,
         };
-        // Size the first pane's buffer/grid to the content area below the
-        // tab bar (the constructor built it at full surface size).
+        // Size the first pane's buffers/grid to the laid-out pane rect
+        // (the constructor built them at full surface size).
         renderer.relayout();
         renderer.sync_active_grid();
         renderer
     }
 
+    // ── Pane tree accessors ───────────────────────────────────────────────
+
+    fn root_ref(&self) -> &PaneNode {
+        self.root.as_ref().expect("pane tree present")
+    }
+
+    fn root_mut(&mut self) -> &mut PaneNode {
+        self.root.as_mut().expect("pane tree present")
+    }
+
+    fn active_pane_ref(&self) -> &Pane {
+        self.root_ref()
+            .find(self.active_pane)
+            .expect("active pane present in tree")
+    }
+
+    fn active_pane_mut(&mut self) -> &mut Pane {
+        let id = self.active_pane;
+        self.root_mut()
+            .find_mut(id)
+            .expect("active pane present in tree")
+    }
+
+    fn active_tab_ref(&self) -> &Tab {
+        self.active_pane_ref().active_tab_ref()
+    }
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        self.active_pane_mut().active_tab_mut()
+    }
+
+    /// Pixel rect of every pane leaf, filling the whole window.
+    fn pane_layout(&self) -> Vec<(PaneId, PaneRect)> {
+        let mut v = Vec::new();
+        self.root_ref().layout(self.content_rect(), &mut v);
+        v
+    }
+
+    /// The pane leaf (and its rect) under a window-relative point.
+    fn pane_at(&self, x: f32, y: f32) -> Option<(PaneId, PaneRect)> {
+        self.pane_layout()
+            .into_iter()
+            .find(|(_, r)| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h)
+    }
+
     pub fn new_tab(&mut self) {
         // Inherit the active tab's shell cwd into the new shell.
-        let cwd = self
-            .tabs
-            .get(self.active)
-            .and_then(|t| t.active_pane_ref().live_term.current_dir());
+        // Inherit the active tab's shell cwd into the new shell.
+        let cwd = self.active_tab_ref().live_term.current_dir();
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
-        let pane_id = PaneId(self.next_pane_id);
-        self.next_pane_id += 1;
-        // A fresh tab is one full-content pane, regardless of how the
-        // active tab happens to be split.
-        let content = self.content_rect();
-        let (cols, rows) = pane_grid(content, self.cell_advance);
+        // The new tab joins the active pane, sized to that pane's rect.
+        let rect = self.active_pane_rect();
+        let (cols, rows) = pane_grid(rect, self.cell_advance);
         let live_term =
             LiveTerm::new(cols, rows, self.cell_advance, self.proxy.clone(), id, cwd);
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
-        let pane_buf =
-            make_content_buffer(&mut self.font_system, self.cell_advance, content.w, content.h);
-        let tab = new_tab_struct(id, title, title_buf, live_term, pane_buf, cols, rows, pane_id);
-        self.tabs.push(tab);
-        self.active = self.tabs.len() - 1;
+        let text_buf =
+            make_content_buffer(&mut self.font_system, self.cell_advance, rect.w, rect.h);
+        let tab = Tab::new(id, title, title_buf, live_term, text_buf, cols, rows);
+        let pane = self.active_pane_mut();
+        pane.tabs.push(tab);
+        pane.active_tab = pane.tabs.len() - 1;
         self.sync_active_grid();
-        self.window.set_title(&self.tabs[self.active].title);
+        self.window.set_title(&self.active_tab_ref().title);
         self.window.request_redraw();
     }
 
@@ -834,7 +891,7 @@ impl Renderer {
         if self.modal.is_some() {
             return false;
         }
-        let live = &self.tabs[self.active].active_pane_mut().live_term;
+        let live = &self.active_tab_mut().live_term;
         if live.has_active_process() {
             let proc_name = live
                 .foreground_pid()
@@ -848,20 +905,23 @@ impl Renderer {
         self.do_close_active_tab()
     }
 
-    /// Actually close the active tab. Returns true if the window should exit.
+    /// Close the active tab. If it was the pane's last tab the pane closes
+    /// too; if that was the window's last pane, returns true (window exits).
     fn do_close_active_tab(&mut self) -> bool {
-        if self.tabs.len() <= 1 {
-            return true;
+        let pane = self.active_pane_mut();
+        if pane.tabs.len() > 1 {
+            let idx = pane.active_tab;
+            pane.tabs.remove(idx);
+            if pane.active_tab >= pane.tabs.len() {
+                pane.active_tab = pane.tabs.len() - 1;
+            }
+            self.sync_active_grid();
+            self.window.set_title(&self.active_tab_ref().title);
+            self.window.request_redraw();
+            return false;
         }
-        let idx = self.active;
-        self.tabs.remove(idx);
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        }
-        self.sync_active_grid();
-        self.window.set_title(&self.tabs[self.active].title);
-        self.window.request_redraw();
-        false
+        // Last tab in this pane — close the pane itself.
+        self.close_active_pane()
     }
 
     /// True while an in-window modal is up — callers (main.rs) should route
@@ -905,9 +965,10 @@ impl Renderer {
     /// appears when the click landed on an OSC 8 hyperlink.
     fn open_context_menu(&mut self, x: f32, y: f32) {
         let (line, col) = self.pixel_to_absolute(x, y);
-        let link = self.tabs[self.active].active_pane_mut().live_term.hyperlink_at(line, col);
-        let has_selection = self.tabs[self.active]
-            .active_pane_mut().selection
+        let link = self.active_tab_mut().live_term.hyperlink_at(line, col);
+        let has_selection = self
+            .active_tab_ref()
+            .selection
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
@@ -987,8 +1048,8 @@ impl Renderer {
             MenuAction::OpenLink(uri) => open_uri(uri),
             MenuAction::SelectAll => {
                 let ((sl, sc), (el, ec)) =
-                    self.tabs[self.active].active_pane_mut().live_term.whole_buffer();
-                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
+                    self.active_tab_mut().live_term.whole_buffer();
+                self.active_tab_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
@@ -1106,7 +1167,7 @@ impl Renderer {
             Some(f) => f.query.clone(),
             None => return,
         };
-        let matches = self.tabs[self.active].active_pane_mut().live_term.search(&query);
+        let matches = self.active_tab_mut().live_term.search(&query);
         if let Some(find) = self.find.as_mut() {
             find.matches = matches;
             find.current = 0;
@@ -1139,9 +1200,10 @@ impl Renderer {
             .as_ref()
             .and_then(|f| f.matches.get(f.current).copied());
         if let Some((line, _, _)) = target {
-            self.tabs[self.active]
-                .active_pane_mut().live_term
-                .scroll_to_line(line, self.grid_rows);
+            let rows = self.grid_rows;
+            self.active_tab_mut()
+                .live_term
+                .scroll_to_line(line, rows);
         }
     }
 
@@ -1169,32 +1231,36 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Switch the active pane to one of its tabs by index.
     pub fn switch_to_tab(&mut self, idx: usize) {
-        if idx >= self.tabs.len() || idx == self.active {
+        let pane = self.active_pane_mut();
+        if idx >= pane.tabs.len() || idx == pane.active_tab {
             return;
         }
-        self.active = idx;
+        pane.active_tab = idx;
         self.sync_active_grid();
-        self.window.set_title(&self.tabs[self.active].title);
+        self.window.set_title(&self.active_tab_ref().title);
         self.window.request_redraw();
     }
 
     pub fn next_tab(&mut self) {
-        if self.tabs.len() <= 1 {
+        let pane = self.active_pane_ref();
+        if pane.tabs.len() <= 1 {
             return;
         }
-        let idx = (self.active + 1) % self.tabs.len();
+        let idx = (pane.active_tab + 1) % pane.tabs.len();
         self.switch_to_tab(idx);
     }
 
     pub fn prev_tab(&mut self) {
-        if self.tabs.len() <= 1 {
+        let pane = self.active_pane_ref();
+        if pane.tabs.len() <= 1 {
             return;
         }
-        let idx = if self.active == 0 {
-            self.tabs.len() - 1
+        let idx = if pane.active_tab == 0 {
+            pane.tabs.len() - 1
         } else {
-            self.active - 1
+            pane.active_tab - 1
         };
         self.switch_to_tab(idx);
     }
@@ -1210,77 +1276,76 @@ impl Renderer {
         self.sync_active_grid();
     }
 
-    /// The content area below the tab bar — the rect the pane tree fills.
+    /// The whole window — the rect the pane tree fills. Each pane carves its
+    /// own tab bar off the top of its slice.
     fn content_rect(&self) -> PaneRect {
         PaneRect {
             x: 0.0,
-            y: TAB_BAR_HEIGHT,
+            y: 0.0,
             w: self.surface_config.width as f32,
-            h: (self.surface_config.height as f32 - TAB_BAR_HEIGHT).max(1.0),
+            h: self.surface_config.height as f32,
         }
     }
 
-    /// Pixel rect of the active tab's active pane.
+    /// Pixel rect of the active pane.
     fn active_pane_rect(&self) -> PaneRect {
-        let content = self.content_rect();
-        let active = self.tabs[self.active].active_pane;
-        self.tabs[self.active]
-            .pane_layout(content)
+        let active = self.active_pane;
+        self.pane_layout()
             .into_iter()
             .find(|(id, _)| *id == active)
             .map(|(_, r)| r)
-            .unwrap_or(content)
+            .unwrap_or_else(|| self.content_rect())
     }
 
-    /// Recompute every pane's pixel rect and resize its PTY / buffer to fit.
-    /// Inactive tabs are kept accurate too — shells resize on the SIGWINCH
-    /// alacritty sends, so they must stay correct for when the user returns.
+    /// Recompute every pane's pixel rect and resize every tab's PTY / buffer
+    /// to fit. Background tabs are kept accurate too — shells resize on the
+    /// SIGWINCH alacritty sends, so they must stay correct for the switch.
     fn relayout(&mut self) {
-        let content = self.content_rect();
-        for ti in 0..self.tabs.len() {
-            for (pid, rect) in self.tabs[ti].pane_layout(content) {
-                let (cols, rows) = pane_grid(rect, self.cell_advance);
-                let pane = self.tabs[ti]
-                    .root_mut()
-                    .find_mut(pid)
-                    .expect("laid-out pane present");
-                pane.text_buffer.set_size(
+        for (pid, rect) in self.pane_layout() {
+            let (cols, rows) = pane_grid(rect, self.cell_advance);
+            let content_h = (rect.h - TAB_BAR_HEIGHT).max(1.0);
+            let pane = self
+                .root
+                .as_mut()
+                .expect("pane tree present")
+                .find_mut(pid)
+                .expect("laid-out pane present");
+            for tab in pane.tabs.iter_mut() {
+                tab.text_buffer.set_size(
                     &mut self.font_system,
                     Some(rect.w.max(1.0)),
-                    Some(rect.h.max(1.0)),
+                    Some(content_h),
                 );
-                if pane.cols != cols || pane.rows != rows {
-                    pane.live_term.resize(cols, rows);
-                    pane.cols = cols;
-                    pane.rows = rows;
+                if tab.cols != cols || tab.rows != rows {
+                    tab.live_term.resize(cols, rows);
+                    tab.cols = cols;
+                    tab.rows = rows;
                     // A resize invalidates the snapshot cache and selection.
-                    pane.last_text_runs.clear();
-                    pane.buffer_dirty = true;
-                    pane.selection = None;
+                    tab.last_text_runs.clear();
+                    tab.buffer_dirty = true;
+                    tab.selection = None;
                 }
             }
         }
     }
 
-    /// Mirror the active pane's grid into `grid_cols` / `grid_rows`, which the
+    /// Mirror the active tab's grid into `grid_cols` / `grid_rows`, which the
     /// mouse / autoscroll paths read.
     fn sync_active_grid(&mut self) {
-        let p = self.tabs[self.active].active_pane_ref();
-        self.grid_cols = p.cols;
-        self.grid_rows = p.rows;
+        let t = self.active_tab_ref();
+        let (cols, rows) = (t.cols, t.rows);
+        self.grid_cols = cols;
+        self.grid_rows = rows;
     }
 
-    /// Split the active pane in two; the new pane becomes active.
+    /// Split the active pane in two; the new pane (one fresh tab) is focused.
     pub fn split_active(&mut self, dir: SplitDir) {
-        let ti = self.active;
-        let target = self.tabs[ti].active_pane;
-        let cwd = self.tabs[ti]
-            .root_ref()
-            .find(target)
-            .and_then(|p| p.live_term.current_dir());
+        let target = self.active_pane;
+        let cwd = self.active_tab_ref().live_term.current_dir();
+        let tab_id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
         let new_pid = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
-        let tab_id = self.tabs[ti].id;
         // Provisional size; `relayout` immediately corrects it.
         let live = LiveTerm::new(
             self.grid_cols.max(1),
@@ -1290,49 +1355,93 @@ impl Renderer {
             tab_id,
             cwd,
         );
+        let title = "terminite".to_string();
+        let title_buf = make_title_buffer(&mut self.font_system, &title);
         let buf = make_content_buffer(&mut self.font_system, self.cell_advance, 100.0, 100.0);
-        let new_pane = Pane::new(live, buf, self.grid_cols.max(1), self.grid_rows.max(1));
-        let root = self.tabs[ti].root.take().expect("tab root present");
-        self.tabs[ti].root = Some(root.into_split(target, dir, new_pid, new_pane));
-        self.tabs[ti].active_pane = new_pid;
+        let new_tab = Tab::new(
+            tab_id,
+            title,
+            title_buf,
+            live,
+            buf,
+            self.grid_cols.max(1),
+            self.grid_rows.max(1),
+        );
+        let root = self.root.take().expect("pane tree present");
+        self.root = Some(root.into_split(target, dir, new_pid, Pane::single(new_tab)));
+        self.active_pane = new_pid;
         self.relayout();
         self.sync_active_grid();
         self.window.request_redraw();
     }
 
-    /// Close the active pane. Returns true if it was the tab's last pane —
-    /// the caller should then close the tab itself.
+    /// Close the active pane. Returns true if it was the window's last pane
+    /// (the window should then exit).
     pub fn close_active_pane(&mut self) -> bool {
-        let ti = self.active;
-        if self.tabs[ti].root_ref().leaf_count() <= 1 {
+        if self.root_ref().leaf_count() <= 1 {
             return true;
         }
-        let target = self.tabs[ti].active_pane;
-        let root = self.tabs[ti].root.take().expect("tab root present");
+        let target = self.active_pane;
+        let root = self.root.take().expect("pane tree present");
         let new_root = root.into_closed(target).expect("more than one leaf remains");
-        self.tabs[ti].active_pane = new_root.first_leaf_id();
-        self.tabs[ti].root = Some(new_root);
+        self.active_pane = new_root.first_leaf_id();
+        self.root = Some(new_root);
         self.relayout();
         self.sync_active_grid();
+        self.window.set_title(&self.active_tab_ref().title);
         self.window.request_redraw();
         false
+    }
+
+    /// Make a pane the active one.
+    fn focus_pane(&mut self, pid: PaneId) {
+        if self.active_pane != pid {
+            self.active_pane = pid;
+            self.sync_active_grid();
+            self.window.set_title(&self.active_tab_ref().title);
+            self.window.request_redraw();
+        }
     }
 
     /// Make the pane under a window-relative point the active one. Returns
     /// true if a pane was hit.
     fn focus_pane_at(&mut self, x: f32, y: f32) -> bool {
-        let content = self.content_rect();
-        for (pid, r) in self.tabs[self.active].pane_layout(content) {
-            if x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h {
-                if self.tabs[self.active].active_pane != pid {
-                    self.tabs[self.active].active_pane = pid;
-                    self.sync_active_grid();
-                    self.window.request_redraw();
-                }
-                return true;
+        if let Some((pid, _)) = self.pane_at(x, y) {
+            self.focus_pane(pid);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle a left-click inside pane `pid`'s tab-bar strip: switch to the
+    /// clicked tab, or close it if the × close-zone was hit.
+    fn tab_bar_click(&mut self, pid: PaneId, prect: PaneRect) {
+        let (n, active) = {
+            let pane = self.root_ref().find(pid).expect("pane present");
+            (pane.tabs.len(), pane.active_tab)
+        };
+        let layout = pane_tab_layout(prect, n, active);
+        let mut hit: Option<(usize, f32, f32)> = None;
+        for (i, (tx, tw, _)) in layout.iter().enumerate() {
+            if self.mouse_pos.0 >= *tx && self.mouse_pos.0 < *tx + *tw {
+                hit = Some((i, *tx, *tw));
+                break;
             }
         }
-        false
+        let Some((i, tx, tw)) = hit else { return };
+        if self.mouse_pos.0 >= tx + tw - TAB_CLOSE_WIDTH {
+            // Don't let a stray × click close the window — the very last tab
+            // of the very last pane stays put; Cmd+W is the deliberate path.
+            let last = self.root_ref().leaf_count() == 1 && n == 1;
+            if !last {
+                self.active_pane_mut().active_tab = i;
+                self.close_active_tab();
+            }
+        } else {
+            self.switch_to_tab(i);
+        }
+        self.window.request_redraw();
     }
 
     // ── Mouse / keyboard input routing ────────────────────────────────────
@@ -1342,7 +1451,7 @@ impl Renderer {
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
         let apr = self.active_pane_rect();
         let left = apr.x + PANE_PAD_X;
-        let top = apr.y + PANE_PAD_Y;
+        let top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
         let cx = (x - left).max(0.0);
         let col = ((cx / self.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
@@ -1350,10 +1459,10 @@ impl Renderer {
         // floor so a click just inside the top of viewport while the buffer
         // is shifted down resolves to row -1 (the extra row above the
         // viewport) when appropriate.
-        let cy = (y - top - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
+        let cy = (y - top - self.active_tab_ref().pixel_offset) / LINE_HEIGHT;
         let vl = cy.floor() as i32;
         let vl = vl.max(-1).min(self.grid_rows as i32 - 1);
-        let display_offset = self.tabs[self.active].active_pane_ref().live_term.offset_and_history().0 as i32;
+        let display_offset = self.active_tab_ref().live_term.offset_and_history().0 as i32;
         (vl - display_offset, col)
     }
 
@@ -1373,11 +1482,11 @@ impl Renderer {
         }
 
         // Mouse reporting takes precedence over selection / scroll.
-        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
+        let mode = self.active_tab_mut().live_term.mode_flags();
         let reporting_active = mode.mouse_drag || mode.mouse_motion;
         if reporting_active {
             // Drag (1002): only when a button is held. Motion (1003): always.
-            let button_held = self.tabs[self.active].active_pane_mut().dragging || mode.mouse_motion;
+            let button_held = self.active_tab_mut().dragging || mode.mouse_motion;
             if mode.mouse_motion || (mode.mouse_drag && button_held) {
                 if let Some((col, row)) = self.cell_at_1indexed(x, y) {
                     let bytes = encode_mouse_report(
@@ -1388,30 +1497,30 @@ impl Renderer {
                         row,
                     );
                     if let Some(b) = bytes {
-                        self.tabs[self.active].active_pane_mut().live_term.write(b);
+                        self.active_tab_mut().live_term.write(b);
                     }
                 }
             }
             return;
         }
 
-        if self.tabs[self.active].active_pane_mut().dragging {
+        if self.active_tab_mut().dragging {
             // macOS trackpad scrolling drags the cursor a hair, so we get
             // tiny mouse_moved events interleaved with wheel events. Without
             // this filter, every wheel-driven extension to the viewport
             // edge gets immediately snapped back to whatever cell the
             // cursor is currently over. Only count motion that crosses
             // half a cell from the last update.
-            let (last_x, last_y) = self.tabs[self.active].active_pane_mut().last_drag_mouse_pos;
+            let (last_x, last_y) = self.active_tab_mut().last_drag_mouse_pos;
             let dx = (x - last_x).abs();
             let dy = (y - last_y).abs();
             let big_motion = dx >= self.cell_advance * 0.5 || dy >= LINE_HEIGHT * 0.5;
             if big_motion {
                 let (line, col) = self.pixel_to_absolute(x, y);
-                if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
+                if let Some(sel) = self.active_tab_mut().selection.as_mut() {
                     sel.extend_to(line, col);
                 }
-                self.tabs[self.active].active_pane_mut().last_drag_mouse_pos = (x, y);
+                self.active_tab_mut().last_drag_mouse_pos = (x, y);
                 self.window.request_redraw();
             }
 
@@ -1419,7 +1528,7 @@ impl Renderer {
             // bottom edge: keep scrolling while the user holds the button
             // there, extending the selection as new content reveals.
             let apr = self.active_pane_rect();
-            let pane_top = apr.y + PANE_PAD_Y;
+            let pane_top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
             let pane_bottom = apr.y + apr.h;
             let new_dir = if y < pane_top + AUTOSCROLL_MARGIN_PX {
                 Some(1)
@@ -1428,8 +1537,8 @@ impl Renderer {
             } else {
                 None
             };
-            let was_off = self.tabs[self.active].active_pane_mut().autoscroll_dir.is_none();
-            self.tabs[self.active].active_pane_mut().autoscroll_dir = new_dir;
+            let was_off = self.active_tab_mut().autoscroll_dir.is_none();
+            self.active_tab_mut().autoscroll_dir = new_dir;
             match new_dir {
                 Some(_) if was_off => {
                     self.next_autoscroll_deadline =
@@ -1460,45 +1569,23 @@ impl Renderer {
             return;
         }
 
-        // Tab-bar hit test first — left-click in the bar switches tabs
-        // (or closes one when the × is hit) and never starts a selection.
-        if self.mouse_pos.1 < TAB_BAR_HEIGHT && button == MouseButton::Left {
-            if let Some(idx) = self.tab_at_x(self.mouse_pos.0) {
-                let layout = self.tab_bar_layout();
-                let (x, w, _) = layout[idx];
-                let close_zone_left = x + w - TAB_CLOSE_WIDTH;
-                if self.mouse_pos.0 >= close_zone_left {
-                    // Hit the × — close that tab. If it's the active tab
-                    // and the last one, exit (mouse_up won't fire so we
-                    // close immediately here).
-                    if self.tabs.len() <= 1 {
-                        // Closing the last tab: leave the close to Cmd+W /
-                        // window-close; a click-to-exit feels too easy to
-                        // misfire. Switch to it if it's another tab,
-                        // otherwise no-op.
-                        if idx != self.active {
-                            self.switch_to_tab(idx);
-                        }
-                    } else {
-                        // Switch to the clicked tab first so close_active
-                        // removes the right one.
-                        self.active = idx;
-                        self.close_active_tab();
-                    }
-                } else if idx != self.active {
-                    self.switch_to_tab(idx);
+        // Tab-bar hit test first — a click in a pane's own tab bar strip
+        // switches / closes that pane's tabs and never starts a selection.
+        if let Some((pid, prect)) = self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
+            if self.mouse_pos.1 < prect.y + TAB_BAR_HEIGHT {
+                self.focus_pane(pid);
+                if button == MouseButton::Left {
+                    self.tab_bar_click(pid, prect);
                 }
+                return;
             }
-            return;
         }
 
-        // Click in the content area focuses the pane under the cursor before
-        // anything else routes to "the active pane".
-        if self.mouse_pos.1 >= TAB_BAR_HEIGHT {
-            self.focus_pane_at(self.mouse_pos.0, self.mouse_pos.1);
-        }
+        // Otherwise the click lands in a pane's content — focus that pane
+        // before anything routes to "the active pane".
+        self.focus_pane_at(self.mouse_pos.0, self.mouse_pos.1);
 
-        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
+        let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 let bytes = encode_mouse_report(
@@ -1509,7 +1596,7 @@ impl Renderer {
                     row,
                 );
                 if let Some(b) = bytes {
-                    self.tabs[self.active].active_pane_mut().live_term.write(b);
+                    self.active_tab_mut().live_term.write(b);
                 }
             }
             return;
@@ -1530,46 +1617,46 @@ impl Renderer {
 
         // Cmd-click an OSC 8 hyperlink → open it; don't start a selection.
         if modifiers.super_key() {
-            if let Some(uri) = self.tabs[self.active].active_pane_mut().live_term.hyperlink_at(line, col) {
+            if let Some(uri) = self.active_tab_mut().live_term.hyperlink_at(line, col) {
                 open_uri(&uri);
                 return;
             }
         }
         let now = Instant::now();
-        let click_count = match self.tabs[self.active].active_pane_mut().last_click {
+        let click_count = match self.active_tab_mut().last_click {
             Some((t, cell, c)) if now.duration_since(t) < MULTI_CLICK_WINDOW && cell == (line, col) => {
                 (c + 1).min(3)
             }
             _ => 1,
         };
-        self.tabs[self.active].active_pane_mut().last_click = Some((now, (line, col), click_count));
+        self.active_tab_mut().last_click = Some((now, (line, col), click_count));
 
         match click_count {
             1 => {
-                self.tabs[self.active].active_pane_mut().selection = Some(Selection::from_anchor(line, col));
-                self.tabs[self.active].active_pane_mut().dragging = true;
-                self.tabs[self.active].active_pane_mut().last_drag_mouse_pos = self.mouse_pos;
+                self.active_tab_mut().selection = Some(Selection::from_anchor(line, col));
+                self.active_tab_mut().dragging = true;
+                self.active_tab_mut().last_drag_mouse_pos = self.mouse_pos;
             }
             2 => {
-                let ((sl, sc), (el, ec)) = self.tabs[self.active].active_pane_mut().live_term.word_at(line, col);
-                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
+                let ((sl, sc), (el, ec)) = self.active_tab_mut().live_term.word_at(line, col);
+                self.active_tab_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
                     head_col: ec,
                 });
-                self.tabs[self.active].active_pane_mut().dragging = false;
+                self.active_tab_mut().dragging = false;
                 self.copy_selection();
             }
             _ => {
-                let ((sl, sc), (el, ec)) = self.tabs[self.active].active_pane_mut().live_term.line_at(line);
-                self.tabs[self.active].active_pane_mut().selection = Some(Selection {
+                let ((sl, sc), (el, ec)) = self.active_tab_mut().live_term.line_at(line);
+                self.active_tab_mut().selection = Some(Selection {
                     anchor_line: sl,
                     anchor_col: sc,
                     head_line: el,
                     head_col: ec,
                 });
-                self.tabs[self.active].active_pane_mut().dragging = false;
+                self.active_tab_mut().dragging = false;
                 self.copy_selection();
             }
         }
@@ -1577,7 +1664,7 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
-        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
+        let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 let bytes = encode_mouse_report(
@@ -1588,7 +1675,7 @@ impl Renderer {
                     row,
                 );
                 if let Some(b) = bytes {
-                    self.tabs[self.active].active_pane_mut().live_term.write(b);
+                    self.active_tab_mut().live_term.write(b);
                 }
             }
             return;
@@ -1598,12 +1685,12 @@ impl Renderer {
             return;
         }
 
-        self.tabs[self.active].active_pane_mut().dragging = false;
-        self.tabs[self.active].active_pane_mut().autoscroll_dir = None;
+        self.active_tab_mut().dragging = false;
+        self.active_tab_mut().autoscroll_dir = None;
         self.next_autoscroll_deadline = None;
-        if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() {
+        if let Some(sel) = self.active_tab_mut().selection.as_ref() {
             if sel.is_empty() {
-                self.tabs[self.active].active_pane_mut().selection = None;
+                self.active_tab_mut().selection = None;
             } else {
                 self.copy_selection();
             }
@@ -1614,7 +1701,7 @@ impl Renderer {
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
         // If the foreground app wants scroll reports (vim, less, htop in
         // mouse mode), forward instead of scrolling the viewport.
-        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
+        let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y,
@@ -1629,7 +1716,7 @@ impl Renderer {
             };
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 if let Some(b) = encode_mouse_report(&mode, direction, modifiers, col, row) {
-                    self.tabs[self.active].active_pane_mut().live_term.write(b);
+                    self.active_tab_mut().live_term.write(b);
                 }
             }
             return;
@@ -1642,7 +1729,7 @@ impl Renderer {
             MouseScrollDelta::LineDelta(_, y) => y * 3.0 * LINE_HEIGHT,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
-        self.tabs[self.active].active_pane_mut().pixel_offset += pixels;
+        self.active_tab_mut().pixel_offset += pixels;
 
         // Pop whole lines into the term; the remainder stays as a sub-line
         // pixel shift used at render time. `floor` keeps the remainder in
@@ -1653,36 +1740,18 @@ impl Renderer {
         // and floor's over-pop re-establishes the residual on every event
         // — so the bottom (offset=0) is never reached cleanly. Subtract by
         // the *actual* offset delta instead.
-        let whole = (self.tabs[self.active].active_pane_mut().pixel_offset / LINE_HEIGHT).floor() as i32;
+        let whole = (self.active_tab_mut().pixel_offset / LINE_HEIGHT).floor() as i32;
         if whole != 0 {
-            let (before, _) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
-            self.tabs[self.active].active_pane_mut().live_term.scroll(TermScroll::Delta(whole));
-            let (after, history) = self.tabs[self.active].active_pane_mut().live_term.offset_and_history();
+            let (before, _) = self.active_tab_mut().live_term.offset_and_history();
+            self.active_tab_mut().live_term.scroll(TermScroll::Delta(whole));
+            let (after, history) = self.active_tab_mut().live_term.offset_and_history();
             let actual = after as i32 - before as i32;
-            self.tabs[self.active].active_pane_mut().pixel_offset -= actual as f32 * LINE_HEIGHT;
+            self.active_tab_mut().pixel_offset -= actual as f32 * LINE_HEIGHT;
             if actual != whole {
-                // Clamped at a boundary; drop the residual.
-                self.tabs[self.active].active_pane_mut().pixel_offset = 0.0;
-                let at_top = whole > 0 && after >= history;
-                let at_live = whole < 0 && after == 0;
-                if at_top {
-                    eprintln!(
-                        "[scroll] hit top boundary: offset={} history={} (rows={}) topRow='{}'",
-                        after,
-                        history,
-                        self.grid_rows,
-                        self.tabs[self.active].active_pane_mut().live_term.debug_top_row()
-                    );
-                } else if at_live {
-                    eprintln!(
-                        "[scroll] hit live boundary: offset={} history={} (rows={}) {}",
-                        after,
-                        history,
-                        self.grid_rows,
-                        self.tabs[self.active].active_pane_mut().live_term.debug_bottom_strip(self.grid_rows)
-                    );
-                }
+                // Clamped at a scrollback boundary; drop the residual.
+                self.active_tab_mut().pixel_offset = 0.0;
             }
+            let _ = history;
 
             // While dragging, extending the head to wherever the mouse pixel
             // sits would actually *shrink* the selection as scroll reveals
@@ -1692,7 +1761,7 @@ impl Renderer {
             // the freshly-revealed lines. Pick whichever extends *further*
             // from the anchor — mouse position still wins when it's already
             // farther.
-            if actual != 0 && self.tabs[self.active].active_pane_mut().dragging {
+            if actual != 0 && self.active_tab_mut().dragging {
                 let (mouse_line, mouse_col) =
                     self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
                 let edge = if actual > 0 {
@@ -1705,7 +1774,7 @@ impl Renderer {
                         self.grid_cols.saturating_sub(1),
                     )
                 };
-                if let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_mut() {
+                if let Some(sel) = self.active_tab_mut().selection.as_mut() {
                     let edge_d = (edge.0 - sel.anchor_line).abs();
                     let mouse_d = (mouse_line - sel.anchor_line).abs();
                     let (head_line, head_col) = if edge_d > mouse_d {
@@ -1723,17 +1792,17 @@ impl Renderer {
 
     pub fn scroll_page(&self, up: bool) {
         let s = if up { TermScroll::PageUp } else { TermScroll::PageDown };
-        self.tabs[self.active].active_pane_ref().live_term.scroll(s);
+        self.active_tab_ref().live_term.scroll(s);
         self.window.request_redraw();
     }
 
     pub fn copy_selection(&mut self) {
-        let Some(sel) = self.tabs[self.active].active_pane_mut().selection.as_ref() else { return };
+        let Some(sel) = self.active_tab_mut().selection.as_ref() else { return };
         if sel.is_empty() {
             return;
         }
         let (start, end) = sel.normalized();
-        let text = self.tabs[self.active].active_pane_mut().live_term.extract_text(start, end);
+        let text = self.active_tab_mut().live_term.extract_text(start, end);
         if text.is_empty() {
             return;
         }
@@ -1750,7 +1819,7 @@ impl Renderer {
         if text.is_empty() {
             return;
         }
-        if self.tabs[self.active].active_pane_mut().live_term.mode_flags().bracketed_paste {
+        if self.active_tab_mut().live_term.mode_flags().bracketed_paste {
             // Wrap so the shell treats the whole paste as one input, not as
             // typed-and-pressed-enter for each newline. Strips any embedded
             // \e[201~ to keep the framing safe.
@@ -1759,9 +1828,9 @@ impl Renderer {
             bytes.extend_from_slice(b"\x1b[200~");
             bytes.extend_from_slice(safe.as_bytes());
             bytes.extend_from_slice(b"\x1b[201~");
-            self.tabs[self.active].active_pane_mut().live_term.write(bytes);
+            self.active_tab_mut().live_term.write(bytes);
         } else {
-            self.tabs[self.active].active_pane_mut().live_term.write(text.into_bytes());
+            self.active_tab_mut().live_term.write(text.into_bytes());
         }
     }
 
@@ -1787,7 +1856,9 @@ impl Renderer {
     /// title or a ResetTitle escape on exit (claude, vim, ssh) expect.
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
         if title.trim().is_empty() {
-            if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            let mut tabs: Vec<&mut Tab> = Vec::new();
+            self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+            if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
                 tab.shell_title = None;
                 // Force refresh_auto_titles to rebuild on the next render.
                 tab.last_auto_title.clear();
@@ -1796,40 +1867,51 @@ impl Renderer {
             return;
         }
         let new_buf = make_title_buffer(&mut self.font_system, &title);
-        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.shell_title = Some(title.clone());
-            tab.title = title;
-            tab.title_buffer = new_buf;
+        let active_id = self.active_tab_ref().id;
+        {
+            let mut tabs: Vec<&mut Tab> = Vec::new();
+            self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+            if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
+                tab.shell_title = Some(title.clone());
+                tab.title = title;
+                tab.title_buffer = new_buf;
+            }
         }
-        if let Some(active) = self.tabs.get(self.active) {
-            self.window.set_title(&active.title);
+        if tab_id == active_id {
+            self.window.set_title(&self.active_tab_ref().title);
         }
     }
 
-    /// Refresh each tab's auto-title from the OS each frame. Cheap (a few
+    /// Refresh every tab's auto-title from the OS each frame. Cheap (a few
     /// syscalls) and only rebuilds the label buffer when the title actually
     /// changes. Tabs that received an OSC title from their shell keep that.
     fn refresh_auto_titles(&mut self) {
-        for i in 0..self.tabs.len() {
-            if self.tabs[i].shell_title.is_some() {
+        let active_id = self.active_tab_ref().id;
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        let mut new_window_title: Option<String> = None;
+        for tab in tabs {
+            if tab.shell_title.is_some() {
                 continue;
             }
-            let new_auto = self.tabs[i].active_pane_mut().live_term.compute_auto_title();
-            if new_auto != self.tabs[i].last_auto_title {
-                let new_buf = make_title_buffer(&mut self.font_system, &new_auto);
-                self.tabs[i].last_auto_title = new_auto.clone();
-                self.tabs[i].title = new_auto;
-                self.tabs[i].title_buffer = new_buf;
-                if i == self.active {
-                    self.window.set_title(&self.tabs[i].title);
+            let new_auto = tab.live_term.compute_auto_title();
+            if new_auto != tab.last_auto_title {
+                tab.title_buffer = make_title_buffer(&mut self.font_system, &new_auto);
+                tab.last_auto_title = new_auto.clone();
+                tab.title = new_auto;
+                if tab.id == active_id {
+                    new_window_title = Some(tab.title.clone());
                 }
             }
+        }
+        if let Some(t) = new_window_title {
+            self.window.set_title(&t);
         }
     }
 
     /// Write bytes to the active tab's PTY (keyboard input path).
     pub fn write_active(&self, bytes: Vec<u8>) {
-        self.tabs[self.active].active_pane_ref().live_term.write(bytes);
+        self.active_tab_ref().live_term.write(bytes);
     }
 
     /// Compute the modal's card + button rectangles for the current surface
@@ -1885,79 +1967,78 @@ impl Renderer {
         ]
     }
 
-    /// Return the tab index under a given x coordinate, or None if x falls
-    /// past the rightmost tab.
-    fn tab_at_x(&self, x: f32) -> Option<usize> {
-        for (i, (start, width, _)) in self.tab_bar_layout().into_iter().enumerate() {
-            if x >= start && x < start + width {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Geometry of each tab in the tab bar: `(x_start, width, is_active)`.
-    /// Widths shrink uniformly between TAB_MIN_WIDTH and TAB_MAX_WIDTH as
-    /// tabs are added.
-    fn tab_bar_layout(&self) -> Vec<(f32, f32, bool)> {
-        let n = self.tabs.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        let surface_w = self.surface_config.width as f32;
-        let per = (surface_w / n as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
-        (0..n)
-            .map(|i| (i as f32 * per, per, i == self.active))
-            .collect()
-    }
-
-    /// Build the rect instances that make up the tab bar. Drawn after the
-    /// text-area pass with the scissor widened so the bar appears above the
-    /// content scissor zone.
-    fn build_tab_bar_rects(&self) -> Vec<RectInstance> {
-        let layout = self.tab_bar_layout();
-        let mut rects = Vec::with_capacity(layout.len() * 3 + 1);
-
-        // Full-width bar background (matches inactive tabs so the gaps look
-        // intentional when tabs don't span the whole bar).
-        rects.push(RectInstance {
-            rect: [0.0, 0.0, self.surface_config.width as f32, TAB_BAR_HEIGHT],
+    /// Emit one pane's tab-bar rects into `out`, and return a label slot per
+    /// tab for the text pass. `rect` is the pane's full rect; the bar fills
+    /// its top `TAB_BAR_HEIGHT`. `is_active_pane` gates the gold underline so
+    /// exactly one tab bar in the window marks where keystrokes go.
+    fn build_pane_tab_bar(
+        &self,
+        pid: PaneId,
+        rect: PaneRect,
+        is_active_pane: bool,
+        out: &mut Vec<RectInstance>,
+    ) -> Vec<TabLabelSlot> {
+        let pane = self.root_ref().find(pid).expect("pane present");
+        let layout = pane_tab_layout(rect, pane.tabs.len(), pane.active_tab);
+        let bar_top = rect.y;
+        // Bar background across the pane's width.
+        out.push(RectInstance {
+            rect: [rect.x, bar_top, rect.w, TAB_BAR_HEIGHT],
             color: TAB_INACTIVE_BG,
         });
-
-        for (x, w, is_active) in &layout {
-            let color = if *is_active { TAB_ACTIVE_BG } else { TAB_INACTIVE_BG };
-            rects.push(RectInstance {
-                rect: [*x, 0.0, *w, TAB_BAR_HEIGHT],
-                color,
+        let text_top = bar_top + (TAB_BAR_HEIGHT - TAB_LINE_HEIGHT) / 2.0;
+        let mut slots = Vec::with_capacity(layout.len());
+        for (i, (x, w, is_active)) in layout.iter().enumerate() {
+            let (x, w, is_active) = (*x, *w, *is_active);
+            out.push(RectInstance {
+                rect: [x, bar_top, w, TAB_BAR_HEIGHT],
+                color: if is_active { TAB_ACTIVE_BG } else { TAB_INACTIVE_BG },
             });
-            // Thin separator on the right edge of each non-last tab.
-            rects.push(RectInstance {
-                rect: [*x + *w - 1.0, 6.0, 1.0, TAB_BAR_HEIGHT - 12.0],
+            out.push(RectInstance {
+                rect: [x + w - 1.0, bar_top + 6.0, 1.0, TAB_BAR_HEIGHT - 12.0],
                 color: TAB_SEPARATOR,
             });
-            if *is_active {
-                // Underline for the active tab.
-                rects.push(RectInstance {
-                    rect: [*x + 6.0, TAB_BAR_HEIGHT - 3.0, *w - 12.0, 3.0],
-                    color: TAB_ACTIVE_UNDERLINE,
+            if is_active {
+                // Gold underline only in the focused pane; a dim seam marks
+                // the active tab of an unfocused pane.
+                out.push(RectInstance {
+                    rect: [x + 6.0, bar_top + TAB_BAR_HEIGHT - 3.0, w - 12.0, 3.0],
+                    color: if is_active_pane {
+                        TAB_ACTIVE_UNDERLINE
+                    } else {
+                        TAB_SEPARATOR
+                    },
                 });
             }
+            let label_left = x + TAB_LABEL_INSET;
+            let label_right = (x + w - TAB_CLOSE_WIDTH).max(label_left);
+            let close_left = x + w - TAB_CLOSE_WIDTH + 8.0;
+            slots.push(TabLabelSlot {
+                index: i,
+                is_active,
+                label_left,
+                label_bounds: TextBounds {
+                    left: label_left as i32,
+                    top: bar_top as i32,
+                    right: label_right as i32,
+                    bottom: (bar_top + TAB_BAR_HEIGHT) as i32,
+                },
+                close_left,
+                close_bounds: TextBounds {
+                    left: close_left as i32,
+                    top: bar_top as i32,
+                    right: (x + w) as i32,
+                    bottom: (bar_top + TAB_BAR_HEIGHT) as i32,
+                },
+                text_top,
+            });
         }
-
-        // Bottom border line of the bar — clean break between bar and text
-        // area, even when the inner padding gap is the same color.
-        rects.push(RectInstance {
-            rect: [
-                0.0,
-                TAB_BAR_HEIGHT,
-                self.surface_config.width as f32,
-                1.0,
-            ],
+        // Bottom border between the bar and the content.
+        out.push(RectInstance {
+            rect: [rect.x, bar_top + TAB_BAR_HEIGHT, rect.w, 1.0],
             color: TAB_SEPARATOR,
         });
-
-        rects
+        slots
     }
 
     /// Earliest pending deadline the main loop should wake on
@@ -1976,10 +2057,10 @@ impl Renderer {
     pub fn focus_changed(&mut self, focused: bool) {
         self.focused = focused;
         // Optionally emit DEC focus reporting when an app asked for it.
-        let mode = self.tabs[self.active].active_pane_mut().live_term.mode_flags();
+        let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.focus_in_out {
             let seq: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-            self.tabs[self.active].active_pane_mut().live_term.write(seq.to_vec());
+            self.active_tab_mut().live_term.write(seq.to_vec());
         }
         self.window.request_redraw();
     }
@@ -1992,7 +2073,7 @@ impl Renderer {
     pub fn ime_commit(&mut self, text: String) {
         self.preedit.clear();
         if !text.is_empty() {
-            self.tabs[self.active].active_pane_mut().live_term.write(text.into_bytes());
+            self.active_tab_mut().live_term.write(text.into_bytes());
         }
         self.window.request_redraw();
     }
@@ -2002,13 +2083,13 @@ impl Renderer {
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
         let apr = self.active_pane_rect();
         let left = apr.x + PANE_PAD_X;
-        let top = apr.y + PANE_PAD_Y;
+        let top = apr.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
         if x < left {
             return None;
         }
         // pixel_offset correction so the reported cell is the one the user
         // visually clicked on, not the natural-grid cell.
-        let row_f = (y - top - self.tabs[self.active].active_pane_ref().pixel_offset) / LINE_HEIGHT;
+        let row_f = (y - top - self.active_tab_ref().pixel_offset) / LINE_HEIGHT;
         if row_f < 0.0 {
             return None;
         }
@@ -2057,12 +2138,12 @@ impl Renderer {
         // render_pane re-arms this if a pane is autoscrolling.
         self.next_autoscroll_deadline = None;
 
-        // Lay out every pane of the active tab, then render each into its rect.
-        let content = self.content_rect();
-        let layout = self.tabs[self.active].pane_layout(content);
-        let active_pane = self.tabs[self.active].active_pane;
+        // Lay out the window's pane tree, then render each pane into its rect.
+        let layout = self.pane_layout();
+        let active_pane = self.active_pane;
         let mut below: Vec<RectInstance> = Vec::new();
         let mut above: Vec<RectInstance> = Vec::new();
+        let mut tab_bar: Vec<RectInstance> = Vec::new();
         let mut draws: Vec<PaneDraw> = Vec::with_capacity(layout.len());
         for (pid, rect) in &layout {
             let d = self.render_pane(
@@ -2072,18 +2153,20 @@ impl Renderer {
                 blink_on,
                 &mut below,
                 &mut above,
+                &mut tab_bar,
             );
             draws.push(d);
         }
 
         // Split divider seams drawn on top of pane content.
-        collect_dividers(self.tabs[self.active].root_ref(), content, &mut above);
+        collect_dividers(self.root_ref(), self.content_rect(), &mut above);
 
-        // Find bar background — a floating box at the top-right of the
-        // content area. The query text is drawn by the tab text renderer.
+        // Find bar background — a floating box at the active pane's
+        // top-right. The query text is drawn by the tab text renderer.
         let find_bar_origin = if self.find.is_some() {
-            let bx = self.surface_config.width as f32 - FIND_BAR_W - FIND_BAR_MARGIN;
-            let by = TEXT_TOP + FIND_BAR_MARGIN;
+            let apr = self.active_pane_rect();
+            let bx = apr.x + apr.w - FIND_BAR_W - FIND_BAR_MARGIN;
+            let by = apr.y + TAB_BAR_HEIGHT + FIND_BAR_MARGIN;
             above.push(RectInstance {
                 rect: [bx - 1.0, by - 1.0, FIND_BAR_W + 2.0, FIND_BAR_H + 2.0],
                 color: FIND_BAR_BORDER,
@@ -2119,7 +2202,6 @@ impl Renderer {
             self.surface_config.width as f32,
             self.surface_config.height as f32,
         ];
-        let tab_bar_rects = self.build_tab_bar_rects();
         // The modal and the context menu share the rects_modal /
         // modal_text_renderer pipelines — they're mutually exclusive in
         // practice and the modal wins if both are somehow set.
@@ -2131,7 +2213,7 @@ impl Renderer {
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
         self.rects_tab_bar
-            .prepare(&self.queue, &tab_bar_rects, resolution);
+            .prepare(&self.queue, &tab_bar, resolution);
         self.rects_modal
             .prepare(&self.queue, &overlay_rects, resolution);
 
@@ -2260,22 +2342,68 @@ impl Renderer {
                 .expect("terminite: menu text prepare failed");
         }
 
-        // Content text — one TextArea per pane. Each `PaneDraw` carries the
-        // pane's text origin (already y-shifted, accounting for the extra
-        // row) and a TextBounds clipped to the pane's rect so neighbouring
-        // panes don't bleed into one another.
+        // Content text + per-pane tab-bar labels. Phase 2: every pane's
+        // buffers are already refreshed, so we can take the immutable
+        // borrows the TextAreas need. Content goes through `text_renderer`,
+        // tab labels + find bar through `tab_text_renderer`.
         {
-            let tab = &self.tabs[self.active];
+            let root = self.root.as_ref().expect("pane tree present");
+            let active_color = Color::rgb(230, 230, 240);
+            let inactive_color = Color::rgb(140, 140, 160);
+            let close_color = Color::rgb(160, 160, 170);
             let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
+            let mut tab_areas: Vec<TextArea> = Vec::new();
             for d in &draws {
-                let pane = tab.root_ref().find(d.pid).expect("drawn pane present");
+                let pane = root.find(d.pid).expect("drawn pane present");
                 content_areas.push(TextArea {
-                    buffer: &pane.text_buffer,
+                    buffer: &pane.active_tab_ref().text_buffer,
                     left: d.text_left,
                     top: d.text_top,
                     scale: 1.0,
                     bounds: d.bounds,
                     default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+                    custom_glyphs: &[],
+                });
+                for slot in &d.tabs {
+                    let tab = &pane.tabs[slot.index];
+                    tab_areas.push(TextArea {
+                        buffer: &tab.title_buffer,
+                        left: slot.label_left,
+                        top: slot.text_top,
+                        scale: 1.0,
+                        bounds: slot.label_bounds,
+                        default_color: if slot.is_active {
+                            active_color
+                        } else {
+                            inactive_color
+                        },
+                        custom_glyphs: &[],
+                    });
+                    tab_areas.push(TextArea {
+                        buffer: &self.close_buffer,
+                        left: slot.close_left,
+                        top: slot.text_top,
+                        scale: 1.0,
+                        bounds: slot.close_bounds,
+                        default_color: close_color,
+                        custom_glyphs: &[],
+                    });
+                }
+            }
+            // The find bar's text rides in the tab text renderer.
+            if let (Some(find), Some((bx, by))) = (self.find.as_ref(), find_bar_origin) {
+                tab_areas.push(TextArea {
+                    buffer: &find.bar_buf,
+                    left: bx + 16.0,
+                    top: by + (FIND_BAR_H - MODAL_LINE_HEIGHT) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: bx as i32,
+                        top: by as i32,
+                        right: (bx + FIND_BAR_W) as i32,
+                        bottom: (by + FIND_BAR_H) as i32,
+                    },
+                    default_color: Color::rgb(225, 225, 235),
                     custom_glyphs: &[],
                 });
             }
@@ -2290,84 +2418,18 @@ impl Renderer {
                     &mut self.swash_cache,
                 )
                 .expect("terminite: text prepare failed");
+            self.tab_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    tab_areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: tab bar text prepare failed");
         }
-
-        // Prepare tab bar labels in a second TextRenderer so it can draw
-        // under a wider scissor in the pass below.
-        let tab_layout = self.tab_bar_layout();
-        let tab_text_top = (TAB_BAR_HEIGHT - TAB_LINE_HEIGHT) / 2.0;
-        let surface_w = self.surface_config.width as i32;
-        let active_color = Color::rgb(230, 230, 240);
-        let inactive_color = Color::rgb(140, 140, 160);
-        let close_color = Color::rgb(160, 160, 170);
-        let mut tab_text_areas: Vec<TextArea> = Vec::with_capacity(tab_layout.len() * 2);
-        for (i, (x, w, is_active)) in tab_layout.iter().enumerate() {
-            let label_right = (*x + *w - TAB_CLOSE_WIDTH) as i32;
-            // Title text — clipped left of the close-zone so long titles
-            // don't run into the ×.
-            tab_text_areas.push(TextArea {
-                buffer: &self.tabs[i].title_buffer,
-                left: *x + TAB_LABEL_INSET,
-                top: tab_text_top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: (*x + TAB_LABEL_INSET) as i32,
-                    top: 0,
-                    right: label_right.max(0),
-                    bottom: TAB_BAR_HEIGHT as i32,
-                },
-                default_color: if *is_active { active_color } else { inactive_color },
-                custom_glyphs: &[],
-            });
-            // × close glyph at the right edge of every tab.
-            let close_left = *x + *w - TAB_CLOSE_WIDTH + 8.0;
-            tab_text_areas.push(TextArea {
-                buffer: &self.close_buffer,
-                left: close_left,
-                top: tab_text_top,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: close_left as i32,
-                    top: 0,
-                    right: (*x + *w) as i32,
-                    bottom: TAB_BAR_HEIGHT as i32,
-                },
-                default_color: close_color,
-                custom_glyphs: &[],
-            });
-        }
-        let _ = surface_w; // reserved for future overflow indicator
-
-        // The find bar's text rides in the same renderer as the tab labels
-        // (both want the full-surface scissor in the pass below).
-        if let (Some(find), Some((bx, by))) = (self.find.as_ref(), find_bar_origin) {
-            tab_text_areas.push(TextArea {
-                buffer: &find.bar_buf,
-                left: bx + 16.0,
-                top: by + (FIND_BAR_H - MODAL_LINE_HEIGHT) * 0.5,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: bx as i32,
-                    top: by as i32,
-                    right: (bx + FIND_BAR_W) as i32,
-                    bottom: (by + FIND_BAR_H) as i32,
-                },
-                default_color: Color::rgb(225, 225, 235),
-                custom_glyphs: &[],
-            });
-        }
-
-        self.tab_text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                tab_text_areas,
-                &mut self.swash_cache,
-            )
-            .expect("terminite: tab bar text prepare failed");
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -2422,15 +2484,15 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // Scissor the content pipelines to the area below the tab bar.
-            // Per-pane bleed is already prevented: render_pane clips every
-            // rect to its pane box and each pane's text has a TextBounds.
-            let scissor_y = TAB_BAR_HEIGHT as u32;
-            let scissor_h = self
-                .surface_config
-                .height
-                .saturating_sub(scissor_y);
-            pass.set_scissor_rect(0, scissor_y, self.surface_config.width, scissor_h);
+            // One full-window scissor — the panes tile the whole surface and
+            // every rect / TextArea is already clipped to its own pane box,
+            // so no per-pane scissor switching is needed.
+            pass.set_scissor_rect(
+                0,
+                0,
+                self.surface_config.width,
+                self.surface_config.height,
+            );
 
             self.rects_below.render(&mut pass);
             self.text_renderer
@@ -2438,14 +2500,7 @@ impl Renderer {
                 .expect("terminite: text render failed");
             self.rects_above.render(&mut pass);
 
-            // Tab bar lives above the text area's scissor zone; widen the
-            // scissor to the full surface so the bar isn't clipped out.
-            pass.set_scissor_rect(
-                0,
-                0,
-                self.surface_config.width,
-                self.surface_config.height,
-            );
+            // Per-pane tab bars drawn on top of the content.
             self.rects_tab_bar.render(&mut pass);
             self.tab_text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
@@ -2466,10 +2521,10 @@ impl Renderer {
         self.atlas.trim();
     }
 
-    /// Render one pane into its pixel rect: tick its autoscroll, snapshot it,
-    /// refresh its text buffer, and emit clipped background / selection /
-    /// cursor / decoration rects into the shared `below` / `above` layers.
-    /// Returns where (and how) to place the pane's text in `text_renderer`.
+    /// Render one pane into its rect: draw its own tab bar, then tick
+    /// autoscroll, snapshot the active tab, refresh its text buffer, and emit
+    /// clipped background / selection / cursor / decoration rects. Returns
+    /// where to place the content + tab-label text (phase 2 in `render`).
     #[allow(clippy::too_many_arguments)]
     fn render_pane(
         &mut self,
@@ -2479,13 +2534,15 @@ impl Renderer {
         blink_on: bool,
         below: &mut Vec<RectInstance>,
         above: &mut Vec<RectInstance>,
+        tab_bar: &mut Vec<RectInstance>,
     ) -> PaneDraw {
-        let ti = self.active;
         let cell_advance = self.cell_advance;
-        // Pane content origin and clip box. Padding is top-left only, so a
-        // single (unsplit) pane lands exactly where the pre-splits code did.
+        // This pane's own tab bar fills the top strip of its rect.
+        let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
+
+        // Content origin and clip box — below this pane's tab bar.
         let px = rect.x + PANE_PAD_X;
-        let py = rect.y + PANE_PAD_Y;
+        let py = rect.y + TAB_BAR_HEIGHT + PANE_PAD_Y;
         let box_l = px;
         let box_t = py;
         let box_r = rect.x + rect.w;
@@ -2505,20 +2562,28 @@ impl Renderer {
             }
         };
 
-        // ── Autoscroll tick (only the drag-selecting pane has a direction) ──
+        // ── Autoscroll tick (only a drag-selecting tab has a direction) ──
         let autoscroll_dir = self
-            .tabs[ti]
-            .root_mut()
+            .root
+            .as_mut()
+            .expect("pane tree present")
             .find_mut(pid)
-            .expect("laid-out pane present")
+            .expect("pane present")
+            .active_tab_ref()
             .autoscroll_dir;
         if let Some(dir) = autoscroll_dir {
             {
-                let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
-                pane.live_term.scroll(TermScroll::Delta(dir));
-                let (after, _history) = pane.live_term.offset_and_history();
-                let (c, r) = (pane.cols, pane.rows);
-                if let Some(sel) = pane.selection.as_mut() {
+                let tab = self
+                    .root
+                    .as_mut()
+                    .expect("pane tree present")
+                    .find_mut(pid)
+                    .expect("pane present")
+                    .active_tab_mut();
+                tab.live_term.scroll(TermScroll::Delta(dir));
+                let (after, _history) = tab.live_term.offset_and_history();
+                let (c, r) = (tab.cols, tab.rows);
+                if let Some(sel) = tab.selection.as_mut() {
                     let edge = if dir > 0 {
                         (-(after as i32), 0)
                     } else {
@@ -2531,7 +2596,7 @@ impl Renderer {
                 Some(Instant::now() + Duration::from_millis(AUTOSCROLL_TICK_MS));
         }
 
-        // ── Snapshot ──
+        // ── Snapshot the pane's active tab ──
         let Snapshot {
             text_runs,
             bg_runs,
@@ -2543,21 +2608,29 @@ impl Renderer {
             cursor_blinking,
             has_extra_row,
         } = self
-            .tabs[ti]
-            .root_mut()
+            .root
+            .as_mut()
+            .expect("pane tree present")
             .find_mut(pid)
-            .expect("pane")
+            .expect("pane present")
+            .active_tab_mut()
             .live_term
             .snapshot();
         let _ = cursor_blinking;
 
-        // ── Refresh this pane's text buffer if its content changed ──
+        // ── Refresh the active tab's text buffer if its content changed ──
         {
-            let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
-            let stale = pane.buffer_dirty || text_runs != pane.last_text_runs;
+            let tab = self
+                .root
+                .as_mut()
+                .expect("pane tree present")
+                .find_mut(pid)
+                .expect("pane present")
+                .active_tab_mut();
+            let stale = tab.buffer_dirty || text_runs != tab.last_text_runs;
             if stale {
                 let default_attrs = Attrs::new().family(Family::Monospace);
-                pane.text_buffer.set_rich_text(
+                tab.text_buffer.set_rich_text(
                     &mut self.font_system,
                     text_runs.iter().map(|(text, style)| {
                         let mut attrs = default_attrs.clone().color(style.color);
@@ -2573,22 +2646,28 @@ impl Renderer {
                     Shaping::Advanced,
                     None,
                 );
-                pane.text_buffer
+                tab.text_buffer
                     .shape_until_scroll(&mut self.font_system, false);
-                pane.last_text_runs = text_runs;
-                pane.buffer_dirty = false;
+                tab.last_text_runs = text_runs;
+                tab.buffer_dirty = false;
             }
         }
 
-        // ── Per-pane geometry reads ──
+        // ── Active tab geometry reads ──
         let (y_shift, selection, display_offset, cols, rows) = {
-            let pane = self.tabs[ti].root_mut().find_mut(pid).expect("pane");
+            let tab = self
+                .root
+                .as_mut()
+                .expect("pane tree present")
+                .find_mut(pid)
+                .expect("pane present")
+                .active_tab_mut();
             (
-                pane.pixel_offset,
-                pane.selection,
-                pane.live_term.offset_and_history().0 as i32,
-                pane.cols,
-                pane.rows,
+                tab.pixel_offset,
+                tab.selection,
+                tab.live_term.offset_and_history().0 as i32,
+                tab.cols,
+                tab.rows,
             )
         };
 
@@ -2760,6 +2839,7 @@ impl Renderer {
                 right: box_r as i32,
                 bottom: box_b as i32,
             },
+            tabs: tab_slots,
         }
     }
 }

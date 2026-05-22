@@ -329,11 +329,12 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 }
                                 return;
                             }
-                            // Cmd+W: close the active pane; if it was the
-                            // tab's last pane, close the tab.
+                            // Cmd+W: close the active tab. Cascades to
+                            // closing the pane (its last tab) and then the
+                            // window (its last pane).
                             Some('w') => {
                                 if let Some(r) = self.renderer.as_mut() {
-                                    if r.close_active_pane() && r.close_active_tab() {
+                                    if r.close_active_tab() {
                                         event_loop.exit();
                                     }
                                 }
