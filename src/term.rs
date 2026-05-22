@@ -219,6 +219,7 @@ impl Drop for LiveTerm {
 }
 
 impl LiveTerm {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cols: usize,
         rows: usize,
@@ -226,6 +227,7 @@ impl LiveTerm {
         proxy: EventLoopProxy<UserEvent>,
         tab_id: TabId,
         cwd: Option<PathBuf>,
+        scrollback: usize,
     ) -> Self {
         let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
         let reported_cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -236,7 +238,11 @@ impl LiveTerm {
             reported_cwd: reported_cwd.clone(),
         };
         let size = GridSize { cols, rows };
-        let term = Term::new(TermConfig::default(), &size, notifier.clone());
+        let term_config = TermConfig {
+            scrolling_history: scrollback,
+            ..TermConfig::default()
+        };
+        let term = Term::new(term_config, &size, notifier.clone());
         let term = Arc::new(FairMutex::new(term));
 
         let window_size = WindowSize {

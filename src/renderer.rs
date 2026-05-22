@@ -16,6 +16,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
+use crate::config::{BellStyle, Config};
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
@@ -829,6 +830,9 @@ pub struct Renderer {
     /// per frame in `render()`.
     rss_kill_bytes: u64,
 
+    /// User config, reloaded when the window regains focus.
+    config: Config,
+
     /// Held so new tabs can construct their `LiveTerm` with a Notifier
     /// pointing back at this event loop.
     proxy: EventLoopProxy<UserEvent>,
@@ -904,6 +908,8 @@ impl Renderer {
         let physical_width = width as f32;
         let physical_height = height as f32;
 
+        let config = Config::load();
+
         let (cols, rows) = compute_grid_size(physical_width, physical_height, cell_advance);
         let first_tab_id = TabId(0);
         let live_term = LiveTerm::new(
@@ -913,6 +919,7 @@ impl Renderer {
             proxy.clone(),
             first_tab_id,
             None,
+            config.scrollback,
         );
 
         // Clipboard is optional; it's possible the platform refuses to give us
@@ -979,6 +986,7 @@ impl Renderer {
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
             rss_kill_bytes: rss_kill_threshold_bytes(),
+            config,
             proxy,
             window,
         };
@@ -1053,8 +1061,15 @@ impl Renderer {
         // The new tab joins the active pane, sized to that pane's rect.
         let rect = self.active_pane_rect();
         let (cols, rows) = pane_grid(rect, self.cell_advance);
-        let live_term =
-            LiveTerm::new(cols, rows, self.cell_advance, self.proxy.clone(), id, cwd);
+        let live_term = LiveTerm::new(
+            cols,
+            rows,
+            self.cell_advance,
+            self.proxy.clone(),
+            id,
+            cwd,
+            self.config.scrollback,
+        );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
         let text_buf =
@@ -1547,6 +1562,7 @@ impl Renderer {
             self.proxy.clone(),
             tab_id,
             cwd,
+            self.config.scrollback,
         );
         let title = "terminite".to_string();
         let title_buf = make_title_buffer(&mut self.font_system, &title);
@@ -2232,6 +2248,10 @@ impl Renderer {
     }
 
     pub fn ring_bell(&mut self, _tab_id: TabId) {
+        // `bell_style = "none"` — the BEL does nothing.
+        if self.config.bell_style == BellStyle::Silent {
+            return;
+        }
         // The flash overlay is window-wide for now; we don't visually
         // distinguish *which* tab rang the bell. Coalesce: a hostile `\a`
         // storm just extends the deadline; we don't touch the renderer state
@@ -2472,6 +2492,12 @@ impl Renderer {
 
     pub fn focus_changed(&mut self, focused: bool) {
         self.focused = focused;
+        // Re-read the config on focus-gain — edit it in another window,
+        // switch back, and it applies. cursor_blink and bell_style take
+        // effect immediately; scrollback applies to tabs opened afterward.
+        if focused {
+            self.config = Config::load();
+        }
         // Optionally emit DEC focus reporting when an app asked for it.
         let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.focus_in_out {
@@ -2534,8 +2560,10 @@ impl Renderer {
         // Cursor blink — one phase shared by every pane. alacritty's
         // CursorStyle.blinking is false unless the shell sends `\e[1/3/5 q`;
         // respecting that strictly freezes the cursor in default zsh/bash,
-        // so we blink whenever the window is focused.
-        let blink_on = if self.focused {
+        // so we blink whenever the window is focused — unless the user has
+        // turned `cursor_blink` off in the config.
+        let blink = self.focused && self.config.cursor_blink;
+        let blink_on = if blink {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             elapsed_ms % CURSOR_BLINK_PERIOD_MS < CURSOR_BLINK_PERIOD_MS / 2
         } else {
@@ -2543,7 +2571,7 @@ impl Renderer {
         };
         // Surface the next blink phase change as a deadline so the main loop's
         // WaitUntil wakes us — no per-frame thread spawn.
-        self.next_blink_deadline = if self.focused {
+        self.next_blink_deadline = if blink {
             let elapsed_ms = self.start_time.elapsed().as_millis() as u64;
             let half = CURSOR_BLINK_PERIOD_MS / 2;
             let into_half = elapsed_ms % half;
