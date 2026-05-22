@@ -637,6 +637,7 @@ fn split_rect(r: PaneRect, dir: SplitDir, ratio: f32) -> (PaneRect, PaneRect) {
 #[derive(Debug)]
 enum ModalAction {
     CloseTab,
+    ClosePane,
 }
 
 /// An action invoked from the right-click context menu.
@@ -1122,6 +1123,12 @@ impl Renderer {
         self.window.request_redraw();
         match modal.action {
             ModalAction::CloseTab => self.do_close_active_tab(),
+            ModalAction::ClosePane => {
+                // close_active_pane is guarded against the last pane, so it
+                // never signals an exit here.
+                let _ = self.close_active_pane();
+                false
+            }
         }
     }
 
@@ -1575,6 +1582,45 @@ impl Renderer {
         false
     }
 
+    /// Close the active pane, but if any of its tabs has a non-shell process
+    /// running, open a confirmation modal first (the corner-drag remove
+    /// path — it takes the whole pane and every tab in it).
+    fn request_close_active_pane(&mut self) {
+        if self.modal.is_some() || self.root_ref().leaf_count() <= 1 {
+            return;
+        }
+        let busy = self
+            .active_pane_ref()
+            .tabs
+            .iter()
+            .any(|t| t.live_term.has_active_process());
+        if !busy {
+            let _ = self.close_active_pane();
+            return;
+        }
+        let pane = self.active_pane_ref();
+        let name = pane
+            .tabs
+            .iter()
+            .find(|t| t.live_term.has_active_process())
+            .and_then(|t| t.live_term.foreground_pid())
+            .and_then(proc_name_of)
+            .unwrap_or_else(|| "A process".to_string());
+        let tab_count = pane.tabs.len();
+        let body = if tab_count > 1 {
+            format!("{name} is running in this pane ({tab_count} tabs).")
+        } else {
+            format!("{name} is running in this pane.")
+        };
+        self.open_modal(
+            ModalAction::ClosePane,
+            "Close pane?".to_string(),
+            body,
+            "Cancel",
+            "Close",
+        );
+    }
+
     /// Make a pane the active one.
     fn focus_pane(&mut self, pid: PaneId) {
         if self.active_pane != pid {
@@ -1983,7 +2029,7 @@ impl Renderer {
                 }
                 Some(GestureOutcome::Remove) => {
                     self.focus_pane(g.pid);
-                    let _ = self.close_active_pane();
+                    self.request_close_active_pane();
                 }
                 None => {}
             }
