@@ -32,6 +32,13 @@ const CURSOR_COLOR: [f32; 4] = [1.0, 200.0 / 255.0, 80.0 / 255.0, 180.0 / 255.0]
 /// Translucent steel-blue selection highlight.
 const SELECTION_COLOR: [f32; 4] = [0.32, 0.46, 0.75, 0.35];
 
+/// Underline drawn beneath OSC 8 hyperlink ranges.
+const LINK_UNDERLINE_COLOR: [f32; 4] = [0.40, 0.60, 0.95, 0.85];
+
+/// Find-match highlight (all matches) and the current-match accent.
+const FIND_MATCH_COLOR: [f32; 4] = [0.85, 0.75, 0.20, 0.40];
+const FIND_CURRENT_COLOR: [f32; 4] = [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.65];
+
 /// Bell flash: a soft warm overlay drawn above everything for a fraction of
 /// a second on `\a`.
 const BELL_COLOR: [f32; 4] = [1.0, 0.9, 0.5, 0.18];
@@ -165,6 +172,54 @@ enum ModalAction {
     CloseTab,
 }
 
+/// An action invoked from the right-click context menu.
+enum MenuAction {
+    Copy,
+    Paste,
+    OpenLink(String),
+    SelectAll,
+}
+
+/// One row in the context menu.
+struct MenuItem {
+    label_buf: Buffer,
+    action: MenuAction,
+    enabled: bool,
+}
+
+/// Right-click context menu — a small overlay anchored at the cursor.
+struct ContextMenu {
+    x: f32,
+    y: f32,
+    items: Vec<MenuItem>,
+    /// Index of the item under the cursor, for hover highlight.
+    hovered: Option<usize>,
+}
+
+const MENU_WIDTH: f32 = 240.0;
+const MENU_ITEM_H: f32 = 40.0;
+const MENU_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
+const MENU_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+const MENU_HOVER_BG: [f32; 4] = [0.22, 0.30, 0.46, 1.0];
+
+// Find bar — a floating box at the top-right of the content area.
+const FIND_BAR_W: f32 = 420.0;
+const FIND_BAR_H: f32 = 48.0;
+const FIND_BAR_MARGIN: f32 = 16.0;
+const FIND_BAR_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
+const FIND_BAR_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+
+/// In-progress incremental search over the active tab's scrollback.
+struct FindState {
+    query: String,
+    /// Text buffer for the find bar (`⌕ query    N/M`), rebuilt on change.
+    bar_buf: Buffer,
+    /// Absolute `(line, col_start, col_end)` matches, top-to-bottom.
+    matches: Vec<(i32, usize, usize)>,
+    /// Index of the current (accented) match.
+    current: usize,
+}
+
 /// In-window modal dialog. Built when the user attempts to do something
 /// destructive while a non-trivial process is running.
 struct Modal {
@@ -265,6 +320,10 @@ pub struct Renderer {
     /// keyboard / mouse routing goes to the modal first; the PTY and tabs
     /// don't receive input.
     modal: Option<Modal>,
+    /// When Some, the right-click context menu is up.
+    context_menu: Option<ContextMenu>,
+    /// When Some, the find bar is open and keyboard input edits the query.
+    find: Option<FindState>,
 
     // Deadlines surfaced via `next_wakeup()` to the main loop's
     // `ControlFlow::WaitUntil(...)`. We used to spawn a fresh OS thread per
@@ -422,6 +481,8 @@ impl Renderer {
             start_time: Instant::now(),
             preedit: String::new(),
             modal: None,
+            context_menu: None,
+            find: None,
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
             rss_kill_bytes: rss_kill_threshold_bytes(),
@@ -527,6 +588,251 @@ impl Renderer {
             self.modal_cancel();
         }
         false
+    }
+
+    /// Open the right-click context menu at a pixel position. Items depend
+    /// on context: Copy is enabled only with a selection, Open Link only
+    /// appears when the click landed on an OSC 8 hyperlink.
+    fn open_context_menu(&mut self, x: f32, y: f32) {
+        let (line, col) = self.pixel_to_absolute(x, y);
+        let link = self.tabs[self.active].live_term.hyperlink_at(line, col);
+        let has_selection = self.tabs[self.active]
+            .selection
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        let mut items: Vec<MenuItem> = Vec::new();
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Copy"),
+            action: MenuAction::Copy,
+            enabled: has_selection,
+        });
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Paste"),
+            action: MenuAction::Paste,
+            enabled: true,
+        });
+        if let Some(uri) = link {
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, "Open Link"),
+                action: MenuAction::OpenLink(uri),
+                enabled: true,
+            });
+        }
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Select All"),
+            action: MenuAction::SelectAll,
+            enabled: true,
+        });
+
+        // Keep the menu fully on-screen.
+        let h = items.len() as f32 * MENU_ITEM_H;
+        let mx = x
+            .min(self.surface_config.width as f32 - MENU_WIDTH - 4.0)
+            .max(0.0);
+        let my = y
+            .min(self.surface_config.height as f32 - h - 4.0)
+            .max(0.0);
+        self.context_menu = Some(ContextMenu {
+            x: mx,
+            y: my,
+            items,
+            hovered: None,
+        });
+        self.window.request_redraw();
+    }
+
+    pub fn has_context_menu(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    pub fn dismiss_context_menu(&mut self) {
+        self.context_menu = None;
+        self.window.request_redraw();
+    }
+
+    /// Item index under a pixel position, or None if outside the menu.
+    fn context_menu_at(&self, x: f32, y: f32) -> Option<usize> {
+        let menu = self.context_menu.as_ref()?;
+        if x < menu.x || x >= menu.x + MENU_WIDTH || y < menu.y {
+            return None;
+        }
+        let idx = ((y - menu.y) / MENU_ITEM_H) as usize;
+        (idx < menu.items.len()).then_some(idx)
+    }
+
+    /// Resolve a click while the menu is up: run the hit item's action (if
+    /// enabled), then dismiss. A click anywhere just dismisses.
+    fn context_menu_click(&mut self, x: f32, y: f32) {
+        let hit = self.context_menu_at(x, y);
+        let Some(menu) = self.context_menu.take() else { return };
+        self.window.request_redraw();
+        let Some(idx) = hit else { return };
+        if !menu.items[idx].enabled {
+            return;
+        }
+        match &menu.items[idx].action {
+            MenuAction::Copy => self.copy_selection(),
+            MenuAction::Paste => self.paste(),
+            MenuAction::OpenLink(uri) => open_uri(uri),
+            MenuAction::SelectAll => {
+                let ((sl, sc), (el, ec)) =
+                    self.tabs[self.active].live_term.whole_buffer();
+                self.tabs[self.active].selection = Some(Selection {
+                    anchor_line: sl,
+                    anchor_col: sc,
+                    head_line: el,
+                    head_col: ec,
+                });
+                self.copy_selection();
+            }
+        }
+    }
+
+    /// Build the rect instances for the context menu (background, border,
+    /// hovered-item highlight).
+    fn build_menu_rects(&self) -> Vec<RectInstance> {
+        let Some(menu) = self.context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let h = menu.items.len() as f32 * MENU_ITEM_H;
+        let border = 1.0;
+        let mut rects = vec![
+            RectInstance {
+                rect: [
+                    menu.x - border,
+                    menu.y - border,
+                    MENU_WIDTH + 2.0 * border,
+                    h + 2.0 * border,
+                ],
+                color: MENU_BORDER,
+            },
+            RectInstance {
+                rect: [menu.x, menu.y, MENU_WIDTH, h],
+                color: MENU_BG,
+            },
+        ];
+        if let Some(hov) = menu.hovered {
+            if menu.items[hov].enabled {
+                rects.push(RectInstance {
+                    rect: [
+                        menu.x,
+                        menu.y + hov as f32 * MENU_ITEM_H,
+                        MENU_WIDTH,
+                        MENU_ITEM_H,
+                    ],
+                    color: MENU_HOVER_BG,
+                });
+            }
+        }
+        rects
+    }
+
+    // ── Find ──────────────────────────────────────────────────────────────
+
+    pub fn has_find(&self) -> bool {
+        self.find.is_some()
+    }
+
+    pub fn open_find(&mut self) {
+        let bar_buf = make_modal_buffer(&mut self.font_system, "Find:");
+        self.find = Some(FindState {
+            query: String::new(),
+            bar_buf,
+            matches: Vec::new(),
+            current: 0,
+        });
+        self.window.request_redraw();
+    }
+
+    pub fn close_find(&mut self) {
+        self.find = None;
+        self.window.request_redraw();
+    }
+
+    pub fn find_input(&mut self, ch: char) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.push(ch);
+        }
+        self.rerun_search();
+    }
+
+    pub fn find_backspace(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.pop();
+        }
+        self.rerun_search();
+    }
+
+    pub fn find_next(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            if !find.matches.is_empty() {
+                find.current = (find.current + 1) % find.matches.len();
+            }
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    pub fn find_prev(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            if !find.matches.is_empty() {
+                find.current = if find.current == 0 {
+                    find.matches.len() - 1
+                } else {
+                    find.current - 1
+                };
+            }
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    /// Re-run the search for the current query and reset to the first match.
+    fn rerun_search(&mut self) {
+        let query = match self.find.as_ref() {
+            Some(f) => f.query.clone(),
+            None => return,
+        };
+        let matches = self.tabs[self.active].live_term.search(&query);
+        if let Some(find) = self.find.as_mut() {
+            find.matches = matches;
+            find.current = 0;
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    fn rebuild_find_bar(&mut self) {
+        let text = match self.find.as_ref() {
+            Some(f) if f.query.is_empty() => "Find:".to_string(),
+            Some(f) if f.matches.is_empty() => {
+                format!("Find: {}   no matches", f.query)
+            }
+            Some(f) => {
+                format!("Find: {}   {}/{}", f.query, f.current + 1, f.matches.len())
+            }
+            None => return,
+        };
+        let buf = make_modal_buffer(&mut self.font_system, &text);
+        if let Some(find) = self.find.as_mut() {
+            find.bar_buf = buf;
+        }
+    }
+
+    fn scroll_to_current_match(&mut self) {
+        let target = self
+            .find
+            .as_ref()
+            .and_then(|f| f.matches.get(f.current).copied());
+        if let Some((line, _, _)) = target {
+            self.tabs[self.active]
+                .live_term
+                .scroll_to_line(line, self.grid_rows);
+        }
     }
 
     fn open_modal(
@@ -637,6 +943,18 @@ impl Renderer {
     pub fn mouse_moved(&mut self, x: f32, y: f32, modifiers: ModifiersState) {
         self.mouse_pos = (x, y);
 
+        // Context menu up — just track the hovered item.
+        if self.context_menu.is_some() {
+            let hit = self.context_menu_at(x, y);
+            if let Some(menu) = self.context_menu.as_mut() {
+                if menu.hovered != hit {
+                    menu.hovered = hit;
+                    self.window.request_redraw();
+                }
+            }
+            return;
+        }
+
         // Mouse reporting takes precedence over selection / scroll.
         let mode = self.tabs[self.active].live_term.mode_flags();
         let reporting_active = mode.mouse_drag || mode.mouse_motion;
@@ -717,6 +1035,12 @@ impl Renderer {
             return;
         }
 
+        // Context menu up — any click resolves it (an item, or dismiss).
+        if self.context_menu.is_some() {
+            self.context_menu_click(self.mouse_pos.0, self.mouse_pos.1);
+            return;
+        }
+
         // Tab-bar hit test first — left-click in the bar switches tabs
         // (or closes one when the × is hit) and never starts a selection.
         if self.mouse_pos.1 < TAB_BAR_HEIGHT && button == MouseButton::Left {
@@ -766,14 +1090,26 @@ impl Renderer {
             return;
         }
 
-        // Only the left button starts a selection. Right/middle without
-        // mouse-reporting are no-ops for v1 (right-click menu lands later
-        // in Phase 1).
+        // Right-click opens the context menu.
+        if button == MouseButton::Right {
+            self.open_context_menu(self.mouse_pos.0, self.mouse_pos.1);
+            return;
+        }
+
+        // Only the left button does anything further.
         if button != MouseButton::Left {
             return;
         }
 
         let (line, col) = self.pixel_to_absolute(self.mouse_pos.0, self.mouse_pos.1);
+
+        // Cmd-click an OSC 8 hyperlink → open it; don't start a selection.
+        if modifiers.super_key() {
+            if let Some(uri) = self.tabs[self.active].live_term.hyperlink_at(line, col) {
+                open_uri(&uri);
+                return;
+            }
+        }
         let now = Instant::now();
         let click_count = match self.tabs[self.active].last_click {
             Some((t, cell, c)) if now.duration_since(t) < MULTI_CLICK_WINDOW && cell == (line, col) => {
@@ -813,7 +1149,6 @@ impl Renderer {
             }
         }
         self.window.request_redraw();
-        let _ = modifiers; // reserved for future Cmd-click hyperlink etc.
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
@@ -1290,6 +1625,7 @@ impl Renderer {
             text_runs,
             bg_runs,
             deco_runs,
+            link_runs,
             cursor_line,
             cursor_col,
             cursor_shape,
@@ -1384,6 +1720,34 @@ impl Renderer {
                         color: SELECTION_COLOR,
                     });
                 }
+            }
+        }
+
+        // Find-match highlights: all matches in a pale gold, the current one
+        // accented. Absolute Line coords → viewport rows like selection.
+        if let Some(find) = self.find.as_ref() {
+            let rows = self.grid_rows as i32;
+            let display_offset =
+                self.tabs[self.active].live_term.offset_and_history().0 as i32;
+            for (i, &(line, cs, ce)) in find.matches.iter().enumerate() {
+                let vl = line + display_offset;
+                if vl < -1 || vl >= rows {
+                    continue;
+                }
+                let color = if i == find.current {
+                    FIND_CURRENT_COLOR
+                } else {
+                    FIND_MATCH_COLOR
+                };
+                below.push(RectInstance {
+                    rect: [
+                        TEXT_LEFT + cs as f32 * cell_advance,
+                        TEXT_TOP + vl as f32 * LINE_HEIGHT + y_shift,
+                        (ce - cs + 1) as f32 * cell_advance,
+                        LINE_HEIGHT,
+                    ],
+                    color,
+                });
             }
         }
 
@@ -1485,6 +1849,41 @@ impl Renderer {
             }
         }
 
+        // OSC 8 hyperlinks: a thin underline in a steel-blue so they read as
+        // clickable without shouting. Cmd-click opens them (see mouse_down).
+        for run in &link_runs {
+            let x = TEXT_LEFT + run.start_col as f32 * cell_advance;
+            let w = run.width as f32 * cell_advance;
+            let line_y = TEXT_TOP + run.line as f32 * LINE_HEIGHT + y_shift;
+            above.push(RectInstance {
+                rect: [
+                    x,
+                    line_y + LINE_HEIGHT - UNDERLINE_THICKNESS,
+                    w,
+                    UNDERLINE_THICKNESS,
+                ],
+                color: LINK_UNDERLINE_COLOR,
+            });
+        }
+
+        // Find bar background — a floating box at the top-right of the
+        // content area. The query text is drawn by the tab text renderer.
+        let find_bar_origin = if self.find.is_some() {
+            let bx = self.surface_config.width as f32 - FIND_BAR_W - FIND_BAR_MARGIN;
+            let by = TEXT_TOP + FIND_BAR_MARGIN;
+            above.push(RectInstance {
+                rect: [bx - 1.0, by - 1.0, FIND_BAR_W + 2.0, FIND_BAR_H + 2.0],
+                color: FIND_BAR_BORDER,
+            });
+            above.push(RectInstance {
+                rect: [bx, by, FIND_BAR_W, FIND_BAR_H],
+                color: FIND_BAR_BG,
+            });
+            Some((bx, by))
+        } else {
+            None
+        };
+
         // Bell flash: a soft warm overlay over the whole surface. Auto-clears
         // when the deadline passes; a thread already scheduled a wakeup.
         if let Some(until) = self.bell_flash_until {
@@ -1508,13 +1907,20 @@ impl Renderer {
             self.surface_config.height as f32,
         ];
         let tab_bar_rects = self.build_tab_bar_rects();
-        let modal_rects = self.build_modal_rects();
+        // The modal and the context menu share the rects_modal /
+        // modal_text_renderer pipelines — they're mutually exclusive in
+        // practice and the modal wins if both are somehow set.
+        let overlay_rects = if self.modal.is_some() {
+            self.build_modal_rects()
+        } else {
+            self.build_menu_rects()
+        };
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
         self.rects_tab_bar
             .prepare(&self.queue, &tab_bar_rects, resolution);
         self.rects_modal
-            .prepare(&self.queue, &modal_rects, resolution);
+            .prepare(&self.queue, &overlay_rects, resolution);
 
         // Modal text preparation — independent renderer so its draw can come
         // after the modal background rects.
@@ -1597,6 +2003,48 @@ impl Renderer {
                     &mut self.swash_cache,
                 )
                 .expect("terminite: modal text prepare failed");
+        } else if let Some(menu) = self.context_menu.as_ref() {
+            // Context-menu item labels go through the same text renderer.
+            let label_color = Color::rgb(225, 225, 235);
+            let disabled_color = Color::rgb(110, 110, 125);
+            let text_inset = 18.0;
+            let areas: Vec<TextArea> = menu
+                .items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| {
+                    let row_y = menu.y + i as f32 * MENU_ITEM_H;
+                    TextArea {
+                        buffer: &item.label_buf,
+                        left: menu.x + text_inset,
+                        top: row_y + (MENU_ITEM_H - MODAL_LINE_HEIGHT) * 0.5,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: menu.x as i32,
+                            top: row_y as i32,
+                            right: (menu.x + MENU_WIDTH) as i32,
+                            bottom: (row_y + MENU_ITEM_H) as i32,
+                        },
+                        default_color: if item.enabled {
+                            label_color
+                        } else {
+                            disabled_color
+                        },
+                        custom_glyphs: &[],
+                    }
+                })
+                .collect();
+            self.modal_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: menu text prepare failed");
         }
 
         // Clip text rendering to the viewport — keeps the extra row above the
@@ -1684,6 +2132,26 @@ impl Renderer {
             });
         }
         let _ = surface_w; // reserved for future overflow indicator
+
+        // The find bar's text rides in the same renderer as the tab labels
+        // (both want the full-surface scissor in the pass below).
+        if let (Some(find), Some((bx, by))) = (self.find.as_ref(), find_bar_origin) {
+            tab_text_areas.push(TextArea {
+                buffer: &find.bar_buf,
+                left: bx + 16.0,
+                top: by + (FIND_BAR_H - MODAL_LINE_HEIGHT) * 0.5,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: bx as i32,
+                    top: by as i32,
+                    right: (bx + FIND_BAR_W) as i32,
+                    bottom: (by + FIND_BAR_H) as i32,
+                },
+                default_color: Color::rgb(225, 225, 235),
+                custom_glyphs: &[],
+            });
+        }
+
         self.tab_text_renderer
             .prepare(
                 &self.device,
@@ -1778,13 +2246,13 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("terminite: tab bar text render failed");
 
-            // Modal sits on top of *everything* — overlay dims the window
-            // and the card is rendered with its own text pass.
-            if self.modal.is_some() {
+            // Modal and context menu sit on top of *everything* — they
+            // share the rects_modal / modal_text_renderer pipelines.
+            if self.modal.is_some() || self.context_menu.is_some() {
                 self.rects_modal.render(&mut pass);
                 self.modal_text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
-                    .expect("terminite: modal text render failed");
+                    .expect("terminite: overlay text render failed");
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -1894,6 +2362,27 @@ fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
 /// the modal body matches what the user sees in the bar.
 fn proc_name_of(pid: i32) -> Option<String> {
     crate::term::process_display_name(pid)
+}
+
+/// Open a URI with the platform handler. macOS: `open <uri>`. Spawned
+/// detached; we don't wait or surface errors (a bad link just does nothing).
+fn open_uri(uri: &str) {
+    // Only handle the obvious safe schemes — never shell-anything-arbitrary.
+    let ok = uri.starts_with("http://")
+        || uri.starts_with("https://")
+        || uri.starts_with("file://")
+        || uri.starts_with("mailto:");
+    if !ok {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(uri).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
+    }
 }
 
 fn compute_grid_size(

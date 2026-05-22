@@ -213,6 +213,52 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         }
                         return;
                     }
+                    // Context menu: Esc dismisses; any other key just
+                    // dismisses and is swallowed.
+                    if r.has_context_menu() {
+                        if event.state == ElementState::Pressed {
+                            r.dismiss_context_menu();
+                        }
+                        return;
+                    }
+                    // Find bar open: keyboard edits the query. Cmd+F closes
+                    // it; Esc closes; Enter / Shift+Enter cycle matches;
+                    // Backspace edits; printable chars append.
+                    if r.has_find() && event.state == ElementState::Pressed {
+                        let shift = self.modifiers.shift_key();
+                        let cmd = self.modifiers.super_key();
+                        if cmd {
+                            if let Key::Character(t) = &event.logical_key {
+                                if t.chars().next().map(|c| c.to_ascii_lowercase())
+                                    == Some('f')
+                                {
+                                    r.close_find();
+                                    return;
+                                }
+                            }
+                        }
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => r.close_find(),
+                            Key::Named(NamedKey::Enter) => {
+                                if shift {
+                                    r.find_prev();
+                                } else {
+                                    r.find_next();
+                                }
+                            }
+                            Key::Named(NamedKey::Backspace) => r.find_backspace(),
+                            Key::Character(t) if !cmd && !self.modifiers.control_key() => {
+                                for ch in t.chars() {
+                                    if !ch.is_control() {
+                                        r.find_input(ch);
+                                    }
+                                }
+                            }
+                            Key::Named(NamedKey::Space) => r.find_input(' '),
+                            _ => {}
+                        }
+                        return;
+                    }
                 }
                 // Cmd-shortcuts: copy, paste, quit, tab ops (Cmd on macOS =
                 // super_key in winit's ModifiersState).
@@ -255,6 +301,12 @@ impl ApplicationHandler<UserEvent> for Terminite {
                             }
                             Some('q') => {
                                 event_loop.exit();
+                                return;
+                            }
+                            Some('f') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.open_find();
+                                }
                                 return;
                             }
                             Some('t') => {

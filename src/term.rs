@@ -60,11 +60,22 @@ pub struct DecorationRun {
     pub color: Color,
 }
 
+/// A run of cells that all carry the same OSC 8 hyperlink. `line` is signed
+/// for the extra-row-above convention, like `BgRun`.
+#[derive(Clone, PartialEq)]
+pub struct LinkRun {
+    pub line: i32,
+    pub start_col: usize,
+    pub width: usize,
+    pub uri: String,
+}
+
 /// One frame's worth of rendering data extracted from the cell grid.
 pub struct Snapshot {
     pub text_runs: Vec<(String, SpanStyle)>,
     pub bg_runs: Vec<BgRun>,
     pub deco_runs: Vec<DecorationRun>,
+    pub link_runs: Vec<LinkRun>,
     pub cursor_line: i32,
     pub cursor_col: usize,
     pub cursor_shape: CursorShape,
@@ -416,10 +427,121 @@ impl LiveTerm {
         ((line, 0), (line, end))
     }
 
+    /// Whole-buffer selection range — top of history to the last visible row.
+    pub fn whole_buffer(&self) -> ((i32, usize), (i32, usize)) {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let history = grid.history_size() as i32;
+        let rows = grid.screen_lines() as i32;
+        let cols = grid.columns().saturating_sub(1);
+        ((-history, 0), (rows - 1, cols))
+    }
+
+    /// OSC 8 hyperlink URI at an absolute (line, col), if any.
+    pub fn hyperlink_at(&self, line: i32, col: usize) -> Option<String> {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let history = grid.history_size() as i32;
+        let max_line = grid.screen_lines() as i32 - 1;
+        if cols == 0 || line < -history || line > max_line {
+            return None;
+        }
+        let row = &grid[Line(line)];
+        row[Column(col.min(cols - 1))]
+            .hyperlink()
+            .map(|h| h.uri().to_string())
+    }
+
+    /// Search the whole grid (history + viewport) for `needle`, case-
+    /// insensitively. Returns absolute `(line, col_start, col_end)` matches
+    /// in top-to-bottom order. `col_end` is inclusive.
+    pub fn search(&self, needle: &str) -> Vec<(i32, usize, usize)> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let needle_lower = needle.to_lowercase();
+        let term = self.term.lock();
+        let grid = term.grid();
+        let cols = grid.columns();
+        let rows = grid.screen_lines() as i32;
+        let history = grid.history_size() as i32;
+        let mut matches = Vec::new();
+        for line in -history..rows {
+            let row = &grid[Line(line)];
+            // Build the row's text plus a column map so a byte offset in the
+            // joined string maps back to a cell column.
+            let mut text = String::new();
+            let mut col_of_byte: Vec<usize> = Vec::new();
+            for col in 0..cols {
+                let c = row[Column(col)].c;
+                for _ in 0..c.len_utf8() {
+                    col_of_byte.push(col);
+                }
+                text.push(c);
+            }
+            let hay = text.to_lowercase();
+            // to_lowercase can change byte length; fall back to a simple
+            // char-wise scan when lengths diverge to keep the map valid.
+            if hay.len() != text.len() {
+                let chars: Vec<char> = text.chars().collect();
+                let lneedle: Vec<char> = needle_lower.chars().collect();
+                if lneedle.is_empty() {
+                    continue;
+                }
+                let lower: Vec<char> =
+                    chars.iter().flat_map(|c| c.to_lowercase()).collect();
+                // Approximate: match against the per-char lowercased vec only
+                // when it's 1:1 with chars; otherwise skip the row.
+                if lower.len() == chars.len() {
+                    let mut i = 0;
+                    while i + lneedle.len() <= lower.len() {
+                        if lower[i..i + lneedle.len()] == lneedle[..] {
+                            matches.push((
+                                line,
+                                i,
+                                i + lneedle.len() - 1,
+                            ));
+                            i += lneedle.len();
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                continue;
+            }
+            let mut from = 0;
+            while let Some(rel) = hay[from..].find(&needle_lower) {
+                let byte_start = from + rel;
+                let byte_end = byte_start + needle_lower.len() - 1;
+                if let (Some(&cs), Some(&ce)) =
+                    (col_of_byte.get(byte_start), col_of_byte.get(byte_end))
+                {
+                    matches.push((line, cs, ce));
+                }
+                from = byte_start + needle_lower.len();
+            }
+        }
+        matches
+    }
+
     /// Shift the visible viewport up or down through the scrollback.
     pub fn scroll(&self, scroll: Scroll) {
         let mut term = self.term.lock();
         term.scroll_display(scroll);
+    }
+
+    /// Scroll so an absolute line lands roughly a third of the way down the
+    /// viewport — used to bring a find match into view.
+    pub fn scroll_to_line(&self, abs_line: i32, rows: usize) {
+        let mut term = self.term.lock();
+        let history = term.grid().history_size() as i32;
+        let target = (rows as i32 / 3 - abs_line).clamp(0, history);
+        let current = term.grid().display_offset() as i32;
+        let delta = target - current;
+        if delta != 0 {
+            term.scroll_display(Scroll::Delta(delta));
+        }
     }
 
     /// Current `(display_offset, history_size)` — used by the renderer to
@@ -558,6 +680,7 @@ impl LiveTerm {
         let mut text_runs: Vec<(String, SpanStyle)> = Vec::new();
         let mut bg_runs: Vec<BgRun> = Vec::new();
         let mut deco_runs: Vec<DecorationRun> = Vec::new();
+        let mut link_runs: Vec<LinkRun> = Vec::new();
         let mut current_style = SpanStyle {
             color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
             bold: false,
@@ -586,6 +709,8 @@ impl LiveTerm {
             // (start, color, is_double)
             let mut under_open: Option<(usize, Color, bool)> = None;
             let mut strike_open: Option<(usize, Color)> = None;
+            // (start, uri)
+            let mut link_open: Option<(usize, String)> = None;
 
             for col in 0..cols {
                 let cell = &row[Column(col)];
@@ -597,6 +722,25 @@ impl LiveTerm {
                     AnsiColor::Named(NamedColor::Background) => None,
                     other => Some(resolve_color(other)),
                 };
+                // ── Hyperlink side: cells join a run while the URI matches.
+                let link_uri = cell.hyperlink().map(|h| h.uri().to_string());
+                match (&link_open, &link_uri) {
+                    (Some((_, prev)), Some(new)) if prev == new => {}
+                    _ => {
+                        if let Some((start, uri)) = link_open.take() {
+                            link_runs.push(LinkRun {
+                                line: line as i32,
+                                start_col: start,
+                                width: col - start,
+                                uri,
+                            });
+                        }
+                        if let Some(uri) = link_uri.clone() {
+                            link_open = Some((col, uri));
+                        }
+                    }
+                }
+
                 match (bg_open, bg_color_opt) {
                     (Some((_, prev)), Some(new)) if prev == new => {}
                     _ => {
@@ -725,6 +869,14 @@ impl LiveTerm {
                     color,
                 });
             }
+            if let Some((start, uri)) = link_open.take() {
+                link_runs.push(LinkRun {
+                    line: line as i32,
+                    start_col: start,
+                    width: cols - start,
+                    uri,
+                });
+            }
             current_text.push('\n');
         }
         if !current_text.is_empty() {
@@ -735,6 +887,7 @@ impl LiveTerm {
             text_runs,
             bg_runs,
             deco_runs,
+            link_runs,
             cursor_line,
             cursor_col,
             cursor_shape: cursor_style.shape,
