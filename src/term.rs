@@ -175,6 +175,11 @@ impl EventListener for Notifier {
                 // block Model is built on these; for now the dispatch path
                 // is proven end-to-end and the signal is parked.
             }
+            TermEvent::Apc(_data) => {
+                // APC payloads (Kitty graphics) land here. Capped at
+                // `vte::APC_MAX_BYTES` upstream. Parsing + image rendering
+                // are the next commits; for now the dispatch path is proven.
+            }
             _ => {}
         }
         let _ = self.proxy.send_event(UserEvent::Wakeup);

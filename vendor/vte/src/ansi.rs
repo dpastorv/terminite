@@ -506,6 +506,11 @@ pub trait Handler {
     /// the exit code on a `D` mark when present. (terminite fork.)
     fn shell_integration(&mut self, _kind: char, _exit: Option<i32>) {}
 
+    /// Application Program Command payload — the bytes between `ESC _` and
+    /// the ST terminator. Used by the Kitty graphics protocol. Capped at
+    /// `crate::APC_MAX_BYTES`. (terminite fork.)
+    fn apc_dispatch(&mut self, _data: &[u8]) {}
+
     /// Set the cursor style.
     fn set_cursor_style(&mut self, _: Option<CursorStyle>) {}
 
@@ -1336,6 +1341,11 @@ where
     }
 
     #[inline]
+    // terminite fork: hand APC payloads (Kitty graphics) to the Handler.
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        self.handler.apc_dispatch(data);
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
         let terminator = if bell_terminated { "\x07" } else { "\x1b\\" };
 

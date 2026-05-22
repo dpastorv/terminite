@@ -30,6 +30,10 @@ pub enum Event {
     /// `exit` carries the exit code on a `D` mark. (terminite fork.)
     ShellIntegration { kind: char, exit: Option<i32> },
 
+    /// An APC payload (Kitty graphics et al.) — the bytes between `ESC _`
+    /// and ST. Capped by vte at `APC_MAX_BYTES`. (terminite fork.)
+    Apc(Vec<u8>),
+
     /// Request to store a text string in the clipboard.
     ClipboardStore(ClipboardType, String),
 
@@ -80,6 +84,7 @@ impl Debug for Event {
             Event::ShellIntegration { kind, exit } => {
                 write!(f, "ShellIntegration({kind}, {exit:?})")
             },
+            Event::Apc(data) => write!(f, "Apc({} bytes)", data.len()),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),

@@ -49,6 +49,11 @@ const MAX_OSC_RAW: usize = 1024;
 ///
 /// [`Perform`]: trait.Perform.html
 ///
+/// Cap on the APC payload vte will accumulate before dispatching. (terminite
+/// fork: a hostile shell could otherwise stream gigabytes of APC bytes into
+/// the buffer.) 16 MB is well over any realistic single image transmission.
+pub const APC_MAX_BYTES: usize = 16 * 1024 * 1024;
+
 /// Generic over the value for the size of the raw Operating System Command
 /// buffer. Only used when the `std` feature is not enabled.
 #[derive(Default)]
@@ -64,6 +69,11 @@ pub struct Parser<const OSC_RAW_BUF_SIZE: usize = MAX_OSC_RAW> {
     osc_raw: Vec<u8>,
     osc_params: [(usize, usize); MAX_OSC_PARAMS],
     osc_num_params: usize,
+    // terminite fork: accumulates APC payload bytes for `apc_dispatch`.
+    #[cfg(not(feature = "std"))]
+    apc_raw: ArrayVec<u8, OSC_RAW_BUF_SIZE>,
+    #[cfg(feature = "std")]
+    apc_raw: Vec<u8>,
     ignoring: bool,
     partial_utf8: [u8; 4],
     partial_utf8_len: usize,
@@ -180,6 +190,8 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
             State::EscapeIntermediate => self.advance_esc_intermediate(performer, byte),
             State::OscString => self.advance_osc_string(performer, byte),
             State::SosPmApcString => self.anywhere(performer, byte),
+            // terminite fork: APC accumulates into apc_raw for dispatch.
+            State::ApcString => self.advance_apc_string(performer, byte),
             State::Ground => unreachable!(),
         }
     }
@@ -374,7 +386,13 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.osc_num_params = 0;
                 self.state = State::OscString
             },
-            0x5E..=0x5F => self.state = State::SosPmApcString,
+            // terminite fork: 0x5F ("_") is APC and we capture its payload;
+            // 0x5E ("^") is PM and stays discarded.
+            0x5E => self.state = State::SosPmApcString,
+            0x5F => {
+                self.apc_raw.clear();
+                self.state = State::ApcString
+            },
             0x60..=0x7E => {
                 performer.esc_dispatch(self.intermediates(), self.ignoring, byte);
                 self.state = State::Ground
@@ -431,6 +449,39 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
                 self.action_osc_put_param()
             },
             _ => self.action_osc_put(byte),
+        }
+    }
+
+    /// terminite fork: accumulate APC bytes (`ESC _ <payload> ST`) into
+    /// `apc_raw` and call `apc_dispatch` at the terminator. Mirrors
+    /// `advance_osc_string` and caps the payload at `APC_MAX_BYTES`.
+    #[inline(always)]
+    fn advance_apc_string<P: Perform>(&mut self, performer: &mut P, byte: u8) {
+        match byte {
+            0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1C..=0x1F => (),
+            0x07 => {
+                performer.apc_dispatch(&self.apc_raw);
+                self.apc_raw.clear();
+                self.state = State::Ground
+            },
+            0x18 | 0x1A => {
+                performer.apc_dispatch(&self.apc_raw);
+                self.apc_raw.clear();
+                performer.execute(byte);
+                self.state = State::Ground
+            },
+            0x1B => {
+                performer.apc_dispatch(&self.apc_raw);
+                self.apc_raw.clear();
+                self.reset_params();
+                self.state = State::Escape
+            },
+            _ => {
+                // System-impact bound: drop excess once we hit the cap.
+                if self.apc_raw.len() < APC_MAX_BYTES {
+                    self.apc_raw.push(byte);
+                }
+            },
         }
     }
 
@@ -744,6 +795,9 @@ enum State {
     EscapeIntermediate,
     OscString,
     SosPmApcString,
+    // terminite fork: dedicated state so APC payloads are accumulated for
+    // dispatch (SOS/PM stay in SosPmApcString and are discarded).
+    ApcString,
     #[default]
     Ground,
 }
@@ -790,6 +844,11 @@ pub trait Perform {
 
     /// Dispatch an operating system command.
     fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+
+    /// Dispatch an Application Program Command (APC) payload — the bytes
+    /// between `ESC _` and the ST terminator. Used by the Kitty graphics
+    /// protocol. Payload is capped at `APC_MAX_BYTES`. (terminite fork.)
+    fn apc_dispatch(&mut self, _data: &[u8]) {}
 
     /// A final character has arrived for a CSI sequence
     ///

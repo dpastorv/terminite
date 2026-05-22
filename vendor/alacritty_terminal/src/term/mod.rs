@@ -2243,6 +2243,11 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        self.event_proxy.send_event(Event::Apc(data.to_vec()));
+    }
+
+    #[inline]
     fn push_title(&mut self) {
         trace!("Pushing '{:?}' onto title stack", self.title);
 
