@@ -485,6 +485,48 @@ fn clamp_ratio(ratio: f32, span: f32) -> f32 {
     ratio.clamp(min_frac, 1.0 - min_frac)
 }
 
+/// Hit-box size of the corner split handle (top-right of every pane).
+const SPLIT_HANDLE_SIZE: f32 = 18.0;
+/// Visible grip square drawn inside that hit box.
+const SPLIT_GRIP: f32 = 10.0;
+/// Resting colour of the split grip.
+const SPLIT_HANDLE_COLOR: [f32; 4] = [0.34, 0.34, 0.40, 1.0];
+/// Minimum drag distance before a corner gesture commits a split.
+const SPLIT_GESTURE_THRESHOLD: f32 = 24.0;
+
+/// The drawn grip square inside a pane's top-right corner handle.
+fn split_grip_rect(pane: PaneRect) -> [f32; 4] {
+    let inset = (SPLIT_HANDLE_SIZE - SPLIT_GRIP) / 2.0;
+    [
+        pane.x + pane.w - SPLIT_HANDLE_SIZE + inset,
+        pane.y + inset,
+        SPLIT_GRIP,
+        SPLIT_GRIP,
+    ]
+}
+
+/// True if a point is inside a pane's corner split-handle hit box.
+fn in_split_handle(pane: PaneRect, x: f32, y: f32) -> bool {
+    x >= pane.x + pane.w - SPLIT_HANDLE_SIZE
+        && x <= pane.x + pane.w
+        && y >= pane.y
+        && y <= pane.y + SPLIT_HANDLE_SIZE
+}
+
+/// Decide a split direction from a corner-drag delta: a mostly-vertical
+/// drag (down) stacks the panes; a mostly-horizontal drag (left) sets them
+/// side by side. `None` until the drag passes the commit threshold.
+fn gesture_dir(dx: f32, dy: f32) -> Option<SplitDir> {
+    if dx.hypot(dy) < SPLIT_GESTURE_THRESHOLD {
+        return None;
+    }
+    if dy.abs() > dx.abs() {
+        Some(SplitDir::Horizontal)
+    } else {
+        Some(SplitDir::Vertical)
+    }
+}
+
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
 /// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
 fn pane_grid(rect: PaneRect, cell_advance: f32) -> (usize, usize) {
@@ -501,7 +543,9 @@ fn pane_tab_layout(rect: PaneRect, n: usize, active: usize) -> Vec<(f32, f32, bo
     if n == 0 {
         return Vec::new();
     }
-    let per = (rect.w / n as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+    // Reserve the top-right corner for the split handle.
+    let avail = (rect.w - SPLIT_HANDLE_SIZE).max(TAB_MIN_WIDTH);
+    let per = (avail / n as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
     (0..n)
         .map(|i| (rect.x + i as f32 * per, per, i == active))
         .collect()
@@ -654,6 +698,12 @@ struct DividerDrag {
     dir: SplitDir,
 }
 
+/// An in-progress corner-handle drag that will split `pid` on release.
+struct SplitGesture {
+    pid: PaneId,
+    start: (f32, f32),
+}
+
 pub struct Renderer {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
@@ -706,6 +756,8 @@ pub struct Renderer {
     clipboard: Option<Clipboard>,
     /// When Some, a split divider is being dragged to resize.
     divider_drag: Option<DividerDrag>,
+    /// When Some, a corner handle is being dragged to split a pane.
+    split_gesture: Option<SplitGesture>,
     /// Last cursor icon set on the window — set only on change.
     cursor_icon: CursorIcon,
 
@@ -875,6 +927,7 @@ impl Renderer {
             mouse_pos: (0.0, 0.0),
             clipboard,
             divider_drag: None,
+            split_gesture: None,
             cursor_icon: CursorIcon::Default,
             bell_flash_until: None,
             focused: true,
@@ -1626,15 +1679,33 @@ impl Renderer {
             return;
         }
 
-        // Resize cursor while hovering a divider (and not dragging one).
-        let desired = match self
-            .root_ref()
-            .divider_at(self.content_rect(), x, y)
-            .map(|(_, _, d)| d)
-        {
-            Some(SplitDir::Vertical) => CursorIcon::ColResize,
-            Some(SplitDir::Horizontal) => CursorIcon::RowResize,
-            None => CursorIcon::Default,
+        // Dragging a corner split handle — refresh so the preview tracks.
+        if self.split_gesture.is_some() {
+            if self.cursor_icon != CursorIcon::Grabbing {
+                self.cursor_icon = CursorIcon::Grabbing;
+                self.window.set_cursor(CursorIcon::Grabbing);
+            }
+            self.window.request_redraw();
+            return;
+        }
+
+        // Cursor feedback: grab over a corner handle, resize over a divider.
+        let over_handle = self
+            .pane_at(x, y)
+            .map(|(_, r)| in_split_handle(r, x, y))
+            .unwrap_or(false);
+        let desired = if over_handle {
+            CursorIcon::Grab
+        } else {
+            match self
+                .root_ref()
+                .divider_at(self.content_rect(), x, y)
+                .map(|(_, _, d)| d)
+            {
+                Some(SplitDir::Vertical) => CursorIcon::ColResize,
+                Some(SplitDir::Horizontal) => CursorIcon::RowResize,
+                None => CursorIcon::Default,
+            }
         };
         if desired != self.cursor_icon {
             self.cursor_icon = desired;
@@ -1741,6 +1812,21 @@ impl Renderer {
             }
         }
 
+        // A left-press on a pane's top-right corner handle starts a split
+        // gesture (drag down to stack, drag left for side by side).
+        if button == MouseButton::Left {
+            if let Some((pid, prect)) = self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
+                if in_split_handle(prect, self.mouse_pos.0, self.mouse_pos.1) {
+                    self.split_gesture = Some(SplitGesture {
+                        pid,
+                        start: self.mouse_pos,
+                    });
+                    self.window.request_redraw();
+                    return;
+                }
+            }
+        }
+
         // Tab-bar hit test first — a click in a pane's own tab bar strip
         // switches / closes that pane's tabs and never starts a selection.
         if let Some((pid, prect)) = self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
@@ -1836,6 +1922,21 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
+        // Finish a corner split gesture: a drag past the threshold commits
+        // the split (down → stacked, left → side by side).
+        if let Some(g) = self.split_gesture.take() {
+            let dx = self.mouse_pos.0 - g.start.0;
+            let dy = self.mouse_pos.1 - g.start.1;
+            if let Some(dir) = gesture_dir(dx, dy) {
+                self.focus_pane(g.pid);
+                self.split_active(dir);
+            }
+            self.cursor_icon = CursorIcon::Default;
+            self.window.set_cursor(CursorIcon::Default);
+            self.window.request_redraw();
+            return;
+        }
+
         // End a divider drag, if one is in progress.
         if self.divider_drag.is_some() {
             self.divider_drag = None;
@@ -2228,6 +2329,16 @@ impl Renderer {
             rect: [rect.x, bar_top + TAB_BAR_HEIGHT, rect.w, 1.0],
             color: TAB_SEPARATOR,
         });
+        // Corner split handle — drag it to split this pane.
+        let grip_active = self.split_gesture.as_ref().map(|g| g.pid) == Some(pid);
+        out.push(RectInstance {
+            rect: split_grip_rect(rect),
+            color: if grip_active {
+                TAB_ACTIVE_UNDERLINE
+            } else {
+                SPLIT_HANDLE_COLOR
+            },
+        });
         slots
     }
 
@@ -2350,6 +2461,29 @@ impl Renderer {
 
         // Split divider seams drawn on top of pane content.
         collect_dividers(self.root_ref(), self.content_rect(), &mut above);
+
+        // Live preview of a corner-handle split gesture: a gold line where
+        // the split would land once released.
+        if let Some(g) = self.split_gesture.as_ref() {
+            let dx = self.mouse_pos.0 - g.start.0;
+            let dy = self.mouse_pos.1 - g.start.1;
+            if let Some(dir) = gesture_dir(dx, dy) {
+                if let Some((_, r)) = layout.iter().find(|(id, _)| *id == g.pid) {
+                    let preview = match dir {
+                        SplitDir::Horizontal => {
+                            [r.x, r.y + r.h / 2.0 - 1.0, r.w, 2.0]
+                        }
+                        SplitDir::Vertical => {
+                            [r.x + r.w / 2.0 - 1.0, r.y, 2.0, r.h]
+                        }
+                    };
+                    above.push(RectInstance {
+                        rect: preview,
+                        color: TAB_ACTIVE_UNDERLINE,
+                    });
+                }
+            }
+        }
 
         // Find bar background — a floating box at the active pane's
         // top-right. The query text is drawn by the tab text renderer.
