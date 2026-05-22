@@ -438,19 +438,49 @@ this whole thing is *for*.
 
 ## Sequencing summary
 
+Re-sequenced mid-Phase-1 (see the OSC 7 note below):
+
 ```
-Bundle 2   tabs + OSC 7                    ──┐
+Bundle 2   tabs                            ──┐  [shipped]
+Bundle 4a  find / hyperlinks / right-click   │  [shipped]
                                               │   ↓ unblocks daily use
-Bundle 4   find / hyperlinks / right-click /  │
-           config                             │
-                                              │   ↓ unblocks "feels native"
 Bundle 3   splits                             │
-                                              │   ↓ unblocks "Phase 2 is feasible"
+Bundle 4b  config file                        │
+                                              │   ↓ unblocks "feels native"
 Bundle 5   Kitty graphics                     │
+                                              │
+Audit      memory + performance pass          │   ← hard gate
                                               │
                                               ▼
                                        Phase 2 — the Model
+                                       (vte fork: OSC 7 + OSC 133)
 ```
+
+**OSC 7 moved to the Phase 2 boundary.** Tracking the shell's cwd needs a
+vendored, patched `vte` (0.15 doesn't dispatch OSC 7). Phase 2's Model is
+built on OSC 133, which `vte` *also* doesn't dispatch. One `vte` fork
+serves both — so it happens once, at Phase 2 kickoff, rather than as a
+separate Phase 1 detour. Until then tab titles show the process name only.
+
+## The pre-Phase-2 audit (hard gate)
+
+Before any Phase 2 code, a deliberate memory + performance pass. "Lovely"
+means quiet and lean; we don't carry bloat across the line.
+
+- **Memory:** measure resident set in normal use (target well under
+  250 MB with a handful of tabs). Account for where it goes — cosmic-text
+  glyph atlas, per-tab alacritty grid + scrollback, wgpu pipelines, Rust
+  allocator. Tune: scrollback default, snapshot Vec pre-sizing, atlas
+  trim cadence. Confirm no leak — RSS flat after an hour of churn.
+- **Performance:** frame time (snapshot ms / render ms / GPU submit ms),
+  idle CPU (must be ~0 — event-driven), input-to-paint latency. No
+  regressions from the tabs / splits / find work.
+- **Output:** a short findings note + concrete fixes applied. The
+  RSS kill-switch stays as the backstop; the audit is about not needing
+  it.
+
+When the audit passes and the Phase 1 exit criteria above all hold, Phase 1
+closes and Phase 2 — the Model — begins.
 
 I'll execute one bundle per push, aligned with this plan, unless something
 in the live work tells us to re-order.
