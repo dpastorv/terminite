@@ -96,9 +96,12 @@ pub struct ModeFlags {
     pub mouse_drag: bool,
     pub mouse_motion: bool,
     pub sgr_mouse: bool,
-    #[allow(dead_code)]
     pub alt_screen: bool,
     pub focus_in_out: bool,
+    /// DECCKM — the app wants `ESC O A/B/C/D` for arrow keys instead of
+    /// `ESC [ A/B/C/D`. vi-style TUIs flip this on; the wheel→arrow
+    /// translation in alt screen has to match.
+    pub app_cursor: bool,
 }
 
 #[derive(Debug)]
@@ -442,6 +445,7 @@ impl LiveTerm {
             sgr_mouse: m.contains(TermMode::SGR_MOUSE),
             alt_screen: m.contains(TermMode::ALT_SCREEN),
             focus_in_out: m.contains(TermMode::FOCUS_IN_OUT),
+            app_cursor: m.contains(TermMode::APP_CURSOR),
         }
     }
 

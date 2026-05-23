@@ -2243,12 +2243,51 @@ impl Renderer {
             None => return,
         };
 
+        let mode = self.pane_tab_mut(pid).live_term.mode_flags();
+
+        // Alt-screen TUIs (nano, vim, less, htop, man) replace the main
+        // screen with their own — alacritty's scrollback is empty there,
+        // so the normal scroll path is a no-op and the pane feels dead
+        // to the wheel. When the app isn't asking for mouse reports
+        // either, translate wheel events into Up/Down arrow key bytes
+        // so its own scroll machinery responds. Matches what iTerm2 /
+        // Alacritty / kitty do. The wheel acts on the pane under the
+        // cursor; we route to that pane's PTY regardless of focus.
+        let mouse_mode_active = mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion;
+        if mode.alt_screen && !mouse_mode_active {
+            let lines = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 3.0,
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 / line_height,
+            };
+            // Cap at a sane per-event maximum so a runaway delta can't
+            // flood the PTY with hundreds of arrow keys.
+            let count = (lines.abs().round() as usize).min(100);
+            if count == 0 {
+                return;
+            }
+            // Application cursor mode (DECCKM): `ESC O A/B`. Default
+            // mode: `ESC [ A/B`. Wheel-up = scroll content down in the
+            // viewport = Up arrow.
+            let seq: &[u8] = match (lines > 0.0, mode.app_cursor) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1b[A",
+                (false, true) => b"\x1bOB",
+                (false, false) => b"\x1b[B",
+            };
+            let mut bytes = Vec::with_capacity(seq.len() * count);
+            for _ in 0..count {
+                bytes.extend_from_slice(seq);
+            }
+            self.pane_tab_mut(pid).live_term.write(bytes);
+            self.window.request_redraw();
+            return;
+        }
+
         // If the foreground app wants scroll reports (vim, less, htop in
         // mouse mode), forward instead of scrolling the viewport. Reporting
         // only routes when the hovered pane is also the focused one — the
         // cell math resolves against the active pane's rect.
-        let mode = self.pane_tab_mut(pid).live_term.mode_flags();
-        if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
+        if mouse_mode_active {
             if pid != self.active_pane {
                 return;
             }
