@@ -151,7 +151,15 @@ pub fn parse_kitty(apc: &[u8]) -> Option<KittyCommand> {
     let payload = if payload_b64.is_empty() {
         Vec::new()
     } else {
-        BASE64_STANDARD.decode(payload_b64).ok()?
+        // Tolerate whitespace: macOS `base64` line-wraps by default and
+        // shells happily slice newlines into payloads. The Kitty spec
+        // doesn't allow whitespace, but in practice it's everywhere.
+        let cleaned: Vec<u8> = payload_b64
+            .iter()
+            .copied()
+            .filter(|b| !b.is_ascii_whitespace())
+            .collect();
+        BASE64_STANDARD.decode(&cleaned).ok()?
     };
 
     Some(KittyCommand {
@@ -309,6 +317,18 @@ mod tests {
     #[test]
     fn rejects_bad_base64() {
         assert!(parse_kitty(b"Ga=T,f=100;not-base64!!!").is_none());
+    }
+
+    #[test]
+    fn tolerates_whitespace_in_base64() {
+        // macOS `base64` wraps at 76 chars; the payload may include
+        // newlines. Both should still decode to the same bytes.
+        let no_ws = parse_kitty(b"Gf=100,a=T;UE5HPw==").unwrap();
+        let with_nl = parse_kitty(b"Gf=100,a=T;UE5H\nPw==").unwrap();
+        let with_spaces = parse_kitty(b"Gf=100,a=T;UE5H Pw==").unwrap();
+        assert_eq!(no_ws.payload, b"PNG?");
+        assert_eq!(with_nl.payload, b"PNG?");
+        assert_eq!(with_spaces.payload, b"PNG?");
     }
 
     #[test]
