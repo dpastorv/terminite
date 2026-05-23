@@ -83,12 +83,12 @@ impl Default for Config {
         Self {
             font_family: String::new(),
             font_size: 28.0,
-            // Defaults: enough room on the left for a gutter strip wider
-            // than `B999` at the chrome font, plus breathing space between
-            // the label and the content. Right/top/bottom stay modest.
-            padding: Padding { left: 40.0, right: 12.0, top: 8.0, bottom: 8.0 },
-            gutter_left: 10.0,
-            gutter_gap: 4.0,
+            // Defaults dialed in via the hot-reload loop — Daniel's
+            // tuned values land more breathing room around the content
+            // and a noticeable gap between the block label and the line.
+            padding: Padding { left: 55.0, right: 24.0, top: 16.0, bottom: 16.0 },
+            gutter_left: 8.0,
+            gutter_gap: 8.0,
             line_height: 1.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
@@ -337,7 +337,7 @@ mod tests {
         // A non-numeric value is ignored entirely — default kept.
         let mut c = Config::default();
         c.apply("padding_left = huge\nline_height = wide\n");
-        assert_eq!(c.padding.left, 40.0);
+        assert_eq!(c.padding.left, 55.0);
         assert_eq!(c.line_height, 1.0);
     }
 
@@ -347,7 +347,7 @@ mod tests {
         // should leave defaults intact rather than half-apply.
         let mut c = Config::default();
         c.apply("padding = 24\n");
-        assert_eq!(c.padding.left, 40.0);
-        assert_eq!(c.padding.right, 12.0);
+        assert_eq!(c.padding.left, 55.0);
+        assert_eq!(c.padding.right, 24.0);
     }
 }

@@ -16,23 +16,23 @@ font_size = 28
 # clamped to 0–400). Hot-reloaded on focus-gain — edit, click back into
 # terminite, the new pad applies. The left edge has extra room by
 # default to accommodate the block-label gutter (see `gutter_left`).
-padding_left = 40
-padding_right = 12
-padding_top = 8
-padding_bottom = 8
+padding_left = 55
+padding_right = 24
+padding_top = 16
+padding_bottom = 16
 
 # Block-label (`B7`) minimum-left inset from the pane's left edge, in
 # pixels (clamped to 0–400). Labels are right-aligned against the
 # content edge; this is where they start clipping if the digit count
 # outgrows the available strip. Widen `padding_left` if you see
 # leading characters of long ids getting cut. Hot-reloaded.
-gutter_left = 10
+gutter_left = 8
 
 # Space between the block label's right edge and the start of the line
 # content, in pixels (clamped to 0–400). Push the label further off
 # the line without widening the content rect — raise this to give the
 # label more breathing room from what it's tagging. Hot-reloaded.
-gutter_gap = 4
+gutter_gap = 8
 
 # Multiplier on the font's natural line height. 1.0 = no change; <1 packs
 # lines tighter, >1 spreads them out. Clamped to 0.7–3.0. Hot-reloaded.
