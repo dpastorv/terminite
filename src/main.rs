@@ -9,6 +9,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+mod blocks;
 mod config;
 mod images;
 mod palette;
@@ -55,6 +56,16 @@ pub enum UserEvent {
     /// the main thread for parsing + decoding so the PTY thread / term
     /// lock stays free during the work.
     Apc(TabId, Vec<u8>),
+    /// OSC 133 shell-integration mark. `kind` is the FinalTerm letter
+    /// (`A`/`B`/`C`/`D`); `exit` carries the exit code on a `D` mark;
+    /// `line` is the cursor's absolute line at fire time, for scroll-
+    /// anchored block placement.
+    ShellIntegration {
+        tab_id: TabId,
+        kind: char,
+        exit: Option<i32>,
+        line: i32,
+    },
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -168,6 +179,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::Apc(tab_id, data) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_apc(tab_id, &data);
+                }
+            }
+            UserEvent::ShellIntegration { tab_id, kind, exit, line } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_shell_integration(tab_id, kind, exit, line);
                 }
             }
             UserEvent::Exit => event_loop.exit(),

@@ -170,10 +170,14 @@ impl EventListener for Notifier {
                     }
                 }
             }
-            TermEvent::ShellIntegration { .. } => {
-                // OSC 133 command-lifecycle marks land here. The Phase 2
-                // block Model is built on these; for now the dispatch path
-                // is proven end-to-end and the signal is parked.
+            TermEvent::ShellIntegration { kind, exit, line } => {
+                // OSC 133 → main thread, where it feeds the block Model.
+                let _ = self.proxy.send_event(UserEvent::ShellIntegration {
+                    tab_id: self.tab_id,
+                    kind: *kind,
+                    exit: *exit,
+                    line: *line,
+                });
             }
             TermEvent::Apc(data) => {
                 // APC payloads (Kitty graphics) — move to the main thread

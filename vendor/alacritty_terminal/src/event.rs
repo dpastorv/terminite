@@ -27,8 +27,10 @@ pub enum Event {
 
     /// OSC 133: a shell-integration mark. `kind` is the FinalTerm letter
     /// (`A` prompt-start, `B` prompt-end, `C` output-start, `D` finished);
-    /// `exit` carries the exit code on a `D` mark. (terminite fork.)
-    ShellIntegration { kind: char, exit: Option<i32> },
+    /// `exit` carries the exit code on a `D` mark; `line` is the cursor's
+    /// absolute Line at fire time (cursor row minus display offset), for
+    /// scroll-anchored block placement. (terminite fork.)
+    ShellIntegration { kind: char, exit: Option<i32>, line: i32 },
 
     /// An APC payload (Kitty graphics et al.) — the bytes between `ESC _`
     /// and ST. Capped by vte at `APC_MAX_BYTES`. (terminite fork.)
@@ -81,8 +83,8 @@ impl Debug for Event {
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),
             Event::CwdChanged(uri) => write!(f, "CwdChanged({uri})"),
-            Event::ShellIntegration { kind, exit } => {
-                write!(f, "ShellIntegration({kind}, {exit:?})")
+            Event::ShellIntegration { kind, exit, line } => {
+                write!(f, "ShellIntegration({kind}, {exit:?}, line={line})")
             },
             Event::Apc(data) => write!(f, "Apc({} bytes)", data.len()),
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),

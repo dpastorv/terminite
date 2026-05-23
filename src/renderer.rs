@@ -16,6 +16,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
+use crate::blocks::BlockStore;
 use crate::config::{BellStyle, Config};
 use crate::images::{self, Action};
 use crate::palette::{color_to_floats, DEFAULT_FG};
@@ -185,6 +186,9 @@ struct Tab {
     /// one image per tab at the pane's top-left, scaled to fit. Dropped
     /// when the tab drops (closes the GPU texture too).
     image: Option<TextureImage>,
+    /// Per-tab block Model — populated from OSC 133 marks. Phase 2's
+    /// shared coordinate system (`B7`) for the pair lives here.
+    blocks: BlockStore,
 }
 
 impl Tab {
@@ -217,6 +221,7 @@ impl Tab {
             buffer_dirty: true,
             autoscroll_dir: None,
             image: None,
+            blocks: BlockStore::new(),
         }
     }
 }
@@ -2361,6 +2366,25 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Apply one OSC 133 shell-integration mark to a tab's block store.
+    /// The block Model is Phase 2's spine — `Bn` labels render in the
+    /// pane gutter from here. Bounded: per-tab block cap at
+    /// `MAX_BLOCKS_PER_TAB`; label buffers are tiny pre-shaped strings.
+    pub fn handle_shell_integration(
+        &mut self,
+        tab_id: TabId,
+        kind: char,
+        exit: Option<i32>,
+        line: i32,
+    ) {
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
+            tab.blocks.on_mark(kind, exit, line, &mut self.font_system);
+        }
+        self.window.request_redraw();
+    }
+
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
         if title.trim().is_empty() {
             let mut tabs: Vec<&mut Tab> = Vec::new();
@@ -2934,15 +2958,24 @@ impl Renderer {
         {
             let root = self.root.as_ref().expect("pane tree present");
             let pad = self.pad;
+            let line_height = self.line_height;
             let active_color = Color::rgb(230, 230, 240);
             let inactive_color = Color::rgb(140, 140, 160);
             let close_color = Color::rgb(160, 160, 170);
+            // Subdued; a block label is chrome, not content.
+            let block_label_color = Color::rgb(110, 110, 130);
             let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
             let mut tab_areas: Vec<TextArea> = Vec::new();
             for d in &draws {
                 let pane = root.find(d.pid).expect("drawn pane present");
+                let pane_rect = layout
+                    .iter()
+                    .find(|(id, _)| *id == d.pid)
+                    .map(|(_, r)| *r)
+                    .expect("drawn pane present in layout");
+                let tab_ref = pane.active_tab_ref();
                 content_areas.push(TextArea {
-                    buffer: &pane.active_tab_ref().text_buffer,
+                    buffer: &tab_ref.text_buffer,
                     left: d.text_left,
                     top: d.text_top,
                     scale: 1.0,
@@ -2978,12 +3011,7 @@ impl Renderer {
                 // Pane's image (v1): top-left of content area, scaled to
                 // fit (no upscaling). Clone is cheap — wgpu BindGroup is
                 // ref-counted internally.
-                if let Some(img) = pane.active_tab_ref().image.as_ref() {
-                    let pane_rect = layout
-                        .iter()
-                        .find(|(id, _)| *id == d.pid)
-                        .map(|(_, r)| *r)
-                        .expect("drawn pane present in layout");
+                if let Some(img) = tab_ref.image.as_ref() {
                     let ox = pane_rect.x + pad;
                     let oy = pane_rect.y + TAB_BAR_HEIGHT + pad;
                     let max_w = (pane_rect.x + pane_rect.w - ox).max(1.0);
@@ -2995,6 +3023,37 @@ impl Renderer {
                         rect: [ox, oy, nw * scale, nh * scale],
                     });
                     texture_bgs.push(img.bind_group().clone());
+                }
+                // Block IDs (`Bn`) in the pane's left-gutter strip. Same
+                // coordinate machinery as selections: anchor_line is the
+                // scroll-anchored abs row; vl = abs + display_offset gives
+                // the current screen row.
+                let y_shift = tab_ref.pixel_offset;
+                let display_offset =
+                    tab_ref.live_term.offset_and_history().0 as i32;
+                let rows = tab_ref.rows as i32;
+                let py = pane_rect.y + TAB_BAR_HEIGHT + pad;
+                for block in tab_ref.blocks.iter() {
+                    let Some(abs) = block.anchor_line() else { continue };
+                    let vl = abs + display_offset;
+                    if vl < 0 || vl >= rows {
+                        continue;
+                    }
+                    let top = py + vl as f32 * line_height + y_shift;
+                    tab_areas.push(TextArea {
+                        buffer: &block.label_buffer,
+                        left: pane_rect.x + 2.0,
+                        top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: pane_rect.x as i32,
+                            top: top as i32,
+                            right: (pane_rect.x + pad) as i32,
+                            bottom: (top + line_height) as i32,
+                        },
+                        default_color: block_label_color,
+                        custom_glyphs: &[],
+                    });
                 }
             }
             // The find bar's text rides in the tab text renderer.

@@ -2239,7 +2239,11 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn shell_integration(&mut self, kind: char, exit: Option<i32>) {
-        self.event_proxy.send_event(Event::ShellIntegration { kind, exit });
+        // Capture the cursor's absolute line at fire time so terminite can
+        // anchor a block to the row even after the user scrolls. Matches
+        // terminite's selection coordinate convention.
+        let line = self.grid.cursor.point.line.0 - self.grid.display_offset() as i32;
+        self.event_proxy.send_event(Event::ShellIntegration { kind, exit, line });
     }
 
     #[inline]
