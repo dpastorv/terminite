@@ -2272,6 +2272,24 @@ impl Renderer {
             MouseScrollDelta::LineDelta(_, y) => y * 3.0 * line_height,
             MouseScrollDelta::PixelDelta(p) => p.y as f32,
         };
+
+        // Boundary block: once we're at the top of scrollback or the live
+        // bottom, more events in that direction can't move the term. The
+        // "actual != whole" zero-out logic below catches it on the
+        // line-pop step, but on a fast trackpad burst (events at ~120 Hz)
+        // each event accumulates a visible sub-line `pixel_offset` before
+        // getting zeroed — the user sees the text shaking at the
+        // boundary. Drop wheel events whose direction is blocked AND
+        // whose existing residual is in the same direction (so a tiny
+        // reversal still goes through to undo the smooth shift).
+        let (cur_offset, history) = self.pane_tab_mut(pid).live_term.offset_and_history();
+        let residual = self.pane_tab_mut(pid).pixel_offset;
+        let blocked_up = pixels > 0.0 && cur_offset >= history && residual >= 0.0;
+        let blocked_down = pixels < 0.0 && cur_offset == 0 && residual <= 0.0;
+        if blocked_up || blocked_down {
+            return;
+        }
+
         self.pane_tab_mut(pid).pixel_offset += pixels;
 
         // Pop whole lines into the term; the remainder stays as a sub-line
