@@ -13,6 +13,7 @@ mod blocks;
 mod config;
 mod images;
 mod palette;
+mod proto;
 mod rect;
 mod renderer;
 mod term;
@@ -66,6 +67,18 @@ pub enum UserEvent {
         exit: Option<i32>,
         line: i32,
     },
+    /// A new module connected to the proto socket. Drops any prior
+    /// subscriber slot — v1 is single-client.
+    ProtoConnect,
+    /// A request line arrived on the proto socket. The reply (and any
+    /// future subscription events) ride `out` back to the connection's
+    /// writer.
+    ProtoRequest {
+        request: proto::Request,
+        out: std::sync::mpsc::SyncSender<proto::OutMessage>,
+    },
+    /// The connected module disconnected. Clears the subscriber slot.
+    ProtoDisconnect,
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -115,6 +128,12 @@ struct Terminite {
     renderer: Option<Renderer>,
     modifiers: ModifiersState,
     proxy: EventLoopProxy<UserEvent>,
+    /// Module-protocol server. Dropping it removes the socket file.
+    /// `None` if the bind failed at startup — terminite still runs,
+    /// just without the module surface available. Held only for its
+    /// `Drop` impl; never read.
+    #[allow(dead_code)]
+    proto_server: Option<proto::ProtoServer>,
 }
 
 impl ApplicationHandler<UserEvent> for Terminite {
@@ -184,6 +203,21 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::ShellIntegration { tab_id, kind, exit, line } => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_shell_integration(tab_id, kind, exit, line);
+                }
+            }
+            UserEvent::ProtoConnect => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_proto_connect();
+                }
+            }
+            UserEvent::ProtoRequest { request, out } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_proto_request(request, out);
+                }
+            }
+            UserEvent::ProtoDisconnect => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_proto_disconnect();
                 }
             }
             UserEvent::Exit => event_loop.exit(),
@@ -451,10 +485,16 @@ fn main() {
         .build()
         .expect("terminite: failed to start the event loop");
     let proxy = event_loop.create_proxy();
+    // Stand up the module-protocol socket before the window so a
+    // late-arriving client doesn't race the listener. A `None` here
+    // means the bind failed; terminite still runs, just without the
+    // module surface — see proto::ProtoServer::start for the cases.
+    let proto_server = proto::ProtoServer::start(proxy.clone());
     let mut terminite = Terminite {
         renderer: None,
         modifiers: ModifiersState::default(),
         proxy,
+        proto_server,
     };
     event_loop
         .run_app(&mut terminite)

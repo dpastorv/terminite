@@ -60,6 +60,16 @@ impl Block {
     }
 }
 
+/// What a single `on_mark` call transitioned. The proto subscriber
+/// needs to fire events on block-open and block-close — `MarkEffect`
+/// surfaces both transitions from one call, since an `A` mark can do
+/// both (close a previously-open block lossily, then open a fresh one).
+#[derive(Default, Debug)]
+pub struct MarkEffect {
+    pub closed: Option<(u32, Option<i32>)>,
+    pub opened: Option<u32>,
+}
+
 /// All blocks belonging to one Tab. `open` is the block being built; it
 /// graduates to `closed` on the `D` mark (or when the next `A` arrives
 /// without a prior `D` — we don't lose blocks just because a shell skips
@@ -85,15 +95,20 @@ impl BlockStore {
         exit: Option<i32>,
         line: i32,
         font_system: &mut FontSystem,
-    ) {
+    ) -> MarkEffect {
+        let mut effect = MarkEffect::default();
         match kind {
             'A' => {
                 // A prior open block didn't see a 'D' — graduate it
                 // lossily rather than losing it.
                 if let Some(open) = self.open.take() {
+                    let id = open.id;
                     self.push_closed(open);
+                    effect.closed = Some((id, None));
                 }
-                self.open = Some(self.fresh_block(Some(line), None, font_system));
+                let b = self.fresh_block(Some(line), None, font_system);
+                effect.opened = Some(b.id);
+                self.open = Some(b);
             }
             'B' => {
                 if let Some(b) = self.open.as_mut() {
@@ -107,7 +122,9 @@ impl BlockStore {
                     // Some shells emit `C` without a prior `A`. Open a
                     // block anchored at output-start — its prompt range
                     // stays unknown, which is fine.
-                    self.open = Some(self.fresh_block(None, Some(line), font_system));
+                    let b = self.fresh_block(None, Some(line), font_system);
+                    effect.opened = Some(b.id);
+                    self.open = Some(b);
                 }
             }
             'D' => {
@@ -115,12 +132,14 @@ impl BlockStore {
                     b.output_end_line = Some(line);
                     b.exit_code = exit;
                     b.finished_at = Some(Instant::now());
+                    effect.closed = Some((b.id, b.exit_code));
                     self.push_closed(b);
                 }
                 // `D` with no open block: drop. There's nothing to close.
             }
             _ => {} // unknown / future mark letter
         }
+        effect
     }
 
     /// Every block, oldest first, including the currently-open one.

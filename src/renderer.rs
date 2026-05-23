@@ -423,6 +423,22 @@ impl PaneNode {
         }
     }
 
+    /// Immutable variant of `all_tabs_mut` — read-only walk of every
+    /// tab in the tree.
+    fn all_tabs<'a>(&'a self, out: &mut Vec<&'a Tab>) {
+        match self {
+            PaneNode::Leaf { pane, .. } => {
+                for t in pane.tabs.iter() {
+                    out.push(t);
+                }
+            }
+            PaneNode::Split { first, second, .. } => {
+                first.all_tabs(out);
+                second.all_tabs(out);
+            }
+        }
+    }
+
     /// Find the split divider under a point. Returns the path to the owning
     /// `Split`, that split's outer rect, and its orientation.
     fn divider_at(
@@ -577,6 +593,58 @@ fn split_ratio_from_cursor(pane: PaneRect, dir: SplitDir, cx: f32, cy: f32) -> f
 /// the grid must be bounded at the source.
 const MAX_GRID_COLS: usize = 600;
 const MAX_GRID_ROWS: usize = 400;
+
+// ── Proto helpers ────────────────────────────────────────────────────────
+
+fn block_to_info(b: &crate::blocks::Block) -> crate::proto::BlockInfo {
+    crate::proto::BlockInfo {
+        id: b.id,
+        exit_code: b.exit_code,
+        prompt_line: b.prompt_line,
+        command_end_line: b.command_end_line,
+        output_start_line: b.output_start_line,
+        output_end_line: b.output_end_line,
+    }
+}
+
+/// Extract the command text for a block, converting from session-absolute
+/// line coordinates back to alacritty's `Line` frame using the current
+/// `history_size`. Returns `None` if the block lacks the marks needed to
+/// bracket a range (e.g. `C` arrived without `A`).
+fn block_command_text(tab: &Tab, block: &crate::blocks::Block) -> Option<String> {
+    let start_abs = block.prompt_line?;
+    // Prefer the explicit command-end mark; fall back to output-start.
+    let end_abs = block.command_end_line.or(block.output_start_line)?;
+    if end_abs < start_abs {
+        return None;
+    }
+    let (_, history) = tab.live_term.offset_and_history();
+    let start_line = start_abs - history as i32;
+    let end_line = end_abs - history as i32;
+    let max_col = tab.cols.saturating_sub(1);
+    Some(
+        tab.live_term
+            .extract_text((start_line, 0), (end_line, max_col)),
+    )
+}
+
+/// Extract the output text for a closed block. An open block returns
+/// `None` — the AI should wait for the `block_closed` event, then ask.
+fn block_output_text(tab: &Tab, block: &crate::blocks::Block) -> Option<String> {
+    let start_abs = block.output_start_line?;
+    let end_abs = block.output_end_line?;
+    if end_abs < start_abs {
+        return None;
+    }
+    let (_, history) = tab.live_term.offset_and_history();
+    let start_line = start_abs - history as i32;
+    let end_line = end_abs - history as i32;
+    let max_col = tab.cols.saturating_sub(1);
+    Some(
+        tab.live_term
+            .extract_text((start_line, 0), (end_line, max_col)),
+    )
+}
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
 /// its own `TAB_BAR_HEIGHT` strip off the top, then the per-edge padding.
@@ -871,6 +939,12 @@ pub struct Renderer {
     /// pointing back at this event loop.
     proxy: EventLoopProxy<UserEvent>,
 
+    /// The active proto-subscription writer, if any. v1 = single client;
+    /// the slot holds the channel of the connection that most recently
+    /// called `subscribe`. Events are sent here; a `try_send` failure
+    /// (channel full or disconnected) clears the slot.
+    proto_subscriber: Option<std::sync::mpsc::SyncSender<crate::proto::OutMessage>>,
+
     pub window: Arc<Window>,
 }
 
@@ -1052,6 +1126,7 @@ impl Renderer {
             rss_kill_bytes: rss_kill_threshold_bytes(),
             config,
             proxy,
+            proto_subscriber: None,
             window,
         };
         // Size the first pane's buffers/grid to the laid-out pane rect
@@ -2500,12 +2575,143 @@ impl Renderer {
         exit: Option<i32>,
         line: i32,
     ) {
-        let mut tabs: Vec<&mut Tab> = Vec::new();
-        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
-        if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
-            tab.blocks.on_mark(kind, exit, line, &mut self.font_system);
+        let effect = {
+            let mut tabs: Vec<&mut Tab> = Vec::new();
+            self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+            tabs.into_iter().find(|t| t.id == tab_id).map(|tab| {
+                tab.blocks.on_mark(kind, exit, line, &mut self.font_system)
+            })
+        };
+        // Fan out to the proto subscriber. `closed` fires before `opened`
+        // — that's the order they happened on an A-after-no-D path.
+        if let Some(effect) = effect {
+            if let Some((block_id, exit_code)) = effect.closed {
+                self.proto_emit_event(crate::proto::EventPayload::BlockClosed {
+                    tab_id: tab_id.0,
+                    block_id,
+                    exit_code,
+                });
+            }
+            if let Some(block_id) = effect.opened {
+                self.proto_emit_event(crate::proto::EventPayload::BlockOpened {
+                    tab_id: tab_id.0,
+                    block_id,
+                });
+            }
         }
         self.window.request_redraw();
+    }
+
+    /// A new module connected — drop any prior subscriber (v1 = single
+    /// client; the new one wins).
+    pub fn handle_proto_connect(&mut self) {
+        self.proto_subscriber = None;
+    }
+
+    /// The module disconnected — clear the subscriber slot.
+    pub fn handle_proto_disconnect(&mut self) {
+        self.proto_subscriber = None;
+    }
+
+    /// Handle one parsed request from the proto socket.
+    pub fn handle_proto_request(
+        &mut self,
+        req: crate::proto::Request,
+        out: std::sync::mpsc::SyncSender<crate::proto::OutMessage>,
+    ) {
+        let payload = match req.method.as_str() {
+            "list_tabs" => self.proto_list_tabs(),
+            "list_blocks" => self.proto_list_blocks(&req.params),
+            "get_block" => self.proto_get_block(&req.params),
+            "subscribe" => {
+                self.proto_subscriber = Some(out.clone());
+                crate::proto::OutPayload::Subscribed
+            }
+            other => crate::proto::OutPayload::Error {
+                message: format!("unknown method: {other}"),
+            },
+        };
+        let _ = out.try_send(crate::proto::OutMessage { id: req.id, payload });
+    }
+
+    fn proto_list_tabs(&self) -> crate::proto::OutPayload {
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root.as_ref().expect("pane tree present").all_tabs(&mut all);
+        let tabs = all
+            .iter()
+            .map(|t| crate::proto::TabInfo {
+                tab_id: t.id.0,
+                title: t.title.clone(),
+            })
+            .collect();
+        crate::proto::OutPayload::Tabs { tabs }
+    }
+
+    fn proto_list_blocks(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tab_id".into(),
+            };
+        };
+        let tab_id = TabId(tab_id_u64);
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root.as_ref().expect("pane tree present").all_tabs(&mut all);
+        let Some(tab) = all.into_iter().find(|t| t.id == tab_id) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("no tab with id {tab_id_u64}"),
+            };
+        };
+        let blocks = tab.blocks.iter().map(block_to_info).collect();
+        crate::proto::OutPayload::Blocks { blocks }
+    }
+
+    fn proto_get_block(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tab_id".into(),
+            };
+        };
+        let Some(block_id_u64) = params.get("block_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid block_id".into(),
+            };
+        };
+        let tab_id = TabId(tab_id_u64);
+        let block_id = block_id_u64 as u32;
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root.as_ref().expect("pane tree present").all_tabs(&mut all);
+        let Some(tab) = all.into_iter().find(|t| t.id == tab_id) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("no tab with id {tab_id_u64}"),
+            };
+        };
+        let Some(block) = tab.blocks.find(block_id) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("no block with id {block_id} in tab {tab_id_u64}"),
+            };
+        };
+        let command = block_command_text(tab, block).unwrap_or_default();
+        let output = block_output_text(tab, block).unwrap_or_default();
+        crate::proto::OutPayload::Block {
+            block: crate::proto::BlockData {
+                info: block_to_info(block),
+                command,
+                output,
+            },
+        }
+    }
+
+    fn proto_emit_event(&mut self, event: crate::proto::EventPayload) {
+        let Some(out) = self.proto_subscriber.as_ref() else { return };
+        let msg = crate::proto::OutMessage {
+            id: 0,
+            payload: crate::proto::OutPayload::Event(event),
+        };
+        if out.try_send(msg).is_err() {
+            // Disconnected or queue overflowed — drop the subscriber
+            // rather than let it stall the main thread.
+            self.proto_subscriber = None;
+        }
     }
 
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
