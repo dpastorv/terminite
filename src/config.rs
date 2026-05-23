@@ -20,6 +20,8 @@ const MIN_FONT_SIZE: f32 = 6.0;
 const MAX_FONT_SIZE: f32 = 200.0;
 const MAX_PADDING: f32 = 400.0;
 const MAX_SCROLLBACK: i64 = 50_000;
+const MIN_LINE_HEIGHT: f32 = 0.7;
+const MAX_LINE_HEIGHT: f32 = 3.0;
 
 /// What `\a` (BEL) does.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -28,6 +30,18 @@ pub enum BellStyle {
     Visual,
     /// Nothing at all.
     Silent,
+}
+
+/// Per-edge inset from the pane's pixel rect to the text grid. Sets the
+/// content rectangle on all four sides independently — Daniel asked for
+/// this so the block-label gutter has room to breathe on the left without
+/// throwing off the other edges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Padding {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
 }
 
 /// Resolved configuration. Cheap to clone; the renderer holds one and
@@ -39,8 +53,19 @@ pub struct Config {
     pub font_family: String,
     /// Text size in pixels. Startup-applied.
     pub font_size: f32,
-    /// Inner padding from the pane edge to the text grid. Startup-applied.
-    pub padding: f32,
+    /// Per-edge inset from the pane rect to the text grid. Startup-applied
+    /// (config reload re-reads it, but a relayout is what makes it take
+    /// effect on a running window).
+    pub padding: Padding,
+    /// Block-label inset from the pane's left edge. The label sits in the
+    /// strip `[pane.x + gutter_left, pane.x + padding.left]`, so
+    /// `padding.left - gutter_left` is the space between the label and the
+    /// content; `gutter_left` itself is the space between the pane edge
+    /// and the label.
+    pub gutter_left: f32,
+    /// Multiplier on the font's natural line height. 1.0 = no change.
+    /// Smaller packs lines tighter; larger spreads them out.
+    pub line_height: f32,
     /// Blink the cursor while the window is focused.
     pub cursor_blink: bool,
     /// What the bell does.
@@ -55,7 +80,12 @@ impl Default for Config {
         Self {
             font_family: String::new(),
             font_size: 28.0,
-            padding: 24.0,
+            // Defaults: enough room on the left for a gutter strip wider
+            // than `B999` at the chrome font, plus breathing space between
+            // the label and the content. Right/top/bottom stay modest.
+            padding: Padding { left: 40.0, right: 12.0, top: 8.0, bottom: 8.0 },
+            gutter_left: 10.0,
+            line_height: 1.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
@@ -95,11 +125,34 @@ impl Config {
                         }
                     }
                 }
-                "padding" => {
-                    if let Some(n) = val.as_f32() {
-                        if n.is_finite() {
-                            self.padding = n.clamp(0.0, MAX_PADDING);
-                        }
+                "padding_left" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.padding.left = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "padding_right" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.padding.right = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "padding_top" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.padding.top = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "padding_bottom" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.padding.bottom = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "gutter_left" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.gutter_left = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "line_height" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.line_height = n.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT);
                     }
                 }
                 "cursor_blink" => {
@@ -240,11 +293,21 @@ mod tests {
         c.apply(
             "font_family = \"JetBrains Mono\"\n\
              font_size = 16\n\
-             padding = 18.5\n",
+             padding_left = 18.5\n\
+             padding_right = 6\n\
+             padding_top = 4\n\
+             padding_bottom = 4\n\
+             gutter_left = 8\n\
+             line_height = 1.25\n",
         );
         assert_eq!(c.font_family, "JetBrains Mono");
         assert_eq!(c.font_size, 16.0); // integer accepted as a float
-        assert_eq!(c.padding, 18.5);
+        assert_eq!(c.padding.left, 18.5);
+        assert_eq!(c.padding.right, 6.0);
+        assert_eq!(c.padding.top, 4.0);
+        assert_eq!(c.padding.bottom, 4.0);
+        assert_eq!(c.gutter_left, 8.0);
+        assert_eq!(c.line_height, 1.25);
     }
 
     #[test]
@@ -252,12 +315,28 @@ mod tests {
         // Out-of-range numbers clamp to the safe bounds — they can't be
         // allowed to drive the Term grid allocation to OOM.
         let mut c = Config::default();
-        c.apply("font_size = 2\nscrollback = 9999999\n");
+        c.apply(
+            "font_size = 2\nscrollback = 9999999\n\
+             padding_left = 99999\nline_height = 0.1\n",
+        );
         assert_eq!(c.font_size, 6.0);
         assert_eq!(c.scrollback, 50_000);
+        assert_eq!(c.padding.left, 400.0);
+        assert_eq!(c.line_height, 0.7);
         // A non-numeric value is ignored entirely — default kept.
         let mut c = Config::default();
-        c.apply("padding = huge\n");
-        assert_eq!(c.padding, 24.0);
+        c.apply("padding_left = huge\nline_height = wide\n");
+        assert_eq!(c.padding.left, 40.0);
+        assert_eq!(c.line_height, 1.0);
+    }
+
+    #[test]
+    fn old_padding_key_is_ignored() {
+        // The single `padding` key was dropped — a stale config with it
+        // should leave defaults intact rather than half-apply.
+        let mut c = Config::default();
+        c.apply("padding = 24\n");
+        assert_eq!(c.padding.left, 40.0);
+        assert_eq!(c.padding.right, 12.0);
     }
 }

@@ -12,9 +12,26 @@ font_family = ""
 # Text size in pixels (clamped to 6–200). Startup-applied.
 font_size = 28
 
-# Inner padding from the pane edge to the text grid, in pixels
-# (clamped to 0–400). Startup-applied.
-padding = 24
+# Per-edge inset from the pane rect to the text grid, in pixels (each
+# clamped to 0–400). Startup-applied. The left edge has extra room by
+# default to accommodate the block-label gutter (see `gutter_left`).
+padding_left = 40
+padding_right = 12
+padding_top = 8
+padding_bottom = 8
+
+# Block-label (`B7`) inset from the pane's left edge, in pixels
+# (clamped to 0–400). The label sits in the strip
+# `[pane.x + gutter_left, pane.x + padding_left]`:
+#   - `gutter_left` controls the gap between the window edge and the label.
+#   - `padding_left - gutter_left` controls the gap between the label and
+#     where the line content begins.
+# Set both knobs to tune the gutter without touching the right/top/bottom.
+gutter_left = 10
+
+# Multiplier on the font's natural line height. 1.0 = no change; <1 packs
+# lines tighter, >1 spreads them out. Clamped to 0.7–3.0.
+line_height = 1.0
 
 # Blink the cursor while the window is focused. Applies immediately.
 cursor_blink = true

@@ -17,7 +17,7 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
 use crate::blocks::BlockStore;
-use crate::config::{BellStyle, Config};
+use crate::config::{BellStyle, Config, Padding};
 use crate::images::{self, Action};
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
@@ -579,10 +579,15 @@ const MAX_GRID_COLS: usize = 600;
 const MAX_GRID_ROWS: usize = 400;
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
-/// its own `TAB_BAR_HEIGHT` strip off the top; padding is top-left only.
-fn pane_grid(rect: PaneRect, cell_advance: f32, line_height: f32, pad: f32) -> (usize, usize) {
-    let avail_w = (rect.w - pad).max(cell_advance);
-    let avail_h = (rect.h - TAB_BAR_HEIGHT - pad).max(line_height);
+/// its own `TAB_BAR_HEIGHT` strip off the top, then the per-edge padding.
+fn pane_grid(
+    rect: PaneRect,
+    cell_advance: f32,
+    line_height: f32,
+    pad: Padding,
+) -> (usize, usize) {
+    let avail_w = (rect.w - pad.left - pad.right).max(cell_advance);
+    let avail_h = (rect.h - TAB_BAR_HEIGHT - pad.top - pad.bottom).max(line_height);
     let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
     let rows = (avail_h / line_height).floor().max(1.0) as usize;
     (cols.min(MAX_GRID_COLS), rows.min(MAX_GRID_ROWS))
@@ -794,7 +799,10 @@ pub struct Renderer {
     /// config's live values may differ after a focus-reload.
     cell_advance: f32,
     line_height: f32,
-    pad: f32,
+    pad: Padding,
+    /// Block-label inset from the pane's left edge. Label sits in the
+    /// strip `[pane.x + gutter_left, pane.x + pad.left]`.
+    gutter_left: f32,
     font_size: f32,
     font_family: String,
     grid_cols: usize,
@@ -912,8 +920,9 @@ impl Renderer {
         let config = Config::load();
         let font_size = config.font_size;
         let font_family = config.font_family.clone();
-        let line_height = (font_size * LINE_H_RATIO).round();
+        let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let pad = config.padding;
+        let gutter_left = config.gutter_left;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -1012,6 +1021,7 @@ impl Renderer {
             cell_advance,
             line_height,
             pad,
+            gutter_left,
             font_size,
             font_family,
             grid_cols: cols,
@@ -1791,8 +1801,8 @@ impl Renderer {
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
         let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
-        let left = apr.x + pad;
-        let top = apr.y + TAB_BAR_HEIGHT + pad;
+        let left = apr.x + pad.left;
+        let top = apr.y + TAB_BAR_HEIGHT + pad.top;
         let cx = (x - left).max(0.0);
         let col = ((cx / self.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
@@ -1930,7 +1940,7 @@ impl Renderer {
             // bottom edge: keep scrolling while the user holds the button
             // there, extending the selection as new content reveals.
             let apr = self.active_pane_rect();
-            let pane_top = apr.y + TAB_BAR_HEIGHT + pad;
+            let pane_top = apr.y + TAB_BAR_HEIGHT + pad.top;
             let pane_bottom = apr.y + apr.h;
             let new_dir = if y < pane_top + AUTOSCROLL_MARGIN_PX {
                 Some(1)
@@ -2639,8 +2649,8 @@ impl Renderer {
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
         let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
-        let left = apr.x + pad;
-        let top = apr.y + TAB_BAR_HEIGHT + pad;
+        let left = apr.x + pad.left;
+        let top = apr.y + TAB_BAR_HEIGHT + pad.top;
         if x < left {
             return None;
         }
@@ -3012,10 +3022,11 @@ impl Renderer {
                 // fit (no upscaling). Clone is cheap — wgpu BindGroup is
                 // ref-counted internally.
                 if let Some(img) = tab_ref.image.as_ref() {
-                    let ox = pane_rect.x + pad;
-                    let oy = pane_rect.y + TAB_BAR_HEIGHT + pad;
-                    let max_w = (pane_rect.x + pane_rect.w - ox).max(1.0);
-                    let max_h = (pane_rect.y + pane_rect.h - oy).max(1.0);
+                    let ox = pane_rect.x + pad.left;
+                    let oy = pane_rect.y + TAB_BAR_HEIGHT + pad.top;
+                    let max_w = (pane_rect.x + pane_rect.w - ox - pad.right).max(1.0);
+                    let max_h =
+                        (pane_rect.y + pane_rect.h - oy - pad.bottom).max(1.0);
                     let nw = img.width as f32;
                     let nh = img.height as f32;
                     let scale = (max_w / nw).min(max_h / nh).min(1.0);
@@ -3035,7 +3046,8 @@ impl Renderer {
                 let display_offset = display_offset as i32;
                 let history = history as i32;
                 let rows = tab_ref.rows as i32;
-                let py = pane_rect.y + TAB_BAR_HEIGHT + pad;
+                let py = pane_rect.y + TAB_BAR_HEIGHT + pad.top;
+                let gutter_left = self.gutter_left;
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
                     let vl = abs - history + display_offset;
@@ -3045,13 +3057,13 @@ impl Renderer {
                     let top = py + vl as f32 * line_height + y_shift;
                     tab_areas.push(TextArea {
                         buffer: &block.label_buffer,
-                        left: pane_rect.x + 2.0,
+                        left: pane_rect.x + gutter_left,
                         top,
                         scale: 1.0,
                         bounds: TextBounds {
-                            left: pane_rect.x as i32,
+                            left: (pane_rect.x + gutter_left) as i32,
                             top: top as i32,
-                            right: (pane_rect.x + pad) as i32,
+                            right: (pane_rect.x + pad.left) as i32,
                             bottom: (top + line_height) as i32,
                         },
                         default_color: block_label_color,
@@ -3220,13 +3232,14 @@ impl Renderer {
         // This pane's own tab bar fills the top strip of its rect.
         let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
 
-        // Content origin and clip box — below this pane's tab bar.
-        let px = rect.x + pad;
-        let py = rect.y + TAB_BAR_HEIGHT + pad;
+        // Content origin and clip box — below this pane's tab bar, inset
+        // on all four sides by the configured padding.
+        let px = rect.x + pad.left;
+        let py = rect.y + TAB_BAR_HEIGHT + pad.top;
         let box_l = px;
         let box_t = py;
-        let box_r = rect.x + rect.w;
-        let box_b = rect.y + rect.h;
+        let box_r = rect.x + rect.w - pad.right;
+        let box_b = rect.y + rect.h - pad.bottom;
         // Clip a rect to this pane's content box; `None` if fully outside.
         // Hides the extra row above the pane until it scrolls into view, and
         // keeps one pane's rects out of its neighbour.
@@ -3693,11 +3706,12 @@ fn compute_grid_size(
     physical_height: f32,
     cell_advance: f32,
     line_height: f32,
-    pad: f32,
+    pad: Padding,
 ) -> (usize, usize) {
-    // The full window as a single pane: one tab-bar strip, top-left pad.
-    let available_w = (physical_width - pad).max(cell_advance);
-    let available_h = (physical_height - TAB_BAR_HEIGHT - pad).max(line_height);
+    // Full window as a single pane: one tab-bar strip plus per-edge pads.
+    let available_w = (physical_width - pad.left - pad.right).max(cell_advance);
+    let available_h =
+        (physical_height - TAB_BAR_HEIGHT - pad.top - pad.bottom).max(line_height);
     let cols = ((available_w / cell_advance) as usize).clamp(2, MAX_GRID_COLS);
     let rows = ((available_h / line_height) as usize).clamp(2, MAX_GRID_ROWS);
     (cols, rows)
