@@ -1604,6 +1604,49 @@ impl Renderer {
         }
     }
 
+    /// Apply the layout-affecting config knobs (per-edge padding,
+    /// `gutter_left`, `line_height` multiplier) to the running window.
+    /// Called from `focus_changed` after `Config::load`, so the tuning
+    /// loop is: edit `~/.config/terminite/config.toml` in a side pane,
+    /// click back into terminite, see the values apply.
+    ///
+    /// Only line_height needs per-tab work — it lives in each buffer's
+    /// `Metrics`, so we touch every tab to update the metrics and mark
+    /// the snapshot dirty. Padding / gutter_left are positional and
+    /// propagate to the next frame automatically; `relayout` recomputes
+    /// the grid with the new pad on top.
+    fn apply_live_layout(&mut self) {
+        let new_line_height =
+            (self.font_size * LINE_H_RATIO * self.config.line_height).round();
+        let line_height_changed = (new_line_height - self.line_height).abs() > f32::EPSILON;
+        let pad_or_gutter_changed =
+            self.pad != self.config.padding || self.gutter_left != self.config.gutter_left;
+        if !line_height_changed && !pad_or_gutter_changed {
+            return;
+        }
+
+        self.pad = self.config.padding;
+        self.gutter_left = self.config.gutter_left;
+        self.line_height = new_line_height;
+
+        if line_height_changed {
+            let metrics = Metrics::new(self.font_size, new_line_height);
+            let mut tabs: Vec<&mut Tab> = Vec::new();
+            self.root
+                .as_mut()
+                .expect("pane tree present")
+                .all_tabs_mut(&mut tabs);
+            for tab in tabs {
+                tab.text_buffer.set_metrics(&mut self.font_system, metrics);
+                tab.buffer_dirty = true;
+            }
+        }
+
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+    }
+
     /// Mirror the active tab's grid into `grid_cols` / `grid_rows`, which the
     /// mouse / autoscroll paths read.
     fn sync_active_grid(&mut self) {
@@ -2617,10 +2660,13 @@ impl Renderer {
     pub fn focus_changed(&mut self, focused: bool) {
         self.focused = focused;
         // Re-read the config on focus-gain — edit it in another window,
-        // switch back, and it applies. cursor_blink and bell_style take
-        // effect immediately; scrollback applies to tabs opened afterward.
+        // switch back, and it applies. cursor_blink + bell_style take
+        // effect immediately; padding / gutter_left / line_height apply
+        // here via `apply_live_layout`; scrollback applies to tabs
+        // opened afterward; font_size / font_family are startup-only.
         if focused {
             self.config = Config::load();
+            self.apply_live_layout();
         }
         // Optionally emit DEC focus reporting when an app asked for it.
         let mode = self.active_tab_mut().live_term.mode_flags();

@@ -53,18 +53,17 @@ pub struct Config {
     pub font_family: String,
     /// Text size in pixels. Startup-applied.
     pub font_size: f32,
-    /// Per-edge inset from the pane rect to the text grid. Startup-applied
-    /// (config reload re-reads it, but a relayout is what makes it take
-    /// effect on a running window).
+    /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
+    /// on focus-gain: edit the config in a side pane, click back into
+    /// terminite, the new pad takes effect immediately.
     pub padding: Padding,
-    /// Block-label inset from the pane's left edge. The label sits in the
-    /// strip `[pane.x + gutter_left, pane.x + padding.left]`, so
-    /// `padding.left - gutter_left` is the space between the label and the
-    /// content; `gutter_left` itself is the space between the pane edge
-    /// and the label.
+    /// Block-label inset from the pane's left edge. The label is
+    /// right-aligned against the content edge, so this is the minimum
+    /// left position it can occupy before clipping. Hot-reloaded.
     pub gutter_left: f32,
     /// Multiplier on the font's natural line height. 1.0 = no change.
     /// Smaller packs lines tighter; larger spreads them out.
+    /// Hot-reloaded — each tab's buffer metrics update on focus-gain.
     pub line_height: f32,
     /// Blink the cursor while the window is focused.
     pub cursor_blink: bool,
