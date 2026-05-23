@@ -26,8 +26,7 @@ pub const MAX_BLOCKS_PER_TAB: usize = 1000;
 /// Matches the existing tab-bar chrome font so a block's `B7` label
 /// looks the same as a tab title.
 const LABEL_FONT_SIZE: f32 = 18.0;
-const LABEL_LINE_H: f32 = 26.0;
-const LABEL_BUFFER_WIDTH: f32 = 60.0;
+pub const LABEL_LINE_H: f32 = 26.0;
 
 /// One command + its output, with whatever marks have arrived so far.
 /// All `*_line` fields are session-absolute row indices (see module docs).
@@ -44,6 +43,10 @@ pub struct Block {
     pub finished_at: Option<Instant>,
     /// Pre-shaped `Bn` label, drawn in each pane's left-gutter strip.
     pub label_buffer: Buffer,
+    /// Shaped pixel width of `label_buffer`. The renderer right-aligns
+    /// the label against the content edge, so it needs to know the label's
+    /// actual width to compute the `left` for the TextArea.
+    pub label_width: f32,
 }
 
 impl Block {
@@ -140,6 +143,7 @@ impl BlockStore {
     ) -> Block {
         let id = self.next_id;
         self.next_id += 1;
+        let (label_buffer, label_width) = make_label_buffer(font_system, id);
         Block {
             id,
             prompt_line,
@@ -149,7 +153,8 @@ impl BlockStore {
             exit_code: None,
             started_at: Instant::now(),
             finished_at: None,
-            label_buffer: make_label_buffer(font_system, id),
+            label_buffer,
+            label_width,
         }
     }
 
@@ -161,16 +166,19 @@ impl BlockStore {
     }
 }
 
-/// Pre-shape a `Bn` label in the chrome font. Sized to a fixed small
-/// width — anything past it is clipped by the gutter's `TextBounds`.
-fn make_label_buffer(font_system: &mut FontSystem, id: u32) -> Buffer {
+/// Pre-shape a `Bn` label in the chrome font. Width unconstrained so the
+/// shaped text reports its real pixel width — the renderer right-aligns
+/// against the content edge using that measurement, so a long label like
+/// `B1234` doesn't wrap inside the gutter, it just grows leftward.
+fn make_label_buffer(font_system: &mut FontSystem, id: u32) -> (Buffer, f32) {
     let text = format!("B{id}");
     let mut buf = Buffer::new(font_system, Metrics::new(LABEL_FONT_SIZE, LABEL_LINE_H));
-    buf.set_size(font_system, Some(LABEL_BUFFER_WIDTH), Some(LABEL_LINE_H));
+    buf.set_size(font_system, None, Some(LABEL_LINE_H));
     let attrs = Attrs::new().family(Family::Monospace);
     buf.set_text(font_system, &text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
-    buf
+    let width = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+    (buf, width)
 }
 
 #[cfg(test)]

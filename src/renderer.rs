@@ -16,7 +16,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
-use crate::blocks::BlockStore;
+use crate::blocks::{BlockStore, LABEL_LINE_H};
 use crate::config::{BellStyle, Config, Padding};
 use crate::images::{self, Action};
 use crate::palette::{color_to_floats, DEFAULT_FG};
@@ -3048,23 +3048,36 @@ impl Renderer {
                 let rows = tab_ref.rows as i32;
                 let py = pane_rect.y + TAB_BAR_HEIGHT + pad.top;
                 let gutter_left = self.gutter_left;
+                // Right-align each label against a fixed anchor just
+                // inside the content edge. The label grows leftward as
+                // the digit count climbs (B7 → B12 → B323 all end at the
+                // same x), and `gutter_left` becomes the minimum-left
+                // clip — when a label overruns it (very long ids in a
+                // narrow gutter), the leading "B" gets clipped rather
+                // than overlapping the line.
+                const LABEL_TO_CONTENT_GAP: f32 = 4.0;
+                let label_right = pane_rect.x + pad.left - LABEL_TO_CONTENT_GAP;
+                let label_left_min = pane_rect.x + gutter_left;
+                let v_pad = ((line_height - LABEL_LINE_H) * 0.5).max(0.0);
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
                     let vl = abs - history + display_offset;
                     if vl < 0 || vl >= rows {
                         continue;
                     }
-                    let top = py + vl as f32 * line_height + y_shift;
+                    let row_top = py + vl as f32 * line_height + y_shift;
+                    let top = row_top + v_pad;
+                    let left = label_right - block.label_width;
                     tab_areas.push(TextArea {
                         buffer: &block.label_buffer,
-                        left: pane_rect.x + gutter_left,
+                        left,
                         top,
                         scale: 1.0,
                         bounds: TextBounds {
-                            left: (pane_rect.x + gutter_left) as i32,
-                            top: top as i32,
-                            right: (pane_rect.x + pad.left) as i32,
-                            bottom: (top + line_height) as i32,
+                            left: label_left_min as i32,
+                            top: row_top as i32,
+                            right: label_right as i32,
+                            bottom: (row_top + line_height) as i32,
                         },
                         default_color: block_label_color,
                         custom_glyphs: &[],
