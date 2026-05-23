@@ -1767,6 +1767,13 @@ impl Renderer {
             self.active_pane = pid;
             self.sync_active_grid();
             self.window.set_title(&self.active_tab_ref().title);
+            // Hot-reload also fires on in-window pane focus — editing the
+            // config in a side pane and clicking back into a shell pane is
+            // the natural tuning loop, and the window focus event doesn't
+            // fire for that. `apply_live_layout` early-returns when
+            // nothing changed, so the per-click cost is one ~1.7 KB read.
+            self.config = Config::load();
+            self.apply_live_layout();
             self.window.request_redraw();
         }
     }
