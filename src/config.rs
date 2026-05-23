@@ -61,6 +61,10 @@ pub struct Config {
     /// right-aligned against the content edge, so this is the minimum
     /// left position it can occupy before clipping. Hot-reloaded.
     pub gutter_left: f32,
+    /// Space between the block label's right edge and the start of the
+    /// line content. Pushes the label further off the line without
+    /// touching the content rect. Hot-reloaded.
+    pub gutter_gap: f32,
     /// Multiplier on the font's natural line height. 1.0 = no change.
     /// Smaller packs lines tighter; larger spreads them out.
     /// Hot-reloaded — each tab's buffer metrics update on focus-gain.
@@ -84,6 +88,7 @@ impl Default for Config {
             // the label and the content. Right/top/bottom stay modest.
             padding: Padding { left: 40.0, right: 12.0, top: 8.0, bottom: 8.0 },
             gutter_left: 10.0,
+            gutter_gap: 4.0,
             line_height: 1.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
@@ -147,6 +152,11 @@ impl Config {
                 "gutter_left" => {
                     if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
                         self.gutter_left = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "gutter_gap" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.gutter_gap = n.clamp(0.0, MAX_PADDING);
                     }
                 }
                 "line_height" => {
@@ -297,6 +307,7 @@ mod tests {
              padding_top = 4\n\
              padding_bottom = 4\n\
              gutter_left = 8\n\
+             gutter_gap = 6\n\
              line_height = 1.25\n",
         );
         assert_eq!(c.font_family, "JetBrains Mono");
@@ -306,6 +317,7 @@ mod tests {
         assert_eq!(c.padding.top, 4.0);
         assert_eq!(c.padding.bottom, 4.0);
         assert_eq!(c.gutter_left, 8.0);
+        assert_eq!(c.gutter_gap, 6.0);
         assert_eq!(c.line_height, 1.25);
     }
 

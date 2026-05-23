@@ -803,6 +803,8 @@ pub struct Renderer {
     /// Block-label inset from the pane's left edge. Label sits in the
     /// strip `[pane.x + gutter_left, pane.x + pad.left]`.
     gutter_left: f32,
+    /// Space between the block label's right edge and the line content.
+    gutter_gap: f32,
     font_size: f32,
     font_family: String,
     grid_cols: usize,
@@ -923,6 +925,7 @@ impl Renderer {
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let pad = config.padding;
         let gutter_left = config.gutter_left;
+        let gutter_gap = config.gutter_gap;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -1022,6 +1025,7 @@ impl Renderer {
             line_height,
             pad,
             gutter_left,
+            gutter_gap,
             font_size,
             font_family,
             grid_cols: cols,
@@ -1619,14 +1623,16 @@ impl Renderer {
         let new_line_height =
             (self.font_size * LINE_H_RATIO * self.config.line_height).round();
         let line_height_changed = (new_line_height - self.line_height).abs() > f32::EPSILON;
-        let pad_or_gutter_changed =
-            self.pad != self.config.padding || self.gutter_left != self.config.gutter_left;
+        let pad_or_gutter_changed = self.pad != self.config.padding
+            || self.gutter_left != self.config.gutter_left
+            || self.gutter_gap != self.config.gutter_gap;
         if !line_height_changed && !pad_or_gutter_changed {
             return;
         }
 
         self.pad = self.config.padding;
         self.gutter_left = self.config.gutter_left;
+        self.gutter_gap = self.config.gutter_gap;
         self.line_height = new_line_height;
 
         if line_height_changed {
@@ -3125,9 +3131,9 @@ impl Renderer {
                 // same x), and `gutter_left` becomes the minimum-left
                 // clip — when a label overruns it (very long ids in a
                 // narrow gutter), the leading "B" gets clipped rather
-                // than overlapping the line.
-                const LABEL_TO_CONTENT_GAP: f32 = 4.0;
-                let label_right = pane_rect.x + pad.left - LABEL_TO_CONTENT_GAP;
+                // than overlapping the line. `gutter_gap` is the space
+                // between the label's right edge and the line content.
+                let label_right = pane_rect.x + pad.left - self.gutter_gap;
                 let label_left_min = pane_rect.x + gutter_left;
                 let v_pad = ((line_height - LABEL_LINE_H) * 0.5).max(0.0);
                 for block in tab_ref.blocks.iter() {

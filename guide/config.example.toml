@@ -28,6 +28,12 @@ padding_bottom = 8
 # leading characters of long ids getting cut. Hot-reloaded.
 gutter_left = 10
 
+# Space between the block label's right edge and the start of the line
+# content, in pixels (clamped to 0–400). Push the label further off
+# the line without widening the content rect — raise this to give the
+# label more breathing room from what it's tagging. Hot-reloaded.
+gutter_gap = 4
+
 # Multiplier on the font's natural line height. 1.0 = no change; <1 packs
 # lines tighter, >1 spreads them out. Clamped to 0.7–3.0. Hot-reloaded.
 line_height = 1.0
