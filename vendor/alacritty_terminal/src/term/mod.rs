@@ -2239,10 +2239,14 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn shell_integration(&mut self, kind: char, exit: Option<i32>) {
-        // Capture the cursor's absolute line at fire time so terminite can
-        // anchor a block to the row even after the user scrolls. Matches
-        // terminite's selection coordinate convention.
-        let line = self.grid.cursor.point.line.0 - self.grid.display_offset() as i32;
+        // Session-absolute row index — `history_size + cursor.line.0`.
+        // Stays stable as new output scrolls rows into scrollback: the
+        // current Line of the same content = `abs - current_history`, and
+        // its screen vl = `(abs - current_history) + current_display_offset`.
+        // The cursor's Line is unaffected by user scroll (`display_offset`),
+        // so we don't subtract it here — would only be wrong if we did.
+        let line =
+            self.grid.history_size() as i32 + self.grid.cursor.point.line.0;
         self.event_proxy.send_event(Event::ShellIntegration { kind, exit, line });
     }
 

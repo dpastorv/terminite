@@ -27,9 +27,10 @@ pub enum Event {
 
     /// OSC 133: a shell-integration mark. `kind` is the FinalTerm letter
     /// (`A` prompt-start, `B` prompt-end, `C` output-start, `D` finished);
-    /// `exit` carries the exit code on a `D` mark; `line` is the cursor's
-    /// absolute Line at fire time (cursor row minus display offset), for
-    /// scroll-anchored block placement. (terminite fork.)
+    /// `exit` carries the exit code on a `D` mark; `line` is the *session-
+    /// absolute row index* at fire time (`history_size + cursor.line.0`),
+    /// so it stays stable as later output rolls rows into scrollback.
+    /// (terminite fork.)
     ShellIntegration { kind: char, exit: Option<i32>, line: i32 },
 
     /// An APC payload (Kitty graphics et al.) — the bytes between `ESC _`

@@ -6,10 +6,12 @@
 //! state machine here is deliberately lenient so partial integrations
 //! (some shells emit only `A`+`D`) still produce useful blocks.
 //!
-//! Coordinates: line numbers are stored in the same absolute coordinate
-//! system selections use (`viewport_line - display_offset_at_fire`), so a
-//! block's anchor row is reproducible by `abs + current_display_offset`
-//! as the user scrolls.
+//! Coordinates: line numbers are *session-absolute row indices*, computed
+//! at fire time as `history_size + cursor.line.0`. They stay stable as
+//! later output rolls rows into scrollback (the cursor's Line in the live
+//! grid would shift, which is why the older "store the cursor Line"
+//! convention drifted). The renderer recovers screen vl as
+//! `abs - current_history + current_display_offset`.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -28,7 +30,7 @@ const LABEL_LINE_H: f32 = 26.0;
 const LABEL_BUFFER_WIDTH: f32 = 60.0;
 
 /// One command + its output, with whatever marks have arrived so far.
-/// All line numbers are in terminite's absolute-line convention.
+/// All `*_line` fields are session-absolute row indices (see module docs).
 pub struct Block {
     pub id: u32,
     pub prompt_line: Option<i32>,
@@ -70,10 +72,10 @@ impl BlockStore {
         Self { closed: VecDeque::new(), open: None, next_id: 1 }
     }
 
-    /// Apply one OSC 133 mark. `line` is the cursor's absolute line at
-    /// fire time. `font_system` is needed so the new block's label buffer
-    /// can be shaped immediately — labels render starting on the very
-    /// next frame.
+    /// Apply one OSC 133 mark. `line` is the session-absolute row index
+    /// at fire time (see module docs). `font_system` is needed so the new
+    /// block's label buffer can be shaped immediately — labels render
+    /// starting on the very next frame.
     pub fn on_mark(
         &mut self,
         kind: char,

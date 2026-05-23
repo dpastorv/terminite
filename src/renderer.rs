@@ -3024,18 +3024,21 @@ impl Renderer {
                     });
                     texture_bgs.push(img.bind_group().clone());
                 }
-                // Block IDs (`Bn`) in the pane's left-gutter strip. Same
-                // coordinate machinery as selections: anchor_line is the
-                // scroll-anchored abs row; vl = abs + display_offset gives
-                // the current screen row.
+                // Block IDs (`Bn`) in the pane's left-gutter strip.
+                // Coords are session-absolute (`abs = history + cursor.line`
+                // at fire time); to find the current screen vl, unwind
+                // both the rows that have since scrolled into history and
+                // the user's current scroll position.
                 let y_shift = tab_ref.pixel_offset;
-                let display_offset =
-                    tab_ref.live_term.offset_and_history().0 as i32;
+                let (display_offset, history) =
+                    tab_ref.live_term.offset_and_history();
+                let display_offset = display_offset as i32;
+                let history = history as i32;
                 let rows = tab_ref.rows as i32;
                 let py = pane_rect.y + TAB_BAR_HEIGHT + pad;
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
-                    let vl = abs + display_offset;
+                    let vl = abs - history + display_offset;
                     if vl < 0 || vl >= rows {
                         continue;
                     }
