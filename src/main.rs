@@ -14,6 +14,7 @@ mod config;
 mod images;
 mod palette;
 mod proto;
+mod proto_client;
 mod rect;
 mod renderer;
 mod term;
@@ -480,7 +481,15 @@ impl ApplicationHandler<UserEvent> for Terminite {
     }
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
+    // Subcommand dispatch first: `terminite tabs / blocks / block / watch`
+    // run as a CLI client against the socket of a separately-running
+    // terminite window. No subcommand → launch the window.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = proto_client::dispatch(&args) {
+        return code;
+    }
+
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
         .expect("terminite: failed to start the event loop");
@@ -499,4 +508,5 @@ fn main() {
     event_loop
         .run_app(&mut terminite)
         .expect("terminite: the event loop exited with an error");
+    std::process::ExitCode::SUCCESS
 }
