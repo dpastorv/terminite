@@ -17,9 +17,11 @@ use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
 use crate::config::{BellStyle, Config};
+use crate::images::{self, Action};
 use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
+use crate::texture::{TextureImage, TextureInstance, TextureRenderer};
 use crate::{TabId, UserEvent, BACKGROUND};
 
 const UNDERLINE_THICKNESS: f32 = 1.5;
@@ -179,6 +181,10 @@ struct Tab {
     /// Whether `text_buffer` currently holds `last_text_runs`'s content.
     buffer_dirty: bool,
     autoscroll_dir: Option<i32>,
+    /// Most recent image from a Kitty `a=T` (transmit+display). v1 shows
+    /// one image per tab at the pane's top-left, scaled to fit. Dropped
+    /// when the tab drops (closes the GPU texture too).
+    image: Option<TextureImage>,
 }
 
 impl Tab {
@@ -210,6 +216,7 @@ impl Tab {
             last_text_runs: Vec::new(),
             buffer_dirty: true,
             autoscroll_dir: None,
+            image: None,
         }
     }
 }
@@ -771,6 +778,8 @@ pub struct Renderer {
     /// tab_text_renderer here — a second prepare would clobber the tab
     /// labels' vertex buffer before they render.)
     modal_text_renderer: TextRenderer,
+    /// Textured-quad pipeline for displayed images (Kitty graphics).
+    texture_renderer: TextureRenderer,
     /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
     /// (one per tab) at different positions.
     close_buffer: Buffer,
@@ -917,6 +926,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let modal_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let texture_renderer = TextureRenderer::new(&device, format);
 
         // winit's PhysicalSize is already in physical pixels — earlier code
         // multiplied by scale_factor a second time, so the grid math thought
@@ -992,6 +1002,7 @@ impl Renderer {
             rects_modal,
             tab_text_renderer,
             modal_text_renderer,
+            texture_renderer,
             close_buffer,
             cell_advance,
             line_height,
@@ -2325,6 +2336,31 @@ impl Renderer {
     /// whitespace-only title is treated as "unset" — the auto-title takes
     /// over again on the next render. This is what TUIs that emit an empty
     /// title or a ResetTitle escape on exit (claude, vim, ssh) expect.
+    /// Parse + decode + display a Kitty APC payload from `tab_id`. v1
+    /// recognises only `a=T` (transmit-and-display); the image replaces
+    /// any prior one on that tab and renders at the pane's top-left,
+    /// scaled to fit. Bounded throughout — the parser caps per-image
+    /// decoded bytes, the texture holds bytes equal to the cap at worst,
+    /// and the prior image's GPU memory is freed when overwritten.
+    pub fn handle_apc(&mut self, tab_id: TabId, data: &[u8]) {
+        let Some(cmd) = images::parse_kitty(data) else { return };
+        // Only the transmit-and-display action shows in v1; transmit-only,
+        // display-by-id, delete and query are no-ops until later commits.
+        if !matches!(cmd.action, Action::TransmitDisplay) {
+            return;
+        }
+        let Some(image) = images::decode_image(cmd.format, cmd.width, cmd.height, &cmd.payload)
+        else { return };
+        let tex = self.texture_renderer.upload(&self.device, &self.queue, &image);
+
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
+            tab.image = Some(tex);
+        }
+        self.window.request_redraw();
+    }
+
     pub fn set_tab_title(&mut self, tab_id: TabId, title: String) {
         if title.trim().is_empty() {
             let mut tabs: Vec<&mut Tab> = Vec::new();
@@ -2885,12 +2921,19 @@ impl Renderer {
                 .expect("terminite: menu text prepare failed");
         }
 
+        // Per-pane image placements: collected during phase 2 (root is
+        // borrowed for the text areas anyway), prepared after the text
+        // prep, drawn in the render pass between content and the tab bar.
+        let mut texture_instances: Vec<TextureInstance> = Vec::new();
+        let mut texture_bgs: Vec<wgpu::BindGroup> = Vec::new();
+
         // Content text + per-pane tab-bar labels. Phase 2: every pane's
         // buffers are already refreshed, so we can take the immutable
         // borrows the TextAreas need. Content goes through `text_renderer`,
         // tab labels + find bar through `tab_text_renderer`.
         {
             let root = self.root.as_ref().expect("pane tree present");
+            let pad = self.pad;
             let active_color = Color::rgb(230, 230, 240);
             let inactive_color = Color::rgb(140, 140, 160);
             let close_color = Color::rgb(160, 160, 170);
@@ -2931,6 +2974,27 @@ impl Renderer {
                         default_color: close_color,
                         custom_glyphs: &[],
                     });
+                }
+                // Pane's image (v1): top-left of content area, scaled to
+                // fit (no upscaling). Clone is cheap — wgpu BindGroup is
+                // ref-counted internally.
+                if let Some(img) = pane.active_tab_ref().image.as_ref() {
+                    let pane_rect = layout
+                        .iter()
+                        .find(|(id, _)| *id == d.pid)
+                        .map(|(_, r)| *r)
+                        .expect("drawn pane present in layout");
+                    let ox = pane_rect.x + pad;
+                    let oy = pane_rect.y + TAB_BAR_HEIGHT + pad;
+                    let max_w = (pane_rect.x + pane_rect.w - ox).max(1.0);
+                    let max_h = (pane_rect.y + pane_rect.h - oy).max(1.0);
+                    let nw = img.width as f32;
+                    let nh = img.height as f32;
+                    let scale = (max_w / nw).min(max_h / nh).min(1.0);
+                    texture_instances.push(TextureInstance {
+                        rect: [ox, oy, nw * scale, nh * scale],
+                    });
+                    texture_bgs.push(img.bind_group().clone());
                 }
             }
             // The find bar's text rides in the tab text renderer.
@@ -2973,6 +3037,12 @@ impl Renderer {
                 )
                 .expect("terminite: tab bar text prepare failed");
         }
+
+        // Stage the image instance buffer; render happens between content
+        // (text + decorations) and the tab bar, so images sit above the
+        // cell grid but below per-pane chrome.
+        self.texture_renderer
+            .prepare(&self.queue, &texture_instances, resolution);
 
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
@@ -3042,6 +3112,9 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("terminite: text render failed");
             self.rects_above.render(&mut pass);
+
+            // Decoded images, atop the cell grid but below the tab bar.
+            self.texture_renderer.render(&mut pass, &texture_bgs);
 
             // Per-pane tab bars drawn on top of the content.
             self.rects_tab_bar.render(&mut pass);

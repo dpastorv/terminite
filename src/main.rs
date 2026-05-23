@@ -15,6 +15,7 @@ mod palette;
 mod rect;
 mod renderer;
 mod term;
+mod texture;
 
 use renderer::{Renderer, SplitDir};
 
@@ -50,6 +51,10 @@ pub enum UserEvent {
     SetTitle(TabId, String),
     /// Shell emitted `\a` (bell). Visual flash.
     Bell(TabId),
+    /// An APC payload from the shell (Kitty graphics et al.). Moved onto
+    /// the main thread for parsing + decoding so the PTY thread / term
+    /// lock stays free during the work.
+    Apc(TabId, Vec<u8>),
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -158,6 +163,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::Bell(tab_id) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.ring_bell(tab_id);
+                }
+            }
+            UserEvent::Apc(tab_id, data) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_apc(tab_id, &data);
                 }
             }
             UserEvent::Exit => event_loop.exit(),

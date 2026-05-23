@@ -1,8 +1,3 @@
-// The parser + decoder are complete and unit-tested in this commit; the
-// renderer wiring lands in the next one. Until then everything here looks
-// "dead" to the bin. Remove this attr once the renderer pulls it in.
-#![allow(dead_code)]
-
 //! Kitty graphics protocol — parsing and decoding.
 //!
 //! An APC payload starting with `G` is a Kitty command:
@@ -54,22 +49,19 @@ pub enum Format {
 }
 
 /// A parsed Kitty command. Only the v1 keys are surfaced; the rest is
-/// dropped silently so unknown options don't break the parse.
+/// dropped silently so unknown options don't break the parse. `id` and
+/// `more_chunks` are parsed now but not yet used (display-by-id and
+/// chunked transmission are later commits).
 #[derive(Clone, Debug)]
 pub struct KittyCommand {
     pub action: Action,
     pub format: Format,
-    /// Image id (`i=`). Optional; Kitty assigns one to track the image.
+    #[allow(dead_code)]
     pub id: Option<u32>,
-    /// Source width / height in pixels — required for RGB / RGBA, optional
-    /// for PNG (the decoder knows).
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// `m=1` means "more chunks coming"; the last chunk has `m=0` (or
-    /// omitted). v1 ignores chunking; one APC = one image.
+    #[allow(dead_code)]
     pub more_chunks: bool,
-    /// The base64-decoded payload bytes. Empty for actions that don't
-    /// carry one (Display referencing an id, Delete, Query).
     pub payload: Vec<u8>,
 }
 
@@ -83,7 +75,8 @@ pub struct ImageData {
 }
 
 impl ImageData {
-    /// Decoded byte cost — used by the image-store eviction.
+    /// Decoded byte cost — used by image-store eviction (later commit).
+    #[allow(dead_code)]
     pub fn bytes(&self) -> usize {
         self.rgba.len()
     }

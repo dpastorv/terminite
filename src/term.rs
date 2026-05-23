@@ -175,10 +175,13 @@ impl EventListener for Notifier {
                 // block Model is built on these; for now the dispatch path
                 // is proven end-to-end and the signal is parked.
             }
-            TermEvent::Apc(_data) => {
-                // APC payloads (Kitty graphics) land here. Capped at
-                // `vte::APC_MAX_BYTES` upstream. Parsing + image rendering
-                // are the next commits; for now the dispatch path is proven.
+            TermEvent::Apc(data) => {
+                // APC payloads (Kitty graphics) — move to the main thread
+                // for parsing + decoding so the PTY thread / term lock
+                // stays free. Capped at `vte::APC_MAX_BYTES` upstream.
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::Apc(self.tab_id, data.clone()));
             }
             _ => {}
         }
