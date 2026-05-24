@@ -3491,11 +3491,18 @@ impl Renderer {
                 let label_right = pane_rect.x + pad.left - self.gutter_gap;
                 let label_left_min = pane_rect.x + gutter_left;
                 let v_pad = ((line_height - LABEL_LINE_H) * 0.5).max(0.0);
-                // Three-state color: a warm bright for the AI cursor
-                // (presence), a slight lift for tagged blocks (annotated),
-                // the subdued default for everything else.
-                let cursor_color = Color::rgb(245, 200, 110);
-                let tagged_color = Color::rgb(180, 180, 200);
+                // Visual signal lives in a background highlight behind
+                // the label (like an HTML `<mark>`), not in the text
+                // color. Text color alone reads as "another shade of
+                // gray" — a filled block of color pops unambiguously.
+                //   - cursored: bright warm fill, dark text for contrast.
+                //   - tagged:   dim cool fill, label color unchanged.
+                //   - default:  no fill, subdued label color.
+                let cursor_bg: [f32; 4] = [1.0, 0.83, 0.30, 0.95];
+                let tagged_bg: [f32; 4] = [0.45, 0.50, 0.65, 0.45];
+                let cursor_text = Color::rgb(20, 20, 30);
+                const HIGHLIGHT_PAD_X: f32 = 4.0;
+                const HIGHLIGHT_PAD_Y: f32 = 2.0;
                 let cursor_block_id = tab_ref.blocks.cursor();
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
@@ -3506,10 +3513,32 @@ impl Renderer {
                     let row_top = py + vl as f32 * line_height + y_shift;
                     let top = row_top + v_pad;
                     let left = label_right - block.label_width;
-                    let color = if Some(block.id) == cursor_block_id {
-                        cursor_color
+                    let is_cursor = Some(block.id) == cursor_block_id;
+                    let bg = if is_cursor {
+                        Some(cursor_bg)
                     } else if !block.tags.is_empty() {
-                        tagged_color
+                        Some(tagged_bg)
+                    } else {
+                        None
+                    };
+                    if let Some(color) = bg {
+                        // Highlight clamped to the gutter strip so it
+                        // never bleeds into line content. tab_bar rect
+                        // layer renders before tab_text_renderer, so the
+                        // fill sits behind the label text.
+                        let hx = (left - HIGHLIGHT_PAD_X).max(pane_rect.x);
+                        let hr = (label_right + HIGHLIGHT_PAD_X)
+                            .min(pane_rect.x + pad.left);
+                        let hw = (hr - hx).max(0.0);
+                        let hy = top - HIGHLIGHT_PAD_Y;
+                        let hh = LABEL_LINE_H + HIGHLIGHT_PAD_Y * 2.0;
+                        tab_bar.push(RectInstance {
+                            rect: [hx, hy, hw, hh],
+                            color,
+                        });
+                    }
+                    let text_color = if is_cursor {
+                        cursor_text
                     } else {
                         block_label_color
                     };
@@ -3524,7 +3553,7 @@ impl Renderer {
                             right: label_right as i32,
                             bottom: (row_top + line_height) as i32,
                         },
-                        default_color: color,
+                        default_color: text_color,
                         custom_glyphs: &[],
                     });
                 }
