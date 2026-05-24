@@ -3520,6 +3520,7 @@ impl Renderer {
                 let cursor_bg: [f32; 4] = [1.0, 0.83, 0.30, 0.95];
                 let tagged_bg: [f32; 4] = [0.45, 0.50, 0.65, 0.45];
                 let cursor_text = Color::rgb(20, 20, 30);
+                let tagged_text = Color::rgb(40, 40, 60);
                 let highlight_pad_x = self.highlight_pad_x;
                 let highlight_pad_y = self.highlight_pad_y;
                 let highlight_offset_y = self.highlight_offset_y;
@@ -3561,6 +3562,8 @@ impl Renderer {
                     }
                     let text_color = if is_cursor {
                         cursor_text
+                    } else if !block.tags.is_empty() {
+                        tagged_text
                     } else {
                         block_label_color
                     };
