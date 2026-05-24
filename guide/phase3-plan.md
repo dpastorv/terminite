@@ -1,34 +1,62 @@
 # Phase 3 Plan — Working Title
 
-> Status: in progress. Owner-led. AI seeded a few sections to start the
-> conversation — expect those to get rewritten or struck through.
+> Status: in progress. Owner-led.
 
-Phase 1 was *be a terminal*. Phase 2 was *be the pair's terminal*. Phase 3
-is — most likely — *be the pair's terminal that other pairs can adopt*.
-But that framing is the AI's first guess; the owner's notebook may point
-somewhere else.
+Phase 1 was *be a terminal*. Phase 2 was *be the pair's terminal* — and,
+in its closing bundle, *be a foundation other things can stand on*.
+Phase 3 is *be the pair's terminal that other pairs can adopt, with
+inhabitants for the work they actually do*.
+
+## The pivot Phase 2 didn't finish without
+
+Daniel surfaced it: terminite shouldn't require a rebuild to gain a
+new pane type. Every long-lived editor that hardcoded features first
+paid for it later when extensibility was retrofitted (VSCode and the
+LSP is the modern lesson; Plan 9's 9P is the older one). The surface
+for adding things has to land *before* we add things.
+
+So Phase 2 closes with one more bundle — **the extension surface**:
+
+- A module manifest format (`~/.terminite/modules/<name>/manifest.toml`).
+- Module discovery + registration (`terminite module add/list/remove`).
+- Module process lifecycle (terminite spawns the module when a pane
+  needs it; tears it down when the pane closes; supervises crashes).
+- A protocol extension so a pane can talk to *its* module — a
+  per-pane channel scoped to that module's content surface.
+- The pane-type dropdown UI skeleton, even before there are types to
+  switch to.
+
+The proof of the framework: terminite's own shell support gets
+restructured as a "well-known built-in module," so the framework
+hosts terminite's *own* code first. If the framework can't host its
+own author's code cleanly, it definitely can't host a third party's.
+
+After this lands, terminite is no longer a fixed product. It's a
+**host**. Phase 3 builds inhabitants for the host.
 
 ## The spine — the design call
 
-**Pane content as a type system.** Today every pane is a shell.
-Tomorrow each pane is one of several *content types* — shell, viewer,
-file navigator, editor, possibly more — switched per-pane via a
-dropdown header. The Blender area model literalized: same draggable
-container, different inhabitants.
+**The host runs the inhabitants.** With the extension surface in
+place from the close of Phase 2, Phase 3's design call is: *every
+pane type in Daniel's list is a module loaded by the host*, not a
+feature compiled into the binary.
 
-This re-frames terminite from "the pair's terminal" to "the pair's
-workspace, with a terminal as one inhabitant." It's larger than the
-AI-side enrichment I was sketching alone, and better as Phase 3's
-spine — the partnership features (notes, cursors, suggestions) become
-*richer* when they can land on any pane type, not just a shell.
+What the user sees is the Blender area model literalized — same
+draggable container, a dropdown picks the inhabitant. What the
+codebase sees is `Pane { content: ModuleHandle }` rather than a
+hardcoded `TabContent` enum.
 
-Phase 2's `Tab { live_term, … }` grows a `content: TabContent` enum
-with variants:
-- `Shell(LiveTerm)` — what exists today.
-- `Viewer(ViewerState)` — read-only renderer; images, markdown,
-  exported block logs.
-- `FileNav(FileNavState)` — tree, navigation, drag-to-paths.
-- `Editor(EditorState)` — actual text editing.
+First-party modules (terminite ships these in the same install):
+- `shell` — the restructured existing shell support. Proves the
+  framework hosts terminite's own code.
+- `viewer` — read-only renderer; images, markdown, exported block
+  logs.
+- `filenav` — tree, navigation, drag-to-paths.
+- `editor` — actual text editing.
+
+Third-party modules drop into `~/.terminite/modules/` and appear in
+the dropdown alongside built-ins. The boundary is convention, not
+privilege.
 
 Every other Phase 3 item either lives inside this abstraction or
 plays well with it.
@@ -232,11 +260,11 @@ It splits cleanly into two extensions, with different protocols.
 
 ### Pane content extensions — modules
 
-The pane-type dropdown lists built-in types (shell, viewer, file nav,
-editor). It should *also* list **modules** — third-party programs
-that act as a pane. A module is an out-of-process program that
-connects to terminite over the existing proto socket; terminite hosts
-its render + input.
+The extension surface (closing Phase 2) made *every* pane content
+type a module. There's no built-in / external distinction at the
+runtime layer — only the shipping question of whether the module
+travels with terminite or lives in `~/.terminite/modules/`. The
+dropdown lists the union.
 
 Two flavors of module, simplest first:
 

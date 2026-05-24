@@ -123,6 +123,12 @@ what the felt friction points us at next.
   raw bytes.
 - **Bundle 5 — Conversation export.** The block list as a portable
   artifact (markdown or JSON). The session, *as the session*, sharable.
+- **Bundle 6 — The extension surface.** Closing Phase 2. Module
+  manifest format, registration, lifecycle, per-pane channel. The
+  shell type restructured as a built-in module so the framework
+  hosts terminite's own code first. After this, terminite is no
+  longer a fixed product; it's a host. Phase 3 builds inhabitants.
+  See [phase3-plan.md](phase3-plan.md) for the rationale.
 
 ---
 
