@@ -187,6 +187,39 @@ struct Tab {
     /// Per-tab block Model — populated from OSC 133 marks. Phase 2's
     /// shared coordinate system (`B7`) for the pair lives here.
     blocks: BlockStore,
+    /// Which content type this tab is currently showing. Shell is the
+    /// default and the only one with a live PTY behind it; other
+    /// kinds suppress the shell render path and substitute their
+    /// own. Bundle 6 step 1 — the dropdown stays inside built-ins.
+    kind: TabContentKind,
+    /// Lazily-shaped buffer for non-shell content (e.g., Welcome).
+    /// `None` when the kind is Shell or the buffer hasn't been built
+    /// for the current size. Rebuilt on resize.
+    content_buffer: Option<Buffer>,
+}
+
+/// What a tab currently shows. The shell case is the only one with a
+/// live PTY; other kinds render statically from `content_buffer`.
+/// Bundle 6 expands this enum (or replaces it with a module handle)
+/// when external modules land.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TabContentKind {
+    Shell,
+    Welcome,
+}
+
+impl TabContentKind {
+    fn label(self) -> &'static str {
+        match self {
+            TabContentKind::Shell => "Shell",
+            TabContentKind::Welcome => "Welcome",
+        }
+    }
+
+    /// Every kind selectable from the pane dropdown. Order matters —
+    /// it's the order shown in the menu.
+    const ALL: &'static [TabContentKind] =
+        &[TabContentKind::Shell, TabContentKind::Welcome];
 }
 
 impl Tab {
@@ -220,6 +253,8 @@ impl Tab {
             autoscroll_dir: None,
             image: None,
             blocks: BlockStore::new(),
+            kind: TabContentKind::Shell,
+            content_buffer: None,
         }
     }
 }
@@ -593,6 +628,30 @@ const MAX_GRID_COLS: usize = 600;
 const MAX_GRID_ROWS: usize = 400;
 /// Cap on the rolling frame-time window used by the stats verb.
 const FRAME_TIMER_CAP: usize = 120;
+/// Width reserved at the left of each pane's tab bar for the content-
+/// kind selector — Blender-style: leftmost element in the area
+/// header. Clicking it opens a popover with the available kinds.
+const KIND_SELECTOR_W: f32 = 110.0;
+
+/// The body text for each non-shell content kind. Static for now;
+/// future kinds may render from per-tab state.
+fn welcome_body(kind: TabContentKind) -> &'static str {
+    match kind {
+        TabContentKind::Shell => "",
+        TabContentKind::Welcome => "\
+welcome to terminite — a terminal for the human + AI pair.
+
+each pane runs a shell (Shell) or some other kind of inhabitant.
+the leftmost dropdown in this pane's tab bar switches between them.
+this pane is showing the Welcome inhabitant — read-only, static.
+pick Shell from the dropdown to drop into a real shell.
+
+two halves of the pair share one surface here. blocks (B1, B2, …)
+in the left gutter are command + output units the pair can name.
+the AI partner connects to ~/.terminite/socket and gets the same
+coordinates you do. see guide/getting-started.md for more.",
+    }
+}
 
 // ── Proto helpers ────────────────────────────────────────────────────────
 
@@ -696,8 +755,10 @@ fn pane_tab_layout(
     if n == 0 {
         return Vec::new();
     }
-    // Reserve the top-right corner for the split handle.
-    let avail = (rect.w - SPLIT_HANDLE_SIZE).max(min_width);
+    // Reserve the left edge for the kind-selector dropdown (Blender-
+    // style area-type picker) and the top-right corner for the split
+    // handle.
+    let avail = (rect.w - SPLIT_HANDLE_SIZE - KIND_SELECTOR_W).max(min_width);
     let chrome = TAB_LABEL_INSET + TAB_CLOSE_WIDTH;
     let ideal: Vec<f32> = title_widths
         .iter()
@@ -710,7 +771,7 @@ fn pane_tab_layout(
         let factor = avail / total;
         ideal.iter().map(|w| (w * factor).max(min_width)).collect()
     };
-    let mut x = rect.x;
+    let mut x = rect.x + KIND_SELECTOR_W;
     let mut out = Vec::with_capacity(n);
     for (i, w) in widths.into_iter().enumerate() {
         out.push((x, w, i == active));
@@ -785,6 +846,12 @@ enum MenuAction {
     Paste,
     OpenLink(String),
     SelectAll,
+    /// Switch the active tab of the menu's pane to a different content
+    /// kind. Bundle 6 step 1 — the dropdown surface.
+    SetTabKind {
+        pane: PaneId,
+        kind: TabContentKind,
+    },
 }
 
 /// One row in the context menu.
@@ -911,6 +978,10 @@ pub struct Renderer {
     /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
     /// (one per tab) at different positions.
     close_buffer: Buffer,
+    /// One label buffer per `TabContentKind`, drawn in each pane's
+    /// kind-selector slot. Built once at startup; rebuilt when chrome
+    /// metrics change (font / size).
+    kind_label_buffers: Vec<Buffer>,
 
     /// Layout metrics — derived once at startup from the config and a font
     /// measurement. font_size / family / padding are startup-applied; the
@@ -1174,6 +1245,18 @@ impl Renderer {
             tab_line_h,
             tab_max_width,
         );
+        let kind_label_buffers = TabContentKind::ALL
+            .iter()
+            .map(|k| {
+                make_title_buffer(
+                    &mut font_system,
+                    &format!("{} ▾", k.label()),
+                    tab_font_size,
+                    tab_line_h,
+                    KIND_SELECTOR_W,
+                )
+            })
+            .collect();
 
         let mut renderer = Self {
             instance,
@@ -1194,6 +1277,7 @@ impl Renderer {
             modal_text_renderer,
             texture_renderer,
             close_buffer,
+            kind_label_buffers,
             cell_advance,
             line_height,
             pad,
@@ -1483,6 +1567,44 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Open the kind-selector dropdown for one pane. Anchored at the
+    /// bottom-left of that pane's selector slot, so it falls open like
+    /// a normal dropdown rather than appearing where the cursor was.
+    fn open_kind_dropdown(&mut self, pid: PaneId, prect: PaneRect) {
+        let current = self
+            .root_ref()
+            .find(pid)
+            .map(|p| p.active_tab_ref().kind)
+            .unwrap_or(TabContentKind::Shell);
+        let items: Vec<MenuItem> = TabContentKind::ALL
+            .iter()
+            .map(|k| {
+                let label = if *k == current {
+                    format!("• {}", k.label())
+                } else {
+                    format!("  {}", k.label())
+                };
+                MenuItem {
+                    label_buf: make_modal_buffer(&mut self.font_system, &label),
+                    action: MenuAction::SetTabKind { pane: pid, kind: *k },
+                    enabled: true,
+                }
+            })
+            .collect();
+        let h = items.len() as f32 * MENU_ITEM_H;
+        let mx = prect.x.max(0.0);
+        let my = (prect.y + self.tab_bar_height)
+            .min(self.surface_config.height as f32 - h - 4.0)
+            .max(0.0);
+        self.context_menu = Some(ContextMenu {
+            x: mx,
+            y: my,
+            items,
+            hovered: None,
+        });
+        self.window.request_redraw();
+    }
+
     pub fn has_context_menu(&self) -> bool {
         self.context_menu.is_some()
     }
@@ -1526,6 +1648,14 @@ impl Renderer {
                     head_col: ec,
                 });
                 self.copy_selection();
+            }
+            MenuAction::SetTabKind { pane, kind } => {
+                let (pane, kind) = (*pane, *kind);
+                if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pane)) {
+                    p.active_tab_mut().kind = kind;
+                    p.active_tab_mut().content_buffer = None;
+                }
+                self.window.request_redraw();
             }
         }
     }
@@ -2030,6 +2160,11 @@ impl Renderer {
     /// Handle a left-click inside pane `pid`'s tab-bar strip: switch to the
     /// clicked tab, or close it if the × close-zone was hit.
     fn tab_bar_click(&mut self, pid: PaneId, prect: PaneRect) {
+        // Kind-selector hit first — leftmost zone of the bar.
+        if self.mouse_pos.0 < prect.x + KIND_SELECTOR_W {
+            self.open_kind_dropdown(pid, prect);
+            return;
+        }
         let (title_widths, active) = {
             let pane = self.root_ref().find(pid).expect("pane present");
             let widths: Vec<f32> = pane
@@ -3281,6 +3416,19 @@ impl Renderer {
             rect: [rect.x, bar_top, rect.w, self.tab_bar_height],
             color: TAB_INACTIVE_BG,
         });
+        // Kind selector — the leftmost element in the bar (Blender area
+        // header model). Same bg as inactive tabs, with a separator on
+        // its right edge. Click → opens a popover with available
+        // kinds. The label text is emitted in render's phase 2.
+        out.push(RectInstance {
+            rect: [
+                rect.x + KIND_SELECTOR_W - 1.0,
+                bar_top + 6.0,
+                1.0,
+                self.tab_bar_height - 12.0,
+            ],
+            color: TAB_SEPARATOR,
+        });
         let text_top = bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
         let mut slots = Vec::with_capacity(layout.len());
         for (i, (x, w, is_active)) in layout.iter().enumerate() {
@@ -3736,8 +3884,19 @@ impl Renderer {
                     .map(|(_, r)| *r)
                     .expect("drawn pane present in layout");
                 let tab_ref = pane.active_tab_ref();
+                // Non-shell kinds render from `content_buffer`. If for
+                // some reason it's missing (race between kind switch
+                // and render), fall back to the empty text_buffer so
+                // we don't crash.
+                let body_buffer = match tab_ref.kind {
+                    TabContentKind::Shell => &tab_ref.text_buffer,
+                    _ => tab_ref
+                        .content_buffer
+                        .as_ref()
+                        .unwrap_or(&tab_ref.text_buffer),
+                };
                 content_areas.push(TextArea {
-                    buffer: &tab_ref.text_buffer,
+                    buffer: body_buffer,
                     left: d.text_left,
                     top: d.text_top,
                     scale: 1.0,
@@ -3745,6 +3904,31 @@ impl Renderer {
                     default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                     custom_glyphs: &[],
                 });
+                // Kind selector label — leftmost in the bar.
+                let active_kind = pane.active_tab_ref().kind;
+                let kind_idx = TabContentKind::ALL
+                    .iter()
+                    .position(|k| *k == active_kind)
+                    .unwrap_or(0);
+                if let Some(label_buf) = self.kind_label_buffers.get(kind_idx) {
+                    let bar_top = pane_rect.y;
+                    let text_top =
+                        bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
+                    tab_areas.push(TextArea {
+                        buffer: label_buf,
+                        left: pane_rect.x + TAB_LABEL_INSET,
+                        top: text_top,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: pane_rect.x as i32,
+                            top: bar_top as i32,
+                            right: (pane_rect.x + KIND_SELECTOR_W) as i32,
+                            bottom: (bar_top + self.tab_bar_height) as i32,
+                        },
+                        default_color: active_color,
+                        custom_glyphs: &[],
+                    });
+                }
                 for slot in &d.tabs {
                     let tab = &pane.tabs[slot.index];
                     tab_areas.push(TextArea {
@@ -4048,6 +4232,80 @@ impl Renderer {
     /// clipped background / selection / cursor / decoration rects. Returns
     /// where to place the content + tab-label text (phase 2 in `render`).
     #[allow(clippy::too_many_arguments)]
+    /// Render path for a pane whose active tab is *not* a shell. Builds
+    /// (or rebuilds) the tab's `content_buffer` to fit the current pane
+    /// rect, then returns a `PaneDraw` pointing into it. Welcome lives
+    /// here in Bundle 6 step 1; future built-in kinds slot in alongside.
+    fn render_non_shell_pane(
+        &mut self,
+        pid: PaneId,
+        rect: PaneRect,
+        tab_slots: Vec<TabLabelSlot>,
+        kind: TabContentKind,
+    ) -> PaneDraw {
+        let pad = self.pad;
+        let px = rect.x + pad.left;
+        let py = rect.y + self.tab_bar_height + pad.top;
+        let content_w = (rect.w - pad.left - pad.right).max(1.0);
+        let content_h = (rect.h - self.tab_bar_height - pad.top - pad.bottom)
+            .max(self.line_height);
+
+        // Build / refresh content_buffer if needed.
+        let body = welcome_body(kind);
+        let font_size = self.font_size;
+        let line_height = self.line_height;
+        let family = self.font_family.clone();
+        let tab = self
+            .root
+            .as_mut()
+            .and_then(|n| n.find_mut(pid))
+            .map(|p| p.active_tab_mut());
+        if let Some(tab) = tab {
+            let needs_build = tab.content_buffer.is_none();
+            if needs_build {
+                let mut buf = Buffer::new(
+                    &mut self.font_system,
+                    Metrics::new(font_size, line_height),
+                );
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(content_w),
+                    Some(content_h),
+                );
+                let attrs = Attrs::new().family(font_family(&family));
+                buf.set_text(
+                    &mut self.font_system,
+                    body,
+                    &attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                tab.content_buffer = Some(buf);
+            } else if let Some(buf) = tab.content_buffer.as_mut() {
+                // Keep the buffer sized to the current pane.
+                buf.set_size(
+                    &mut self.font_system,
+                    Some(content_w),
+                    Some(content_h),
+                );
+            }
+        }
+
+        PaneDraw {
+            pid,
+            text_left: px,
+            text_top: py,
+            bounds: TextBounds {
+                left: px as i32,
+                top: py as i32,
+                right: (rect.x + rect.w - pad.right) as i32,
+                bottom: (rect.y + rect.h - pad.bottom) as i32,
+            },
+            tabs: tab_slots,
+        }
+    }
+
     fn render_pane(
         &mut self,
         pid: PaneId,
@@ -4063,6 +4321,19 @@ impl Renderer {
         let pad = self.pad;
         // This pane's own tab bar fills the top strip of its rect.
         let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
+
+        // Non-shell content kinds short-circuit the whole shell render
+        // path. The Welcome card (and future built-in kinds) lives in
+        // `content_buffer`, built lazily here.
+        let active_kind = self
+            .root
+            .as_ref()
+            .and_then(|n| n.find(pid))
+            .map(|p| p.active_tab_ref().kind)
+            .unwrap_or(TabContentKind::Shell);
+        if active_kind != TabContentKind::Shell {
+            return self.render_non_shell_pane(pid, rect, tab_slots, active_kind);
+        }
 
         // Content origin and clip box — below this pane's tab bar, inset
         // on all four sides by the configured padding.
