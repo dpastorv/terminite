@@ -95,6 +95,11 @@ pub enum OutPayload {
     /// Single-snapshot of terminite's internal state, for the debug
     /// surface. Bounded — no streaming, no growth.
     Stats(StatsPayload),
+    /// All discovered modules. Step 2a — registry only. Step 2b adds
+    /// per-module connection state.
+    Modules {
+        modules: Vec<crate::modules::ModuleManifest>,
+    },
     Error {
         message: String,
     },

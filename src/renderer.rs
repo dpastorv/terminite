@@ -198,28 +198,27 @@ struct Tab {
     content_buffer: Option<Buffer>,
 }
 
-/// What a tab currently shows. The shell case is the only one with a
-/// live PTY; other kinds render statically from `content_buffer`.
-/// Bundle 6 expands this enum (or replaces it with a module handle)
-/// when external modules land.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+/// What a tab currently shows. `Shell` has a live PTY behind it;
+/// `Welcome` is a built-in static card; `Module(id)` is an
+/// externally-registered module (step 2a: placeholder render only;
+/// step 2b spawns the process and wires IPC).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TabContentKind {
     Shell,
     Welcome,
+    Module(String),
 }
 
 impl TabContentKind {
-    fn label(self) -> &'static str {
+    /// Stable string key for label-buffer lookup. Built-ins get
+    /// hard-coded strings; modules use their id.
+    fn key(&self) -> &str {
         match self {
-            TabContentKind::Shell => "Shell",
-            TabContentKind::Welcome => "Welcome",
+            TabContentKind::Shell => "shell",
+            TabContentKind::Welcome => "welcome",
+            TabContentKind::Module(id) => id.as_str(),
         }
     }
-
-    /// Every kind selectable from the pane dropdown. Order matters —
-    /// it's the order shown in the menu.
-    const ALL: &'static [TabContentKind] =
-        &[TabContentKind::Shell, TabContentKind::Welcome];
 }
 
 impl Tab {
@@ -633,11 +632,14 @@ const FRAME_TIMER_CAP: usize = 120;
 /// header. Clicking it opens a popover with the available kinds.
 const KIND_SELECTOR_W: f32 = 110.0;
 
-/// The body text for each non-shell content kind. Static for now;
-/// future kinds may render from per-tab state.
-fn welcome_body(kind: TabContentKind) -> &'static str {
+/// Body text for each non-shell content kind. Modules render a
+/// placeholder until step 2b lands process spawning + IPC.
+fn non_shell_body(
+    kind: &TabContentKind,
+    registry: &crate::modules::Registry,
+) -> String {
     match kind {
-        TabContentKind::Shell => "",
+        TabContentKind::Shell => String::new(),
         TabContentKind::Welcome => "\
 welcome to terminite — a terminal for the human + AI pair.
 
@@ -649,7 +651,20 @@ pick Shell from the dropdown to drop into a real shell.
 two halves of the pair share one surface here. blocks (B1, B2, …)
 in the left gutter are command + output units the pair can name.
 the AI partner connects to ~/.terminite/socket and gets the same
-coordinates you do. see guide/getting-started.md for more.",
+coordinates you do. see guide/getting-started.md for more."
+            .to_string(),
+        TabContentKind::Module(id) => match registry.find(id) {
+            Some(m) => format!(
+                "module: {}  (v{})\nbinary: {}\n{}\n\n— execution lands in Bundle 6 step 2b —\nfor now this pane just confirms the module is\nregistered and selectable from the dropdown.",
+                m.name,
+                m.version,
+                m.binary.display(),
+                if m.description.is_empty() { "" } else { &m.description },
+            ),
+            None => format!(
+                "module '{id}' is no longer registered.\npick a different kind from the dropdown."
+            ),
+        },
     }
 }
 
@@ -978,10 +993,15 @@ pub struct Renderer {
     /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
     /// (one per tab) at different positions.
     close_buffer: Buffer,
-    /// One label buffer per `TabContentKind`, drawn in each pane's
-    /// kind-selector slot. Built once at startup; rebuilt when chrome
-    /// metrics change (font / size).
-    kind_label_buffers: Vec<Buffer>,
+    /// Label buffers for the kind-selector dropdown, keyed by the
+    /// kind's `key()`. Built at startup for built-ins + every
+    /// discovered module; reusable across all panes since the labels
+    /// are stable per kind.
+    kind_label_buffers: std::collections::HashMap<String, Buffer>,
+    /// Registered modules — extension surface inhabitants.
+    /// Step 2a: discovered at startup, surfaced in the dropdown +
+    /// `module list` CLI. Step 2b spawns the binaries.
+    modules: crate::modules::Registry,
 
     /// Layout metrics — derived once at startup from the config and a font
     /// measurement. font_size / family / padding are startup-applied; the
@@ -1245,18 +1265,26 @@ impl Renderer {
             tab_line_h,
             tab_max_width,
         );
-        let kind_label_buffers = TabContentKind::ALL
-            .iter()
-            .map(|k| {
+        let modules = crate::modules::Registry::discover();
+        let mut kind_label_buffers: std::collections::HashMap<String, Buffer> =
+            std::collections::HashMap::new();
+        let mut add_label = |fs: &mut FontSystem, key: &str, name: &str| {
+            kind_label_buffers.insert(
+                key.to_string(),
                 make_title_buffer(
-                    &mut font_system,
-                    &format!("{} ▾", k.label()),
+                    fs,
+                    &format!("{name} ▾"),
                     tab_font_size,
                     tab_line_h,
                     KIND_SELECTOR_W,
-                )
-            })
-            .collect();
+                ),
+            );
+        };
+        add_label(&mut font_system, "shell", "Shell");
+        add_label(&mut font_system, "welcome", "Welcome");
+        for m in modules.list() {
+            add_label(&mut font_system, &m.id, &m.name);
+        }
 
         let mut renderer = Self {
             instance,
@@ -1278,6 +1306,7 @@ impl Renderer {
             texture_renderer,
             close_buffer,
             kind_label_buffers,
+            modules,
             cell_advance,
             line_height,
             pad,
@@ -1574,19 +1603,30 @@ impl Renderer {
         let current = self
             .root_ref()
             .find(pid)
-            .map(|p| p.active_tab_ref().kind)
+            .map(|p| p.active_tab_ref().kind.clone())
             .unwrap_or(TabContentKind::Shell);
-        let items: Vec<MenuItem> = TabContentKind::ALL
-            .iter()
-            .map(|k| {
-                let label = if *k == current {
-                    format!("• {}", k.label())
+
+        // Menu: built-ins first, then every discovered module in
+        // registry order.
+        let mut entries: Vec<(TabContentKind, String)> = vec![
+            (TabContentKind::Shell, "Shell".to_string()),
+            (TabContentKind::Welcome, "Welcome".to_string()),
+        ];
+        for m in self.modules.list() {
+            entries.push((TabContentKind::Module(m.id.clone()), m.name.clone()));
+        }
+
+        let items: Vec<MenuItem> = entries
+            .into_iter()
+            .map(|(kind, name)| {
+                let label = if kind == current {
+                    format!("• {name}")
                 } else {
-                    format!("  {}", k.label())
+                    format!("  {name}")
                 };
                 MenuItem {
                     label_buf: make_modal_buffer(&mut self.font_system, &label),
-                    action: MenuAction::SetTabKind { pane: pid, kind: *k },
+                    action: MenuAction::SetTabKind { pane: pid, kind },
                     enabled: true,
                 }
             })
@@ -1650,7 +1690,8 @@ impl Renderer {
                 self.copy_selection();
             }
             MenuAction::SetTabKind { pane, kind } => {
-                let (pane, kind) = (*pane, *kind);
+                let pane = *pane;
+                let kind = kind.clone();
                 if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pane)) {
                     p.active_tab_mut().kind = kind;
                     p.active_tab_mut().content_buffer = None;
@@ -2974,6 +3015,9 @@ impl Renderer {
             "cursor_clear" => self.proto_cursor_clear(&req.params),
             "export_tab" => self.proto_export_tab(&req.params),
             "stats" => self.proto_stats(),
+            "list_modules" => crate::proto::OutPayload::Modules {
+                modules: self.modules.list().to_vec(),
+            },
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -3904,13 +3948,13 @@ impl Renderer {
                     default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                     custom_glyphs: &[],
                 });
-                // Kind selector label — leftmost in the bar.
-                let active_kind = pane.active_tab_ref().kind;
-                let kind_idx = TabContentKind::ALL
-                    .iter()
-                    .position(|k| *k == active_kind)
-                    .unwrap_or(0);
-                if let Some(label_buf) = self.kind_label_buffers.get(kind_idx) {
+                // Kind selector label — leftmost in the bar. Looked up
+                // by the kind's stable key. If a module was unregistered
+                // since the tab last switched to it, the buffer is gone
+                // and we just skip rendering the label (the dropdown
+                // still works to pick a new kind).
+                let active_kind = &pane.active_tab_ref().kind;
+                if let Some(label_buf) = self.kind_label_buffers.get(active_kind.key()) {
                     let bar_top = pane_rect.y;
                     let text_top =
                         bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
@@ -4251,7 +4295,7 @@ impl Renderer {
             .max(self.line_height);
 
         // Build / refresh content_buffer if needed.
-        let body = welcome_body(kind);
+        let body = non_shell_body(&kind, &self.modules);
         let font_size = self.font_size;
         let line_height = self.line_height;
         let family = self.font_family.clone();
@@ -4275,7 +4319,7 @@ impl Renderer {
                 let attrs = Attrs::new().family(font_family(&family));
                 buf.set_text(
                     &mut self.font_system,
-                    body,
+                    &body,
                     &attrs,
                     Shaping::Advanced,
                     None,
@@ -4329,7 +4373,7 @@ impl Renderer {
             .root
             .as_ref()
             .and_then(|n| n.find(pid))
-            .map(|p| p.active_tab_ref().kind)
+            .map(|p| p.active_tab_ref().kind.clone())
             .unwrap_or(TabContentKind::Shell);
         if active_kind != TabContentKind::Shell {
             return self.render_non_shell_pane(pid, rect, tab_slots, active_kind);

@@ -13,6 +13,7 @@ mod blocks;
 mod config;
 mod images;
 mod logging;
+mod modules;
 mod palette;
 mod proto;
 mod proto_client;

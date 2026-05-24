@@ -70,6 +70,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "cursor-clear" => Some(cmd_cursor_clear(args.get(1).and_then(|s| s.parse().ok()))),
         "export" => Some(cmd_export(&args[1..])),
         "stats" => Some(cmd_stats()),
+        "module" => Some(cmd_module(&args[1..])),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -102,6 +103,7 @@ USAGE
                                      [--since <id>] starts from block id
   terminite stats                    snapshot of internal state
                                      (frames, tabs, blocks, memory)
+  terminite module list              registered modules (extension surface)
   terminite help                     this message
 
 ENV
@@ -158,6 +160,16 @@ fn cmd_watch() -> ExitCode {
 
 fn cmd_stats() -> ExitCode {
     one_shot(r#"{"id":1,"method":"stats"}"#)
+}
+
+fn cmd_module(args: &[String]) -> ExitCode {
+    match args.first().map(|s| s.as_str()) {
+        Some("list") => one_shot(r#"{"id":1,"method":"list_modules"}"#),
+        _ => {
+            eprintln!("usage: terminite module list");
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn cmd_tag(tab_id: Option<u64>, block_id: Option<u32>, tag: Option<&String>) -> ExitCode {
