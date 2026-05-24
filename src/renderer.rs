@@ -675,23 +675,52 @@ fn pane_grid(
 }
 
 /// Geometry of each tab inside a pane's tab bar: `(x_start, width, is_active)`.
-/// Widths shrink uniformly between `min_width` and `max_width`.
+///
+/// Widths are per-tab dynamic: each tab's *ideal* width is its measured
+/// title width plus the chrome insets (label inset + close-glyph
+/// reservation), clamped to `[min_width, max_width]`. If the sum fits in
+/// the available bar, each tab gets exactly its ideal. If not, every
+/// tab shrinks proportionally; nothing drops below `min_width` even
+/// then. With enough tabs this can overflow — accept that, the user
+/// either closes some or lives with clipping.
 fn pane_tab_layout(
     rect: PaneRect,
-    n: usize,
+    title_widths: &[f32],
     active: usize,
     min_width: f32,
     max_width: f32,
 ) -> Vec<(f32, f32, bool)> {
+    let n = title_widths.len();
     if n == 0 {
         return Vec::new();
     }
     // Reserve the top-right corner for the split handle.
     let avail = (rect.w - SPLIT_HANDLE_SIZE).max(min_width);
-    let per = (avail / n as f32).clamp(min_width, max_width);
-    (0..n)
-        .map(|i| (rect.x + i as f32 * per, per, i == active))
-        .collect()
+    let chrome = TAB_LABEL_INSET + TAB_CLOSE_WIDTH;
+    let ideal: Vec<f32> = title_widths
+        .iter()
+        .map(|w| (w + chrome).clamp(min_width, max_width))
+        .collect();
+    let total: f32 = ideal.iter().sum();
+    let widths: Vec<f32> = if total <= avail {
+        ideal
+    } else {
+        let factor = avail / total;
+        ideal.iter().map(|w| (w * factor).max(min_width)).collect()
+    };
+    let mut x = rect.x;
+    let mut out = Vec::with_capacity(n);
+    for (i, w) in widths.into_iter().enumerate() {
+        out.push((x, w, i == active));
+        x += w;
+    }
+    out
+}
+
+/// Render-shaped width of a chrome buffer's first line. Used to size
+/// tabs to their actual title text rather than equal share.
+fn measure_title_width(buf: &Buffer) -> f32 {
+    buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0)
 }
 
 /// Walk the pane tree, emitting one rect per split divider gap.
@@ -1988,11 +2017,16 @@ impl Renderer {
     /// Handle a left-click inside pane `pid`'s tab-bar strip: switch to the
     /// clicked tab, or close it if the × close-zone was hit.
     fn tab_bar_click(&mut self, pid: PaneId, prect: PaneRect) {
-        let (n, active) = {
+        let (title_widths, active) = {
             let pane = self.root_ref().find(pid).expect("pane present");
-            (pane.tabs.len(), pane.active_tab)
+            let widths: Vec<f32> = pane
+                .tabs
+                .iter()
+                .map(|t| measure_title_width(&t.title_buffer))
+                .collect();
+            (widths, pane.active_tab)
         };
-        let layout = pane_tab_layout(prect, n, active, self.tab_min_width, self.tab_max_width);
+        let layout = pane_tab_layout(prect, &title_widths, active, self.tab_min_width, self.tab_max_width);
         let mut hit: Option<(usize, f32, f32)> = None;
         for (i, (tx, tw, _)) in layout.iter().enumerate() {
             if self.mouse_pos.0 >= *tx && self.mouse_pos.0 < *tx + *tw {
@@ -2004,7 +2038,7 @@ impl Renderer {
         if self.mouse_pos.0 >= tx + tw - TAB_CLOSE_WIDTH {
             // Don't let a stray × click close the window — the very last tab
             // of the very last pane stays put; Cmd+W is the deliberate path.
-            let last = self.root_ref().leaf_count() == 1 && n == 1;
+            let last = self.root_ref().leaf_count() == 1 && title_widths.len() == 1;
             if !last {
                 self.active_pane_mut().active_tab = i;
                 self.close_active_tab();
@@ -3164,9 +3198,14 @@ impl Renderer {
         out: &mut Vec<RectInstance>,
     ) -> Vec<TabLabelSlot> {
         let pane = self.root_ref().find(pid).expect("pane present");
+        let title_widths: Vec<f32> = pane
+            .tabs
+            .iter()
+            .map(|t| measure_title_width(&t.title_buffer))
+            .collect();
         let layout = pane_tab_layout(
             rect,
-            pane.tabs.len(),
+            &title_widths,
             pane.active_tab,
             self.tab_min_width,
             self.tab_max_width,
