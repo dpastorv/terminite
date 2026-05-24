@@ -70,11 +70,24 @@ pub struct OutMessage {
 #[derive(Serialize, Debug)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OutPayload {
-    Tabs { tabs: Vec<TabInfo> },
-    Blocks { blocks: Vec<BlockInfo> },
-    Block { block: BlockData },
+    Tabs {
+        tabs: Vec<TabInfo>,
+    },
+    Blocks {
+        blocks: Vec<BlockInfo>,
+        /// The block this tab's AI cursor is on, or null.
+        cursor: Option<u32>,
+    },
+    Block {
+        block: BlockData,
+    },
     Subscribed,
-    Error { message: String },
+    /// Acknowledgement for write methods (`set_tag`, `remove_tag`,
+    /// `cursor_at`, `cursor_clear`). Empty on success.
+    Ok,
+    Error {
+        message: String,
+    },
     Event(EventPayload),
 }
 
@@ -106,6 +119,7 @@ pub struct BlockInfo {
     pub command_end_line: Option<i32>,
     pub output_start_line: Option<i32>,
     pub output_end_line: Option<i32>,
+    pub tags: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]

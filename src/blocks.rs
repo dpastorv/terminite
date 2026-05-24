@@ -22,6 +22,10 @@ use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 /// evict. Each block is fixed-shape plus a tiny label `Buffer`, so the
 /// cap bounds memory at ~hundreds of KB per tab.
 pub const MAX_BLOCKS_PER_TAB: usize = 1000;
+/// Per-block tag count cap. Beyond this, `add_tag` is a no-op.
+pub const MAX_TAGS_PER_BLOCK: usize = 32;
+/// Per-tag character cap. Longer tags are rejected.
+pub const MAX_TAG_LEN: usize = 64;
 
 /// Matches the existing tab-bar chrome font so a block's `B7` label
 /// looks the same as a tab title.
@@ -47,6 +51,10 @@ pub struct Block {
     /// the label against the content edge, so it needs to know the label's
     /// actual width to compute the `left` for the TextArea.
     pub label_width: f32,
+    /// Free-form labels attached by the pair to give a block a handle
+    /// past its id ("flaky-test", "deploy-2026-05-23"). Either side can
+    /// add or remove; bounded by `MAX_TAGS_PER_BLOCK` and `MAX_TAG_LEN`.
+    pub tags: Vec<String>,
 }
 
 impl Block {
@@ -78,11 +86,83 @@ pub struct BlockStore {
     closed: VecDeque<Block>,
     open: Option<Block>,
     next_id: u32,
+    /// The block this tab's AI cursor is "reading right now," if any.
+    /// Set via the proto `cursor_at` method; cleared by `cursor_clear`
+    /// or by the cursored block aging out of the closed cap.
+    cursor: Option<u32>,
 }
 
 impl BlockStore {
     pub fn new() -> Self {
-        Self { closed: VecDeque::new(), open: None, next_id: 1 }
+        Self {
+            closed: VecDeque::new(),
+            open: None,
+            next_id: 1,
+            cursor: None,
+        }
+    }
+
+    /// The block currently under the AI cursor, if any.
+    pub fn cursor(&self) -> Option<u32> {
+        self.cursor
+    }
+
+    /// Move the AI cursor to a block. Returns `true` if the block
+    /// exists and the cursor moved; `false` if the id is unknown (the
+    /// cursor stays where it was).
+    pub fn set_cursor(&mut self, block_id: u32) -> bool {
+        if self.find(block_id).is_some() {
+            self.cursor = Some(block_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop the AI cursor from this tab.
+    pub fn clear_cursor(&mut self) {
+        self.cursor = None;
+    }
+
+    /// Append a tag to a block. Idempotent (re-adding is a no-op), and
+    /// bounded by `MAX_TAGS_PER_BLOCK` + `MAX_TAG_LEN`. Returns `true`
+    /// on success; `false` if the block is unknown, the tag is empty
+    /// or too long, or the cap is hit.
+    pub fn add_tag(&mut self, block_id: u32, tag: &str) -> bool {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.len() > MAX_TAG_LEN {
+            return false;
+        }
+        let Some(block) = self.find_mut(block_id) else { return false };
+        if block.tags.iter().any(|t| t == tag) {
+            return true; // already present — treat as success
+        }
+        if block.tags.len() >= MAX_TAGS_PER_BLOCK {
+            return false;
+        }
+        block.tags.push(tag.to_string());
+        true
+    }
+
+    /// Remove one tag from a block. Returns `true` if the tag was
+    /// present; `false` if the block or tag wasn't found.
+    pub fn remove_tag(&mut self, block_id: u32, tag: &str) -> bool {
+        let Some(block) = self.find_mut(block_id) else { return false };
+        if let Some(idx) = block.tags.iter().position(|t| t == tag) {
+            block.tags.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn find_mut(&mut self, id: u32) -> Option<&mut Block> {
+        if let Some(open) = self.open.as_mut() {
+            if open.id == id {
+                return Some(open);
+            }
+        }
+        self.closed.iter_mut().find(|b| b.id == id)
     }
 
     /// Apply one OSC 133 mark. `line` is the session-absolute row index
@@ -174,13 +254,21 @@ impl BlockStore {
             finished_at: None,
             label_buffer,
             label_width,
+            tags: Vec::new(),
         }
     }
 
     fn push_closed(&mut self, b: Block) {
         self.closed.push_back(b);
         while self.closed.len() > MAX_BLOCKS_PER_TAB {
-            self.closed.pop_front();
+            let evicted = self.closed.pop_front();
+            // If the AI cursor was pinned to a block that just aged out,
+            // clear it — better silent than pointing at nothing.
+            if let (Some(evicted), Some(cur)) = (evicted, self.cursor) {
+                if evicted.id == cur {
+                    self.cursor = None;
+                }
+            }
         }
     }
 }
@@ -282,5 +370,107 @@ mod tests {
         assert_eq!(b.anchor_line(), Some(4));
         b.output_start_line = Some(5);
         assert_eq!(b.anchor_line(), Some(5));
+    }
+
+    fn one_block(s: &mut BlockStore, fs: &mut FontSystem) -> u32 {
+        s.on_mark('A', None, 0, fs);
+        s.on_mark('D', Some(0), 0, fs);
+        s.iter().last().unwrap().id
+    }
+
+    #[test]
+    fn add_tag_and_list() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        assert!(s.add_tag(id, "flaky"));
+        assert!(s.add_tag(id, "tuesday"));
+        let block = s.find(id).unwrap();
+        assert_eq!(block.tags, vec!["flaky".to_string(), "tuesday".to_string()]);
+    }
+
+    #[test]
+    fn add_tag_is_idempotent() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        assert!(s.add_tag(id, "x"));
+        assert!(s.add_tag(id, "x")); // same tag again — still ok
+        assert_eq!(s.find(id).unwrap().tags.len(), 1);
+    }
+
+    #[test]
+    fn add_tag_rejects_empty_or_too_long() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        assert!(!s.add_tag(id, ""));
+        assert!(!s.add_tag(id, "   "));
+        let too_long = "x".repeat(MAX_TAG_LEN + 1);
+        assert!(!s.add_tag(id, &too_long));
+    }
+
+    #[test]
+    fn add_tag_caps_per_block() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        for i in 0..MAX_TAGS_PER_BLOCK {
+            assert!(s.add_tag(id, &format!("tag-{i}")));
+        }
+        assert!(!s.add_tag(id, "one-too-many"));
+    }
+
+    #[test]
+    fn remove_tag_works() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        s.add_tag(id, "a");
+        s.add_tag(id, "b");
+        assert!(s.remove_tag(id, "a"));
+        assert_eq!(s.find(id).unwrap().tags, vec!["b".to_string()]);
+        assert!(!s.remove_tag(id, "a")); // already gone
+    }
+
+    #[test]
+    fn add_tag_on_open_block() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        s.on_mark('A', None, 0, &mut fs);
+        let id = s.iter().last().unwrap().id;
+        assert!(s.add_tag(id, "in-flight"));
+        assert_eq!(s.find(id).unwrap().tags, vec!["in-flight".to_string()]);
+    }
+
+    #[test]
+    fn set_and_clear_cursor() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        assert!(s.set_cursor(id));
+        assert_eq!(s.cursor(), Some(id));
+        s.clear_cursor();
+        assert_eq!(s.cursor(), None);
+    }
+
+    #[test]
+    fn set_cursor_rejects_unknown_id() {
+        let mut s = BlockStore::new();
+        assert!(!s.set_cursor(99));
+        assert_eq!(s.cursor(), None);
+    }
+
+    #[test]
+    fn cursor_clears_when_pinned_block_evicts() {
+        let mut fs = fs();
+        let mut s = BlockStore::new();
+        let id = one_block(&mut s, &mut fs);
+        s.set_cursor(id);
+        // Generate enough blocks to push the cursored one off the cap.
+        for _ in 0..MAX_BLOCKS_PER_TAB {
+            one_block(&mut s, &mut fs);
+        }
+        assert_eq!(s.cursor(), None);
     }
 }

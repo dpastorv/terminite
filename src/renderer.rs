@@ -604,6 +604,7 @@ fn block_to_info(b: &crate::blocks::Block) -> crate::proto::BlockInfo {
         command_end_line: b.command_end_line,
         output_start_line: b.output_start_line,
         output_end_line: b.output_end_line,
+        tags: b.tags.clone(),
     }
 }
 
@@ -2627,6 +2628,10 @@ impl Renderer {
                 self.proto_subscriber = Some(out.clone());
                 crate::proto::OutPayload::Subscribed
             }
+            "set_tag" => self.proto_set_tag(&req.params),
+            "remove_tag" => self.proto_remove_tag(&req.params),
+            "cursor_at" => self.proto_cursor_at(&req.params),
+            "cursor_clear" => self.proto_cursor_clear(&req.params),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -2662,7 +2667,112 @@ impl Renderer {
             };
         };
         let blocks = tab.blocks.iter().map(block_to_info).collect();
-        crate::proto::OutPayload::Blocks { blocks }
+        let cursor = tab.blocks.cursor();
+        crate::proto::OutPayload::Blocks { blocks, cursor }
+    }
+
+    fn proto_mutate_tab<F>(&mut self, params: &serde_json::Value, f: F) -> crate::proto::OutPayload
+    where
+        F: FnOnce(&mut Tab) -> crate::proto::OutPayload,
+    {
+        let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tab_id".into(),
+            };
+        };
+        let tab_id = TabId(tab_id_u64);
+        let mut all: Vec<&mut Tab> = Vec::new();
+        self.root
+            .as_mut()
+            .expect("pane tree present")
+            .all_tabs_mut(&mut all);
+        let Some(tab) = all.into_iter().find(|t| t.id == tab_id) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("no tab with id {tab_id_u64}"),
+            };
+        };
+        f(tab)
+    }
+
+    fn proto_set_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid block_id".into(),
+            };
+        };
+        let block_id = block_id as u32;
+        let Some(tag) = params.get("tag").and_then(|v| v.as_str()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tag".into(),
+            };
+        };
+        let tag = tag.to_string();
+        let payload = self.proto_mutate_tab(params, |tab| {
+            if tab.blocks.add_tag(block_id, &tag) {
+                crate::proto::OutPayload::Ok
+            } else {
+                crate::proto::OutPayload::Error {
+                    message: format!("could not add tag {tag:?} to block {block_id}"),
+                }
+            }
+        });
+        self.window.request_redraw();
+        payload
+    }
+
+    fn proto_remove_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid block_id".into(),
+            };
+        };
+        let block_id = block_id as u32;
+        let Some(tag) = params.get("tag").and_then(|v| v.as_str()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tag".into(),
+            };
+        };
+        let tag = tag.to_string();
+        let payload = self.proto_mutate_tab(params, |tab| {
+            if tab.blocks.remove_tag(block_id, &tag) {
+                crate::proto::OutPayload::Ok
+            } else {
+                crate::proto::OutPayload::Error {
+                    message: format!("tag {tag:?} not present on block {block_id}"),
+                }
+            }
+        });
+        self.window.request_redraw();
+        payload
+    }
+
+    fn proto_cursor_at(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid block_id".into(),
+            };
+        };
+        let block_id = block_id as u32;
+        let payload = self.proto_mutate_tab(params, |tab| {
+            if tab.blocks.set_cursor(block_id) {
+                crate::proto::OutPayload::Ok
+            } else {
+                crate::proto::OutPayload::Error {
+                    message: format!("no block with id {block_id}"),
+                }
+            }
+        });
+        self.window.request_redraw();
+        payload
+    }
+
+    fn proto_cursor_clear(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let payload = self.proto_mutate_tab(params, |tab| {
+            tab.blocks.clear_cursor();
+            crate::proto::OutPayload::Ok
+        });
+        self.window.request_redraw();
+        payload
     }
 
     fn proto_get_block(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
@@ -3381,6 +3491,12 @@ impl Renderer {
                 let label_right = pane_rect.x + pad.left - self.gutter_gap;
                 let label_left_min = pane_rect.x + gutter_left;
                 let v_pad = ((line_height - LABEL_LINE_H) * 0.5).max(0.0);
+                // Three-state color: a warm bright for the AI cursor
+                // (presence), a slight lift for tagged blocks (annotated),
+                // the subdued default for everything else.
+                let cursor_color = Color::rgb(245, 200, 110);
+                let tagged_color = Color::rgb(180, 180, 200);
+                let cursor_block_id = tab_ref.blocks.cursor();
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
                     let vl = abs - history + display_offset;
@@ -3390,6 +3506,13 @@ impl Renderer {
                     let row_top = py + vl as f32 * line_height + y_shift;
                     let top = row_top + v_pad;
                     let left = label_right - block.label_width;
+                    let color = if Some(block.id) == cursor_block_id {
+                        cursor_color
+                    } else if !block.tags.is_empty() {
+                        tagged_color
+                    } else {
+                        block_label_color
+                    };
                     tab_areas.push(TextArea {
                         buffer: &block.label_buffer,
                         left,
@@ -3401,7 +3524,7 @@ impl Renderer {
                             right: label_right as i32,
                             bottom: (row_top + line_height) as i32,
                         },
-                        default_color: block_label_color,
+                        default_color: color,
                         custom_glyphs: &[],
                     });
                 }

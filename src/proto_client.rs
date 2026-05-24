@@ -53,6 +53,21 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
             args.get(2).and_then(|s| s.parse().ok()),
         )),
         "watch" => Some(cmd_watch()),
+        "tag" => Some(cmd_tag(
+            args.get(1).and_then(|s| s.parse().ok()),
+            args.get(2).and_then(|s| s.parse().ok()),
+            args.get(3),
+        )),
+        "untag" => Some(cmd_untag(
+            args.get(1).and_then(|s| s.parse().ok()),
+            args.get(2).and_then(|s| s.parse().ok()),
+            args.get(3),
+        )),
+        "cursor" => Some(cmd_cursor(
+            args.get(1).and_then(|s| s.parse().ok()),
+            args.get(2).and_then(|s| s.parse().ok()),
+        )),
+        "cursor-clear" => Some(cmd_cursor_clear(args.get(1).and_then(|s| s.parse().ok()))),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -76,6 +91,10 @@ USAGE
   terminite blocks [tab_id]          list blocks in a tab (default 0)
   terminite block <tab_id> <id>      print one block's command + output
   terminite watch                    stream block_opened / block_closed events
+  terminite tag <tab> <id> <tag>     attach a tag to a block
+  terminite untag <tab> <id> <tag>   remove a tag from a block
+  terminite cursor <tab> <id>        move the AI cursor to a block
+  terminite cursor-clear <tab>       drop the AI cursor from a tab
   terminite help                     this message
 
 ENV
@@ -128,6 +147,67 @@ fn cmd_watch() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_tag(tab_id: Option<u64>, block_id: Option<u32>, tag: Option<&String>) -> ExitCode {
+    let (Some(tab_id), Some(block_id), Some(tag)) = (tab_id, block_id, tag) else {
+        eprintln!("usage: terminite tag <tab_id> <block_id> <tag>");
+        return ExitCode::from(2);
+    };
+    let tag = json_escape(tag);
+    one_shot(&format!(
+        r#"{{"id":1,"method":"set_tag","params":{{"tab_id":{tab_id},"block_id":{block_id},"tag":"{tag}"}}}}"#
+    ))
+}
+
+fn cmd_untag(tab_id: Option<u64>, block_id: Option<u32>, tag: Option<&String>) -> ExitCode {
+    let (Some(tab_id), Some(block_id), Some(tag)) = (tab_id, block_id, tag) else {
+        eprintln!("usage: terminite untag <tab_id> <block_id> <tag>");
+        return ExitCode::from(2);
+    };
+    let tag = json_escape(tag);
+    one_shot(&format!(
+        r#"{{"id":1,"method":"remove_tag","params":{{"tab_id":{tab_id},"block_id":{block_id},"tag":"{tag}"}}}}"#
+    ))
+}
+
+fn cmd_cursor(tab_id: Option<u64>, block_id: Option<u32>) -> ExitCode {
+    let (Some(tab_id), Some(block_id)) = (tab_id, block_id) else {
+        eprintln!("usage: terminite cursor <tab_id> <block_id>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"cursor_at","params":{{"tab_id":{tab_id},"block_id":{block_id}}}}}"#
+    ))
+}
+
+fn cmd_cursor_clear(tab_id: Option<u64>) -> ExitCode {
+    let Some(tab_id) = tab_id else {
+        eprintln!("usage: terminite cursor-clear <tab_id>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"cursor_clear","params":{{"tab_id":{tab_id}}}}}"#
+    ))
+}
+
+/// Escape just enough for JSON-in-a-string: backslash, quote, and the
+/// usual whitespace controls. Anything that arrives via argv is local
+/// user input; bigger escape policies aren't needed at this surface.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn one_shot(req: &str) -> ExitCode {
