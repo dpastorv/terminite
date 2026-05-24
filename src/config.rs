@@ -65,6 +65,15 @@ pub struct Config {
     /// line content. Pushes the label further off the line without
     /// touching the content rect. Hot-reloaded.
     pub gutter_gap: f32,
+    /// Horizontal padding on the cursor / tag highlight rect around the
+    /// label glyphs. Hot-reloaded.
+    pub highlight_pad_x: f32,
+    /// Vertical padding on the highlight rect. Hot-reloaded.
+    pub highlight_pad_y: f32,
+    /// Vertical nudge applied to the highlight rect after padding. Use
+    /// to dial in the visual centering since glyph caps don't always
+    /// sit dead-center in `LABEL_LINE_H`. Hot-reloaded.
+    pub highlight_offset_y: f32,
     /// Multiplier on the font's natural line height. 1.0 = no change.
     /// Smaller packs lines tighter; larger spreads them out.
     /// Hot-reloaded — each tab's buffer metrics update on focus-gain.
@@ -89,6 +98,9 @@ impl Default for Config {
             padding: Padding { left: 55.0, right: 24.0, top: 16.0, bottom: 16.0 },
             gutter_left: 8.0,
             gutter_gap: 8.0,
+            highlight_pad_x: 4.0,
+            highlight_pad_y: 2.0,
+            highlight_offset_y: 0.0,
             line_height: 1.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
@@ -157,6 +169,23 @@ impl Config {
                 "gutter_gap" => {
                     if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
                         self.gutter_gap = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "highlight_pad_x" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.highlight_pad_x = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "highlight_pad_y" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.highlight_pad_y = n.clamp(0.0, MAX_PADDING);
+                    }
+                }
+                "highlight_offset_y" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        // Signed nudge; clamp to a small range so a
+                        // bad value can't pull the rect off-screen.
+                        self.highlight_offset_y = n.clamp(-100.0, 100.0);
                     }
                 }
                 "line_height" => {
@@ -308,6 +337,9 @@ mod tests {
              padding_bottom = 4\n\
              gutter_left = 8\n\
              gutter_gap = 6\n\
+             highlight_pad_x = 5\n\
+             highlight_pad_y = 3\n\
+             highlight_offset_y = -2\n\
              line_height = 1.25\n",
         );
         assert_eq!(c.font_family, "JetBrains Mono");
@@ -318,6 +350,9 @@ mod tests {
         assert_eq!(c.padding.bottom, 4.0);
         assert_eq!(c.gutter_left, 8.0);
         assert_eq!(c.gutter_gap, 6.0);
+        assert_eq!(c.highlight_pad_x, 5.0);
+        assert_eq!(c.highlight_pad_y, 3.0);
+        assert_eq!(c.highlight_offset_y, -2.0);
         assert_eq!(c.line_height, 1.25);
     }
 

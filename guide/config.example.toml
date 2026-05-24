@@ -34,6 +34,18 @@ gutter_left = 8
 # label more breathing room from what it's tagging. Hot-reloaded.
 gutter_gap = 8
 
+# Cursor / tag highlight rect tuning. The highlight is a colored
+# rectangle behind the block label (`<mark>`-style). Dial in the box
+# size and vertical centering for whatever font / line_height you're
+# running. Hot-reloaded; tweak in a side pane and click back to apply.
+#   - highlight_pad_x: horizontal pad around the label glyphs (px, 0–400).
+#   - highlight_pad_y: vertical pad around the label glyphs (px, 0–400).
+#   - highlight_offset_y: small vertical nudge (px, ±100). Use when the
+#     glyph caps don't sit dead-center in the label's line box.
+highlight_pad_x = 4
+highlight_pad_y = 2
+highlight_offset_y = 0
+
 # Multiplier on the font's natural line height. 1.0 = no change; <1 packs
 # lines tighter, >1 spreads them out. Clamped to 0.7–3.0. Hot-reloaded.
 line_height = 1.0

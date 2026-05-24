@@ -874,6 +874,12 @@ pub struct Renderer {
     gutter_left: f32,
     /// Space between the block label's right edge and the line content.
     gutter_gap: f32,
+    /// Cursor / tag highlight rect insets — tunable via the live config
+    /// so the box can be dialed in for whatever font / line_height
+    /// the user is running.
+    highlight_pad_x: f32,
+    highlight_pad_y: f32,
+    highlight_offset_y: f32,
     font_size: f32,
     font_family: String,
     grid_cols: usize,
@@ -1001,6 +1007,9 @@ impl Renderer {
         let pad = config.padding;
         let gutter_left = config.gutter_left;
         let gutter_gap = config.gutter_gap;
+        let highlight_pad_x = config.highlight_pad_x;
+        let highlight_pad_y = config.highlight_pad_y;
+        let highlight_offset_y = config.highlight_offset_y;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -1101,6 +1110,9 @@ impl Renderer {
             pad,
             gutter_left,
             gutter_gap,
+            highlight_pad_x,
+            highlight_pad_y,
+            highlight_offset_y,
             font_size,
             font_family,
             grid_cols: cols,
@@ -1701,7 +1713,10 @@ impl Renderer {
         let line_height_changed = (new_line_height - self.line_height).abs() > f32::EPSILON;
         let pad_or_gutter_changed = self.pad != self.config.padding
             || self.gutter_left != self.config.gutter_left
-            || self.gutter_gap != self.config.gutter_gap;
+            || self.gutter_gap != self.config.gutter_gap
+            || self.highlight_pad_x != self.config.highlight_pad_x
+            || self.highlight_pad_y != self.config.highlight_pad_y
+            || self.highlight_offset_y != self.config.highlight_offset_y;
         if !line_height_changed && !pad_or_gutter_changed {
             return;
         }
@@ -1709,6 +1724,9 @@ impl Renderer {
         self.pad = self.config.padding;
         self.gutter_left = self.config.gutter_left;
         self.gutter_gap = self.config.gutter_gap;
+        self.highlight_pad_x = self.config.highlight_pad_x;
+        self.highlight_pad_y = self.config.highlight_pad_y;
+        self.highlight_offset_y = self.config.highlight_offset_y;
         self.line_height = new_line_height;
 
         if line_height_changed {
@@ -3502,8 +3520,9 @@ impl Renderer {
                 let cursor_bg: [f32; 4] = [1.0, 0.83, 0.30, 0.95];
                 let tagged_bg: [f32; 4] = [0.45, 0.50, 0.65, 0.45];
                 let cursor_text = Color::rgb(20, 20, 30);
-                const HIGHLIGHT_PAD_X: f32 = 4.0;
-                const HIGHLIGHT_PAD_Y: f32 = 2.0;
+                let highlight_pad_x = self.highlight_pad_x;
+                let highlight_pad_y = self.highlight_pad_y;
+                let highlight_offset_y = self.highlight_offset_y;
                 let cursor_block_id = tab_ref.blocks.cursor();
                 for block in tab_ref.blocks.iter() {
                     let Some(abs) = block.anchor_line() else { continue };
@@ -3526,13 +3545,15 @@ impl Renderer {
                         // Highlight clamped to the gutter strip so it
                         // never bleeds into line content. tab_bar rect
                         // layer renders before tab_text_renderer, so the
-                        // fill sits behind the label text.
-                        let hx = (left - HIGHLIGHT_PAD_X).max(pane_rect.x);
-                        let hr = (label_right + HIGHLIGHT_PAD_X)
+                        // fill sits behind the label text. The pads +
+                        // offset come from config so the box can be
+                        // dialed in live without a recompile.
+                        let hx = (left - highlight_pad_x).max(pane_rect.x);
+                        let hr = (label_right + highlight_pad_x)
                             .min(pane_rect.x + pad.left);
                         let hw = (hr - hx).max(0.0);
-                        let hy = top - HIGHLIGHT_PAD_Y;
-                        let hh = LABEL_LINE_H + HIGHLIGHT_PAD_Y * 2.0;
+                        let hy = top - highlight_pad_y + highlight_offset_y;
+                        let hh = LABEL_LINE_H + highlight_pad_y * 2.0;
                         tab_bar.push(RectInstance {
                             rect: [hx, hy, hw, hh],
                             color,
