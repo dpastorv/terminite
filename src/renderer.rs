@@ -2153,6 +2153,16 @@ impl Renderer {
     /// Make a pane the active one.
     fn focus_pane(&mut self, pid: PaneId) {
         if self.active_pane != pid {
+            // Drop any selection the *prior* pane's active tab still
+            // holds — keeping it across a pane switch reads as
+            // "stale highlight in the pane I just left." Each pane
+            // re-selects on its own click.
+            let prior = self.active_pane;
+            if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(prior)) {
+                let tab = p.active_tab_mut();
+                tab.selection = None;
+                tab.dragging = false;
+            }
             self.active_pane = pid;
             self.sync_active_grid();
             self.window.set_title(&self.active_tab_ref().title);
@@ -3023,6 +3033,12 @@ impl Renderer {
             "list_modules" => crate::proto::OutPayload::Modules {
                 modules: self.modules.list().to_vec(),
             },
+            "reload_modules" => {
+                self.reload_modules();
+                crate::proto::OutPayload::Modules {
+                    modules: self.modules.list().to_vec(),
+                }
+            }
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -3420,6 +3436,35 @@ impl Renderer {
             tab.module_session =
                 crate::modules::ModuleSession::spawn(&manifest, tab_id, proxy);
         }
+        self.window.request_redraw();
+    }
+
+    /// Re-discover modules from disk and refresh chrome labels.
+    /// Active sessions keep running — if the user removed a module
+    /// whose pane is currently shown, the session lives until the
+    /// user switches kind. New modules become selectable from the
+    /// dropdown immediately.
+    fn reload_modules(&mut self) {
+        self.modules = crate::modules::Registry::discover();
+        // Rebuild the per-kind label buffers. Built-ins stay; module
+        // entries reflect the fresh registry.
+        let mut next: std::collections::HashMap<String, Buffer> =
+            std::collections::HashMap::new();
+        let label = |fs: &mut FontSystem, name: &str| {
+            make_title_buffer(
+                fs,
+                &format!("{name} ▾"),
+                self.tab_font_size,
+                self.tab_line_h,
+                KIND_SELECTOR_W,
+            )
+        };
+        next.insert("shell".into(), label(&mut self.font_system, "Shell"));
+        next.insert("welcome".into(), label(&mut self.font_system, "Welcome"));
+        for m in self.modules.list() {
+            next.insert(m.id.clone(), label(&mut self.font_system, &m.name));
+        }
+        self.kind_label_buffers = next;
         self.window.request_redraw();
     }
 

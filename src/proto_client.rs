@@ -104,6 +104,9 @@ USAGE
   terminite stats                    snapshot of internal state
                                      (frames, tabs, blocks, memory)
   terminite module list              registered modules (extension surface)
+  terminite module add <dir>         install a module from <dir>
+  terminite module remove <id>       uninstall a module
+  terminite module reload            re-discover modules without relaunch
   terminite help                     this message
 
 ENV
@@ -165,11 +168,126 @@ fn cmd_stats() -> ExitCode {
 fn cmd_module(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         Some("list") => one_shot(r#"{"id":1,"method":"list_modules"}"#),
+        Some("reload") => one_shot(r#"{"id":1,"method":"reload_modules"}"#),
+        Some("add") => match args.get(1) {
+            Some(src) => module_add(src),
+            None => {
+                eprintln!("usage: terminite module add <source-dir>");
+                ExitCode::from(2)
+            }
+        },
+        Some("remove") => match args.get(1) {
+            Some(id) => module_remove(id),
+            None => {
+                eprintln!("usage: terminite module remove <id>");
+                ExitCode::from(2)
+            }
+        },
         _ => {
-            eprintln!("usage: terminite module list");
+            eprintln!(
+                "usage:\n  \
+                 terminite module list\n  \
+                 terminite module add <source-dir>\n  \
+                 terminite module remove <id>\n  \
+                 terminite module reload"
+            );
             ExitCode::from(2)
         }
     }
+}
+
+fn modules_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("TERMINITE_MODULES_DIR") {
+        return Some(PathBuf::from(p));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".terminite/modules"))
+}
+
+fn module_add(src: &str) -> ExitCode {
+    let src_path = PathBuf::from(src);
+    if !src_path.is_dir() {
+        eprintln!("terminite: {src} is not a directory");
+        return ExitCode::from(1);
+    }
+    if !src_path.join("manifest.toml").is_file() {
+        eprintln!("terminite: {src}/manifest.toml not found");
+        return ExitCode::from(1);
+    }
+    let Some(name) = src_path.file_name().and_then(|s| s.to_str()) else {
+        eprintln!("terminite: can't extract module id from path");
+        return ExitCode::from(1);
+    };
+    let Some(dst_root) = modules_dir() else {
+        eprintln!("terminite: no $HOME, can't locate modules dir");
+        return ExitCode::from(1);
+    };
+    let dst = dst_root.join(name);
+    if let Err(e) = std::fs::create_dir_all(&dst_root) {
+        eprintln!("terminite: can't create {}: {e}", dst_root.display());
+        return ExitCode::from(1);
+    }
+    if dst.exists() {
+        eprintln!(
+            "terminite: {} already exists — remove first with `terminite module remove {name}`",
+            dst.display()
+        );
+        return ExitCode::from(1);
+    }
+    if let Err(e) = copy_dir_recursive(&src_path, &dst) {
+        eprintln!("terminite: copy failed: {e}");
+        return ExitCode::from(1);
+    }
+    println!("installed module → {}", dst.display());
+    println!("run `terminite module reload` to make it selectable in the dropdown");
+    ExitCode::SUCCESS
+}
+
+fn module_remove(id: &str) -> ExitCode {
+    let Some(dst_root) = modules_dir() else {
+        eprintln!("terminite: no $HOME, can't locate modules dir");
+        return ExitCode::from(1);
+    };
+    let dst = dst_root.join(id);
+    if !dst.exists() {
+        eprintln!("terminite: {} doesn't exist", dst.display());
+        return ExitCode::from(1);
+    }
+    if let Err(e) = std::fs::remove_dir_all(&dst) {
+        eprintln!("terminite: remove failed: {e}");
+        return ExitCode::from(1);
+    }
+    println!("removed module → {}", dst.display());
+    println!("run `terminite module reload` to drop it from the dropdown");
+    ExitCode::SUCCESS
+}
+
+/// Recursive copy that preserves the executable bit. std::fs has no
+/// recursive copy; this is the smallest version that suffices for
+/// module installation.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if ft.is_file() {
+            std::fs::copy(&from, &to)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&from)?.permissions().mode();
+                std::fs::set_permissions(
+                    &to,
+                    std::fs::Permissions::from_mode(mode),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn cmd_tag(tab_id: Option<u64>, block_id: Option<u32>, tag: Option<&String>) -> ExitCode {
