@@ -48,14 +48,27 @@ emit_block "false"       1  # no output — exits non-zero
 emit_block "echo hi"     0  "hi"
 emit_block "cat /nope"   1  "cat: /nope: No such file or directory"
 
+# Pick `terminite` if it's on PATH (e.g., after `cargo install --path .`),
+# otherwise fall back to the local debug build so the suggestions
+# below copy-paste into the user's shell without 'command not found'.
+if command -v terminite >/dev/null 2>&1; then
+    tn="terminite"
+elif [ -x "$(dirname "$0")/../target/debug/terminite" ]; then
+    tn="$(cd "$(dirname "$0")/.." && pwd)/target/debug/terminite"
+elif [ -x "$(dirname "$0")/../target/release/terminite" ]; then
+    tn="$(cd "$(dirname "$0")/.." && pwd)/target/release/terminite"
+else
+    tn="terminite"   # best-effort
+fi
+
 echo
 echo "[demo done — 6 new blocks emitted with varied commands, outputs, exit codes."
 echo " try (replace <id> with what you saw in the gutter):"
-echo "   terminite blocks 0                — list them"
-echo "   terminite block 0 <id>            — see command + output, structured"
-echo "   terminite tag 0 <id> probe        — gutter label brightens"
-echo "   terminite cursor 0 <id>           — label goes warm-yellow"
-echo "   terminite cursor-clear 0          — cursor goes away"
-echo "   terminite watch                   — live events; re-run this script"
-echo "                                       in another pane to see them flow"
+echo "   $tn blocks 0                — list them"
+echo "   $tn block 0 <id>            — see command + output, structured"
+echo "   $tn tag 0 <id> probe        — gutter label brightens"
+echo "   $tn cursor 0 <id>           — label goes warm-yellow"
+echo "   $tn cursor-clear 0          — cursor goes away"
+echo "   $tn watch                   — live events; re-run this script"
+echo "                                 in another pane to see them flow"
 echo "]"
