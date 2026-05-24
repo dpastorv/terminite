@@ -1960,29 +1960,45 @@ impl Renderer {
         let history = history as i32;
         let session_abs = sel_line + history;
         let last_col = tab.cols.saturating_sub(1);
-        tab.blocks.iter().find_map(|block| {
+
+        // Iterates each block's start + raw-end pair once.
+        let bounds = |block: &crate::blocks::Block| -> Option<(i32, i32, i32)> {
             let start = block.prompt_line.or(block.output_start_line)?;
             let raw_end = block
                 .output_end_line
                 .or(block.command_end_line)
                 .or(block.prompt_line)?;
-            // Shells fire `D` *after* the trailing newline, so
-            // `output_end_line` is the row the cursor advanced to —
-            // typically the next prompt's row, not the block's last
-            // content row. Trim it off when there's room; for a
-            // single-row block (no output at all), keep it.
             let end = if raw_end > start { raw_end - 1 } else { raw_end };
-            if start <= session_abs && session_abs <= end {
-                Some(((start - history, 0), (end - history, last_col)))
-            } else if start <= session_abs && session_abs <= raw_end {
-                // Click landed on the trimmed-off trailing row — still
-                // counts as inside this block for selection purposes,
-                // but the copy range stops above it.
-                Some(((start - history, 0), (end - history, last_col)))
-            } else {
-                None
+            Some((start, end, raw_end))
+        };
+
+        // Pass 1 — unambiguous match. The trimmed range stops one row
+        // above `output_end_line`, which is where the NEXT block's
+        // prompt sits. So clicking on a row that visually says "demo$
+        // echo hi" finds the echo-hi block (its trimmed range starts
+        // at its prompt_line) rather than the prior false-block (which
+        // claims that row only via its trailing-prompt overlap).
+        for block in tab.blocks.iter() {
+            if let Some((start, end, _)) = bounds(block) {
+                if start <= session_abs && session_abs <= end {
+                    return Some(((start - history, 0), (end - history, last_col)));
+                }
             }
-        })
+        }
+
+        // Pass 2 — fall back to the raw range. Picks up clicks on the
+        // trailing-prompt row of a no-output block that has no
+        // following block yet (the open final block before the next
+        // prompt fires).
+        for block in tab.blocks.iter() {
+            if let Some((start, end, raw_end)) = bounds(block) {
+                if start <= session_abs && session_abs <= raw_end {
+                    return Some(((start - history, 0), (end - history, last_col)));
+                }
+            }
+        }
+
+        None
     }
 
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {

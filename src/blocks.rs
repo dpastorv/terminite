@@ -58,13 +58,17 @@ pub struct Block {
 }
 
 impl Block {
-    /// The row to anchor the gutter label to: output-start if known, else
-    /// the command-end row, else the prompt-start row. `None` is unusual
-    /// (means we have a Block with no positional information at all).
+    /// The row to anchor the gutter label to. Prefers the **prompt row**
+    /// — that's where the user typed the command, the natural "this is
+    /// block B7" anchor. Output-anchored labels drift onto the next
+    /// block's prompt row when a command has no output (shells fire `D`
+    /// after the trailing newline, so `output_end_line` is the row the
+    /// cursor advanced to — which the next `A` then claims). Falls back
+    /// through the other marks for shells that emit a partial subset.
     pub fn anchor_line(&self) -> Option<i32> {
-        self.output_start_line
+        self.prompt_line
             .or(self.command_end_line)
-            .or(self.prompt_line)
+            .or(self.output_start_line)
     }
 }
 
@@ -314,7 +318,7 @@ mod tests {
         assert_eq!(b.output_start_line, Some(11));
         assert_eq!(b.output_end_line, Some(15));
         assert_eq!(b.exit_code, Some(0));
-        assert_eq!(b.anchor_line(), Some(11));
+        assert_eq!(b.anchor_line(), Some(10));
     }
 
     #[test]
@@ -362,13 +366,16 @@ mod tests {
     }
 
     #[test]
-    fn anchor_falls_back_through_marks() {
+    fn anchor_prefers_prompt_then_falls_back() {
         let mut fs = fs();
-        let mut b = BlockStore::new().fresh_block(Some(3), None, &mut fs);
+        // Prompt set → that's the anchor, no matter what else exists.
+        let b = BlockStore::new().fresh_block(Some(3), None, &mut fs);
         assert_eq!(b.anchor_line(), Some(3));
+        let mut b = BlockStore::new().fresh_block(Some(3), Some(5), &mut fs);
         b.command_end_line = Some(4);
-        assert_eq!(b.anchor_line(), Some(4));
-        b.output_start_line = Some(5);
+        assert_eq!(b.anchor_line(), Some(3));
+        // No prompt (e.g. C-without-A path) → fall back through.
+        let b = BlockStore::new().fresh_block(None, Some(5), &mut fs);
         assert_eq!(b.anchor_line(), Some(5));
     }
 
