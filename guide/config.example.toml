@@ -50,6 +50,12 @@ highlight_offset_y = 0
 # lines tighter, >1 spreads them out. Clamped to 0.7–3.0. Hot-reloaded.
 line_height = 1.0
 
+# Per-tab label width clamps inside each pane's tab bar. Tabs shrink
+# uniformly from `tab_max_width` toward `tab_min_width` as more open.
+# Both clamped to 24–800 px. Hot-reloaded.
+tab_min_width = 140
+tab_max_width = 360
+
 # Blink the cursor while the window is focused. Applies immediately.
 cursor_blink = true
 

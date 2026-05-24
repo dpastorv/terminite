@@ -22,6 +22,8 @@ const MAX_PADDING: f32 = 400.0;
 const MAX_SCROLLBACK: i64 = 50_000;
 const MIN_LINE_HEIGHT: f32 = 0.7;
 const MAX_LINE_HEIGHT: f32 = 3.0;
+const MIN_TAB_WIDTH: f32 = 24.0;
+const MAX_TAB_WIDTH: f32 = 800.0;
 
 /// What `\a` (BEL) does.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -78,6 +80,11 @@ pub struct Config {
     /// Smaller packs lines tighter; larger spreads them out.
     /// Hot-reloaded — each tab's buffer metrics update on focus-gain.
     pub line_height: f32,
+    /// Per-tab label width clamps inside each pane's tab bar. Tabs shrink
+    /// uniformly from `tab_max_width` toward `tab_min_width` as more
+    /// open. Hot-reloaded.
+    pub tab_min_width: f32,
+    pub tab_max_width: f32,
     /// Blink the cursor while the window is focused.
     pub cursor_blink: bool,
     /// What the bell does.
@@ -102,6 +109,8 @@ impl Default for Config {
             highlight_pad_y: 2.0,
             highlight_offset_y: 0.0,
             line_height: 1.0,
+            tab_min_width: 140.0,
+            tab_max_width: 360.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
@@ -191,6 +200,16 @@ impl Config {
                 "line_height" => {
                     if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
                         self.line_height = n.clamp(MIN_LINE_HEIGHT, MAX_LINE_HEIGHT);
+                    }
+                }
+                "tab_min_width" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.tab_min_width = n.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
+                    }
+                }
+                "tab_max_width" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.tab_max_width = n.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
                     }
                 }
                 "cursor_blink" => {

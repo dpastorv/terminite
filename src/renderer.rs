@@ -65,7 +65,6 @@ const AUTOSCROLL_MARGIN_PX: f32 = 8.0;
 const TAB_BAR_HEIGHT: f32 = 44.0;
 /// Minimum width of a tab in the tab bar. When more tabs are open than the
 /// bar can fit at full width, they shrink uniformly down to this floor.
-const TAB_MIN_WIDTH: f32 = 80.0;
 /// Maximum width of a tab in the tab bar — keeps tabs from spanning the
 /// whole bar when there's only one or two.
 const TAB_MAX_WIDTH: f32 = 360.0;
@@ -675,14 +674,20 @@ fn pane_grid(
 }
 
 /// Geometry of each tab inside a pane's tab bar: `(x_start, width, is_active)`.
-/// Widths shrink uniformly between TAB_MIN_WIDTH and TAB_MAX_WIDTH.
-fn pane_tab_layout(rect: PaneRect, n: usize, active: usize) -> Vec<(f32, f32, bool)> {
+/// Widths shrink uniformly between `min_width` and `max_width`.
+fn pane_tab_layout(
+    rect: PaneRect,
+    n: usize,
+    active: usize,
+    min_width: f32,
+    max_width: f32,
+) -> Vec<(f32, f32, bool)> {
     if n == 0 {
         return Vec::new();
     }
     // Reserve the top-right corner for the split handle.
-    let avail = (rect.w - SPLIT_HANDLE_SIZE).max(TAB_MIN_WIDTH);
-    let per = (avail / n as f32).clamp(TAB_MIN_WIDTH, TAB_MAX_WIDTH);
+    let avail = (rect.w - SPLIT_HANDLE_SIZE).max(min_width);
+    let per = (avail / n as f32).clamp(min_width, max_width);
     (0..n)
         .map(|i| (rect.x + i as f32 * per, per, i == active))
         .collect()
@@ -892,6 +897,11 @@ pub struct Renderer {
     highlight_pad_x: f32,
     highlight_pad_y: f32,
     highlight_offset_y: f32,
+    /// Tab-label width range — tabs in a pane's bar shrink uniformly
+    /// from `tab_max_width` down to `tab_min_width` as more tabs open.
+    /// Live-tunable via config so the bar can be dialed in.
+    tab_min_width: f32,
+    tab_max_width: f32,
     font_size: f32,
     font_family: String,
     grid_cols: usize,
@@ -1022,6 +1032,8 @@ impl Renderer {
         let highlight_pad_x = config.highlight_pad_x;
         let highlight_pad_y = config.highlight_pad_y;
         let highlight_offset_y = config.highlight_offset_y;
+        let tab_min_width = config.tab_min_width;
+        let tab_max_width = config.tab_max_width;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -1125,6 +1137,8 @@ impl Renderer {
             highlight_pad_x,
             highlight_pad_y,
             highlight_offset_y,
+            tab_min_width,
+            tab_max_width,
             font_size,
             font_family,
             grid_cols: cols,
@@ -1728,7 +1742,9 @@ impl Renderer {
             || self.gutter_gap != self.config.gutter_gap
             || self.highlight_pad_x != self.config.highlight_pad_x
             || self.highlight_pad_y != self.config.highlight_pad_y
-            || self.highlight_offset_y != self.config.highlight_offset_y;
+            || self.highlight_offset_y != self.config.highlight_offset_y
+            || self.tab_min_width != self.config.tab_min_width
+            || self.tab_max_width != self.config.tab_max_width;
         if !line_height_changed && !pad_or_gutter_changed {
             return;
         }
@@ -1739,6 +1755,8 @@ impl Renderer {
         self.highlight_pad_x = self.config.highlight_pad_x;
         self.highlight_pad_y = self.config.highlight_pad_y;
         self.highlight_offset_y = self.config.highlight_offset_y;
+        self.tab_min_width = self.config.tab_min_width;
+        self.tab_max_width = self.config.tab_max_width;
         self.line_height = new_line_height;
 
         if line_height_changed {
@@ -1933,7 +1951,7 @@ impl Renderer {
             let pane = self.root_ref().find(pid).expect("pane present");
             (pane.tabs.len(), pane.active_tab)
         };
-        let layout = pane_tab_layout(prect, n, active);
+        let layout = pane_tab_layout(prect, n, active, self.tab_min_width, self.tab_max_width);
         let mut hit: Option<(usize, f32, f32)> = None;
         for (i, (tx, tw, _)) in layout.iter().enumerate() {
             if self.mouse_pos.0 >= *tx && self.mouse_pos.0 < *tx + *tw {
@@ -3093,7 +3111,13 @@ impl Renderer {
         out: &mut Vec<RectInstance>,
     ) -> Vec<TabLabelSlot> {
         let pane = self.root_ref().find(pid).expect("pane present");
-        let layout = pane_tab_layout(rect, pane.tabs.len(), pane.active_tab);
+        let layout = pane_tab_layout(
+            rect,
+            pane.tabs.len(),
+            pane.active_tab,
+            self.tab_min_width,
+            self.tab_max_width,
+        );
         let bar_top = rect.y;
         // Bar background across the pane's width.
         out.push(RectInstance {
@@ -4318,8 +4342,11 @@ fn proc_name_of(pid: i32) -> Option<String> {
     crate::term::process_display_name(pid)
 }
 
-/// Open a URI with the platform handler. macOS: `open <uri>`. Spawned
-/// detached; we don't wait or surface errors (a bad link just does nothing).
+/// Open a URI with the platform handler. macOS: `open <uri>`. The
+/// launcher exits in milliseconds (it dispatches to the registered app
+/// and quits), but we still need to reap it so it doesn't sit as a
+/// zombie in the process table until terminite exits. One short-lived
+/// thread per URI click, bounded by user click rate.
 fn open_uri(uri: &str) {
     // Only handle the obvious safe schemes — never shell-anything-arbitrary.
     let ok = uri.starts_with("http://")
@@ -4330,12 +4357,16 @@ fn open_uri(uri: &str) {
         return;
     }
     #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open").arg(uri).spawn();
-    }
+    let spawn = std::process::Command::new("open").arg(uri).spawn();
     #[cfg(not(target_os = "macos"))]
-    {
-        let _ = std::process::Command::new("xdg-open").arg(uri).spawn();
+    let spawn = std::process::Command::new("xdg-open").arg(uri).spawn();
+    if let Ok(mut child) = spawn {
+        std::thread::Builder::new()
+            .name("terminite-uri-reap".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .ok();
     }
 }
 
