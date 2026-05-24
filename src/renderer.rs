@@ -61,13 +61,11 @@ const AUTOSCROLL_TICK_MS: u64 = 33;
 const AUTOSCROLL_MARGIN_PX: f32 = 8.0;
 
 /// Tab bar height in physical px. Active and inactive tabs share this row;
-/// the text area begins at `TEXT_TOP + TAB_BAR_HEIGHT`.
-const TAB_BAR_HEIGHT: f32 = 44.0;
+/// Default tab-bar height; the live value lives on `Renderer` so it
+/// can be configured. The constant remains as the fallback the free
+/// `pane_grid` / `compute_grid_size` fns take as a parameter.
 /// Minimum width of a tab in the tab bar. When more tabs are open than the
 /// bar can fit at full width, they shrink uniformly down to this floor.
-/// Maximum width of a tab in the tab bar — keeps tabs from spanning the
-/// whole bar when there's only one or two.
-const TAB_MAX_WIDTH: f32 = 360.0;
 const TAB_ACTIVE_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
 const TAB_INACTIVE_BG: [f32; 4] = [0.06, 0.06, 0.08, 1.0];
 const TAB_ACTIVE_UNDERLINE: [f32; 4] =
@@ -76,8 +74,9 @@ const TAB_SEPARATOR: [f32; 4] = [0.16, 0.16, 0.20, 1.0];
 
 /// Font size for tab titles, smaller than content text so they fit in the
 /// bar nicely.
-const TAB_FONT_SIZE: f32 = 18.0;
-const TAB_LINE_H: f32 = 26.0;
+/// Ratio used to derive tab line height from `tab_font_size`. Matches
+/// the prior hardcoded 26 / 18.
+const TAB_LINE_RATIO: f32 = 26.0 / 18.0;
 /// Horizontal inset from the tab's left edge to where the title text starts.
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
@@ -659,15 +658,17 @@ fn block_output_text(tab: &Tab, block: &crate::blocks::Block) -> Option<String> 
 }
 
 /// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
-/// its own `TAB_BAR_HEIGHT` strip off the top, then the per-edge padding.
+/// its own `self.tab_bar_height` strip off the top, then the per-edge padding.
 fn pane_grid(
     rect: PaneRect,
     cell_advance: f32,
     line_height: f32,
     pad: Padding,
+    tab_bar_height: f32,
 ) -> (usize, usize) {
     let avail_w = (rect.w - pad.left - pad.right).max(cell_advance);
-    let avail_h = (rect.h - TAB_BAR_HEIGHT - pad.top - pad.bottom).max(line_height);
+    let avail_h =
+        (rect.h - tab_bar_height - pad.top - pad.bottom).max(line_height);
     let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
     let rows = (avail_h / line_height).floor().max(1.0) as usize;
     (cols.min(MAX_GRID_COLS), rows.min(MAX_GRID_ROWS))
@@ -902,6 +903,15 @@ pub struct Renderer {
     /// Live-tunable via config so the bar can be dialed in.
     tab_min_width: f32,
     tab_max_width: f32,
+    /// Chrome font size for tab labels + close glyph + block labels.
+    /// Startup-applied (the title buffers are pre-shaped at this size).
+    tab_font_size: f32,
+    /// Line height derived from `tab_font_size` (font * ratio). Cached
+    /// so the render loop doesn't recompute.
+    tab_line_h: f32,
+    /// Height of the per-pane tab-bar strip in pixels. Threads through
+    /// the grid math and the chrome layout.
+    tab_bar_height: f32,
     font_size: f32,
     font_family: String,
     grid_cols: usize,
@@ -1034,6 +1044,9 @@ impl Renderer {
         let highlight_offset_y = config.highlight_offset_y;
         let tab_min_width = config.tab_min_width;
         let tab_max_width = config.tab_max_width;
+        let tab_font_size = config.tab_font_size;
+        let tab_line_h = (tab_font_size * TAB_LINE_RATIO).round();
+        let tab_bar_height = config.tab_bar_height;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -1067,6 +1080,7 @@ impl Renderer {
             cell_advance,
             line_height,
             pad,
+            tab_bar_height,
         );
         let first_tab_id = TabId(0);
         let live_term = LiveTerm::new(
@@ -1085,7 +1099,13 @@ impl Renderer {
         let clipboard = Clipboard::new().ok();
 
         let first_title = "terminite".to_string();
-        let first_title_buf = make_title_buffer(&mut font_system, &first_title);
+        let first_title_buf = make_title_buffer(
+            &mut font_system,
+            &first_title,
+            tab_font_size,
+            tab_line_h,
+            tab_max_width,
+        );
         let first_text_buf = make_content_buffer(
             &mut font_system,
             cell_advance,
@@ -1108,7 +1128,13 @@ impl Renderer {
             id: PaneId(0),
             pane: Pane::single(first_tab),
         };
-        let close_buffer = make_title_buffer(&mut font_system, "×");
+        let close_buffer = make_title_buffer(
+            &mut font_system,
+            "×",
+            tab_font_size,
+            tab_line_h,
+            tab_max_width,
+        );
 
         let mut renderer = Self {
             instance,
@@ -1139,6 +1165,9 @@ impl Renderer {
             highlight_offset_y,
             tab_min_width,
             tab_max_width,
+            tab_font_size,
+            tab_line_h,
+            tab_bar_height,
             font_size,
             font_family,
             grid_cols: cols,
@@ -1238,7 +1267,7 @@ impl Renderer {
         self.next_tab_id += 1;
         // The new tab joins the active pane, sized to that pane's rect.
         let rect = self.active_pane_rect();
-        let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad);
+        let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad, self.tab_bar_height);
         let live_term = LiveTerm::new(
             cols,
             rows,
@@ -1250,7 +1279,13 @@ impl Renderer {
             self.config.scrollback,
         );
         let title = "terminite".to_string();
-        let title_buf = make_title_buffer(&mut self.font_system, &title);
+        let title_buf = make_title_buffer(
+            &mut self.font_system,
+            &title,
+            self.tab_font_size,
+            self.tab_line_h,
+            self.tab_max_width,
+        );
         let text_buf = make_content_buffer(
             &mut self.font_system,
             self.cell_advance,
@@ -1695,8 +1730,8 @@ impl Renderer {
     /// SIGWINCH alacritty sends, so they must stay correct for the switch.
     fn relayout(&mut self) {
         for (pid, rect) in self.pane_layout() {
-            let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad);
-            let content_h = (rect.h - TAB_BAR_HEIGHT).max(1.0);
+            let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad, self.tab_bar_height);
+            let content_h = (rect.h - self.tab_bar_height).max(1.0);
             let pane = self
                 .root
                 .as_mut()
@@ -1807,7 +1842,13 @@ impl Renderer {
             self.config.scrollback,
         );
         let title = "terminite".to_string();
-        let title_buf = make_title_buffer(&mut self.font_system, &title);
+        let title_buf = make_title_buffer(
+            &mut self.font_system,
+            &title,
+            self.tab_font_size,
+            self.tab_line_h,
+            self.tab_max_width,
+        );
         let buf = make_content_buffer(
             &mut self.font_system,
             self.cell_advance,
@@ -2035,7 +2076,7 @@ impl Renderer {
         let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
         let left = apr.x + pad.left;
-        let top = apr.y + TAB_BAR_HEIGHT + pad.top;
+        let top = apr.y + self.tab_bar_height + pad.top;
         let cx = (x - left).max(0.0);
         let col = ((cx / self.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
@@ -2173,7 +2214,7 @@ impl Renderer {
             // bottom edge: keep scrolling while the user holds the button
             // there, extending the selection as new content reveals.
             let apr = self.active_pane_rect();
-            let pane_top = apr.y + TAB_BAR_HEIGHT + pad.top;
+            let pane_top = apr.y + self.tab_bar_height + pad.top;
             let pane_bottom = apr.y + apr.h;
             let new_dir = if y < pane_top + AUTOSCROLL_MARGIN_PX {
                 Some(1)
@@ -2244,7 +2285,7 @@ impl Renderer {
         // Tab-bar hit test first — a click in a pane's own tab bar strip
         // switches / closes that pane's tabs and never starts a selection.
         if let Some((pid, prect)) = self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
-            if self.mouse_pos.1 < prect.y + TAB_BAR_HEIGHT {
+            if self.mouse_pos.1 < prect.y + self.tab_bar_height {
                 self.focus_pane(pid);
                 if button == MouseButton::Left {
                     self.tab_bar_click(pid, prect);
@@ -2991,7 +3032,13 @@ impl Renderer {
             self.window.request_redraw();
             return;
         }
-        let new_buf = make_title_buffer(&mut self.font_system, &title);
+        let new_buf = make_title_buffer(
+            &mut self.font_system,
+            &title,
+            self.tab_font_size,
+            self.tab_line_h,
+            self.tab_max_width,
+        );
         let active_id = self.active_tab_ref().id;
         {
             let mut tabs: Vec<&mut Tab> = Vec::new();
@@ -3028,7 +3075,13 @@ impl Renderer {
             }
             let new_auto = tab.live_term.compute_auto_title();
             if new_auto != tab.last_auto_title {
-                tab.title_buffer = make_title_buffer(&mut self.font_system, &new_auto);
+                tab.title_buffer = make_title_buffer(
+                    &mut self.font_system,
+                    &new_auto,
+                    self.tab_font_size,
+                    self.tab_line_h,
+                    self.tab_max_width,
+                );
                 tab.last_auto_title = new_auto.clone();
                 tab.title = new_auto;
                 if tab.id == active_id {
@@ -3101,7 +3154,7 @@ impl Renderer {
 
     /// Emit one pane's tab-bar rects into `out`, and return a label slot per
     /// tab for the text pass. `rect` is the pane's full rect; the bar fills
-    /// its top `TAB_BAR_HEIGHT`. `is_active_pane` gates the gold underline so
+    /// its top `self.tab_bar_height`. `is_active_pane` gates the gold underline so
     /// exactly one tab bar in the window marks where keystrokes go.
     fn build_pane_tab_bar(
         &self,
@@ -3121,26 +3174,26 @@ impl Renderer {
         let bar_top = rect.y;
         // Bar background across the pane's width.
         out.push(RectInstance {
-            rect: [rect.x, bar_top, rect.w, TAB_BAR_HEIGHT],
+            rect: [rect.x, bar_top, rect.w, self.tab_bar_height],
             color: TAB_INACTIVE_BG,
         });
-        let text_top = bar_top + (TAB_BAR_HEIGHT - TAB_LINE_H) / 2.0;
+        let text_top = bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
         let mut slots = Vec::with_capacity(layout.len());
         for (i, (x, w, is_active)) in layout.iter().enumerate() {
             let (x, w, is_active) = (*x, *w, *is_active);
             out.push(RectInstance {
-                rect: [x, bar_top, w, TAB_BAR_HEIGHT],
+                rect: [x, bar_top, w, self.tab_bar_height],
                 color: if is_active { TAB_ACTIVE_BG } else { TAB_INACTIVE_BG },
             });
             out.push(RectInstance {
-                rect: [x + w - 1.0, bar_top + 6.0, 1.0, TAB_BAR_HEIGHT - 12.0],
+                rect: [x + w - 1.0, bar_top + 6.0, 1.0, self.tab_bar_height - 12.0],
                 color: TAB_SEPARATOR,
             });
             if is_active {
                 // Gold underline only in the focused pane; a dim seam marks
                 // the active tab of an unfocused pane.
                 out.push(RectInstance {
-                    rect: [x + 6.0, bar_top + TAB_BAR_HEIGHT - 3.0, w - 12.0, 3.0],
+                    rect: [x + 6.0, bar_top + self.tab_bar_height - 3.0, w - 12.0, 3.0],
                     color: if is_active_pane {
                         TAB_ACTIVE_UNDERLINE
                     } else {
@@ -3159,21 +3212,21 @@ impl Renderer {
                     left: label_left as i32,
                     top: bar_top as i32,
                     right: label_right as i32,
-                    bottom: (bar_top + TAB_BAR_HEIGHT) as i32,
+                    bottom: (bar_top + self.tab_bar_height) as i32,
                 },
                 close_left,
                 close_bounds: TextBounds {
                     left: close_left as i32,
                     top: bar_top as i32,
                     right: (x + w) as i32,
-                    bottom: (bar_top + TAB_BAR_HEIGHT) as i32,
+                    bottom: (bar_top + self.tab_bar_height) as i32,
                 },
                 text_top,
             });
         }
         // Bottom border between the bar and the content.
         out.push(RectInstance {
-            rect: [rect.x, bar_top + TAB_BAR_HEIGHT, rect.w, 1.0],
+            rect: [rect.x, bar_top + self.tab_bar_height, rect.w, 1.0],
             color: TAB_SEPARATOR,
         });
         // Corner split handle — a "peel" triangle; drag it to split (or,
@@ -3243,7 +3296,7 @@ impl Renderer {
         let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
         let left = apr.x + pad.left;
-        let top = apr.y + TAB_BAR_HEIGHT + pad.top;
+        let top = apr.y + self.tab_bar_height + pad.top;
         if x < left {
             return None;
         }
@@ -3372,7 +3425,7 @@ impl Renderer {
         let find_bar_origin = if self.find.is_some() {
             let apr = self.active_pane_rect();
             let bx = apr.x + apr.w - FIND_BAR_W - FIND_BAR_MARGIN;
-            let by = apr.y + TAB_BAR_HEIGHT + FIND_BAR_MARGIN;
+            let by = apr.y + self.tab_bar_height + FIND_BAR_MARGIN;
             above.push(RectInstance {
                 rect: [bx - 1.0, by - 1.0, FIND_BAR_W + 2.0, FIND_BAR_H + 2.0],
                 color: FIND_BAR_BORDER,
@@ -3617,7 +3670,7 @@ impl Renderer {
                 // ref-counted internally.
                 if let Some(img) = tab_ref.image.as_ref() {
                     let ox = pane_rect.x + pad.left;
-                    let oy = pane_rect.y + TAB_BAR_HEIGHT + pad.top;
+                    let oy = pane_rect.y + self.tab_bar_height + pad.top;
                     let max_w = (pane_rect.x + pane_rect.w - ox - pad.right).max(1.0);
                     let max_h =
                         (pane_rect.y + pane_rect.h - oy - pad.bottom).max(1.0);
@@ -3640,7 +3693,7 @@ impl Renderer {
                 let display_offset = display_offset as i32;
                 let history = history as i32;
                 let rows = tab_ref.rows as i32;
-                let py = pane_rect.y + TAB_BAR_HEIGHT + pad.top;
+                let py = pane_rect.y + self.tab_bar_height + pad.top;
                 let gutter_left = self.gutter_left;
                 // Right-align each label against a fixed anchor just
                 // inside the content edge. The label grows leftward as
@@ -3897,7 +3950,7 @@ impl Renderer {
         // Content origin and clip box — below this pane's tab bar, inset
         // on all four sides by the configured padding.
         let px = rect.x + pad.left;
-        let py = rect.y + TAB_BAR_HEIGHT + pad.top;
+        let py = rect.y + self.tab_bar_height + pad.top;
         let box_l = px;
         let box_t = py;
         let box_r = rect.x + rect.w - pad.right;
@@ -4326,10 +4379,18 @@ fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
 /// Build a small cosmic-text `Buffer` holding a tab title. Sized to the
 /// maximum tab width so titles never wrap; bounds at render-time clip to the
 /// actual tab area.
-fn make_title_buffer(font_system: &mut FontSystem, title: &str) -> Buffer {
-    let metrics = Metrics::new(TAB_FONT_SIZE, TAB_LINE_H);
+fn make_title_buffer(
+    font_system: &mut FontSystem,
+    title: &str,
+    font_size: f32,
+    line_h: f32,
+    max_w: f32,
+) -> Buffer {
+    let metrics = Metrics::new(font_size, line_h);
     let mut buf = Buffer::new(font_system, metrics);
-    buf.set_size(font_system, Some(TAB_MAX_WIDTH * 2.0), Some(TAB_LINE_H));
+    // The buffer is sized to twice the max tab width so long titles
+    // don't get pre-wrapped — the tab's `TextBounds` clips at display.
+    buf.set_size(font_system, Some(max_w * 2.0), Some(line_h));
     let attrs = Attrs::new().family(Family::Monospace);
     buf.set_text(font_system, title, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -4376,11 +4437,12 @@ fn compute_grid_size(
     cell_advance: f32,
     line_height: f32,
     pad: Padding,
+    tab_bar_height: f32,
 ) -> (usize, usize) {
     // Full window as a single pane: one tab-bar strip plus per-edge pads.
     let available_w = (physical_width - pad.left - pad.right).max(cell_advance);
     let available_h =
-        (physical_height - TAB_BAR_HEIGHT - pad.top - pad.bottom).max(line_height);
+        (physical_height - tab_bar_height - pad.top - pad.bottom).max(line_height);
     let cols = ((available_w / cell_advance) as usize).clamp(2, MAX_GRID_COLS);
     let rows = ((available_h / line_height) as usize).clamp(2, MAX_GRID_ROWS);
     (cols, rows)

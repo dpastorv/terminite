@@ -24,6 +24,10 @@ const MIN_LINE_HEIGHT: f32 = 0.7;
 const MAX_LINE_HEIGHT: f32 = 3.0;
 const MIN_TAB_WIDTH: f32 = 24.0;
 const MAX_TAB_WIDTH: f32 = 800.0;
+const MIN_TAB_FONT_SIZE: f32 = 8.0;
+const MAX_TAB_FONT_SIZE: f32 = 96.0;
+const MIN_TAB_BAR_HEIGHT: f32 = 16.0;
+const MAX_TAB_BAR_HEIGHT: f32 = 200.0;
 
 /// What `\a` (BEL) does.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -85,6 +89,12 @@ pub struct Config {
     /// open. Hot-reloaded.
     pub tab_min_width: f32,
     pub tab_max_width: f32,
+    /// Tab-label text size in pixels. Startup-applied — pre-shapes the
+    /// title buffers at this size.
+    pub tab_font_size: f32,
+    /// Height of each pane's tab bar strip in pixels. Startup-applied;
+    /// drives the grid math and where content begins.
+    pub tab_bar_height: f32,
     /// Blink the cursor while the window is focused.
     pub cursor_blink: bool,
     /// What the bell does.
@@ -111,6 +121,8 @@ impl Default for Config {
             line_height: 1.0,
             tab_min_width: 140.0,
             tab_max_width: 360.0,
+            tab_font_size: 18.0,
+            tab_bar_height: 44.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
@@ -210,6 +222,18 @@ impl Config {
                 "tab_max_width" => {
                     if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
                         self.tab_max_width = n.clamp(MIN_TAB_WIDTH, MAX_TAB_WIDTH);
+                    }
+                }
+                "tab_font_size" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.tab_font_size =
+                            n.clamp(MIN_TAB_FONT_SIZE, MAX_TAB_FONT_SIZE);
+                    }
+                }
+                "tab_bar_height" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.tab_bar_height =
+                            n.clamp(MIN_TAB_BAR_HEIGHT, MAX_TAB_BAR_HEIGHT);
                     }
                 }
                 "cursor_blink" => {

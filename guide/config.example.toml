@@ -56,6 +56,16 @@ line_height = 1.0
 tab_min_width = 140
 tab_max_width = 360
 
+# Tab-label font size in pixels (clamped 8–96). Drives the title glyph
+# size in the tab bar and the close-glyph (`×`). Startup-applied — the
+# title buffers are pre-shaped at this size.
+tab_font_size = 18
+
+# Tab-bar strip height in pixels (clamped 16–200). Bump this when you
+# bump `tab_font_size` so the labels have room to breathe. Startup-
+# applied.
+tab_bar_height = 44
+
 # Blink the cursor while the window is focused. Applies immediately.
 cursor_blink = true
 
