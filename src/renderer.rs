@@ -196,6 +196,14 @@ struct Tab {
     /// `None` when the kind is Shell or the buffer hasn't been built
     /// for the current size. Rebuilt on resize.
     content_buffer: Option<Buffer>,
+    /// Live module process when this tab's kind is `Module(id)`.
+    /// Spawned on kind switch into Module; dropped (killing the
+    /// process) on switch away or tab close.
+    module_session: Option<crate::modules::ModuleSession>,
+    /// Cached body the module last asked us to render. Kept here
+    /// (rather than read off the session) so the render path can
+    /// detect changes and rebuild the shaped buffer.
+    last_module_body: String,
 }
 
 /// What a tab currently shows. `Shell` has a live PTY behind it;
@@ -254,6 +262,8 @@ impl Tab {
             blocks: BlockStore::new(),
             kind: TabContentKind::Shell,
             content_buffer: None,
+            module_session: None,
+            last_module_body: String::new(),
         }
     }
 }
@@ -655,11 +665,10 @@ coordinates you do. see guide/getting-started.md for more."
             .to_string(),
         TabContentKind::Module(id) => match registry.find(id) {
             Some(m) => format!(
-                "module: {}  (v{})\nbinary: {}\n{}\n\n— execution lands in Bundle 6 step 2b —\nfor now this pane just confirms the module is\nregistered and selectable from the dropdown.",
+                "module: {}  (v{})\nbinary: {}\nwaiting for the module to send its first frame…",
                 m.name,
                 m.version,
                 m.binary.display(),
-                if m.description.is_empty() { "" } else { &m.description },
             ),
             None => format!(
                 "module '{id}' is no longer registered.\npick a different kind from the dropdown."
@@ -1692,11 +1701,7 @@ impl Renderer {
             MenuAction::SetTabKind { pane, kind } => {
                 let pane = *pane;
                 let kind = kind.clone();
-                if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pane)) {
-                    p.active_tab_mut().kind = kind;
-                    p.active_tab_mut().content_buffer = None;
-                }
-                self.window.request_redraw();
+                self.set_tab_kind(pane, kind);
             }
         }
     }
@@ -3374,7 +3379,80 @@ impl Renderer {
 
     /// Write bytes to the active tab's PTY (keyboard input path).
     pub fn write_active(&self, bytes: Vec<u8>) {
-        self.active_tab_ref().live_term.write(bytes);
+        let tab = self.active_tab_ref();
+        match &tab.kind {
+            TabContentKind::Module(_) => {
+                if let Some(sess) = tab.module_session.as_ref() {
+                    sess.send_input(&bytes);
+                }
+                // No module session means the module didn't spawn —
+                // input is dropped, the placeholder explains why.
+            }
+            _ => tab.live_term.write(bytes),
+        }
+    }
+
+    /// Switch a pane's active tab to a different content kind. Spawns
+    /// or tears down the module process as needed; clears the cached
+    /// content buffer so the next render rebuilds.
+    fn set_tab_kind(&mut self, pane: PaneId, kind: TabContentKind) {
+        // Resolve manifest before borrowing self.root mutably.
+        let manifest = match &kind {
+            TabContentKind::Module(id) => self.modules.find(id).cloned(),
+            _ => None,
+        };
+        let proxy = self.proxy.clone();
+
+        let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pane)) else {
+            return;
+        };
+        let tab = p.active_tab_mut();
+        let tab_id = tab.id;
+
+        // Tearing down the prior session (if any) drops the Child and
+        // joins the IO threads via the Drop impl.
+        tab.module_session = None;
+        tab.last_module_body.clear();
+        tab.kind = kind;
+        tab.content_buffer = None;
+
+        if let Some(manifest) = manifest {
+            tab.module_session =
+                crate::modules::ModuleSession::spawn(&manifest, tab_id, proxy);
+        }
+        self.window.request_redraw();
+    }
+
+    /// One message from a running module. Updates the tab's cached
+    /// body (replace-only in v1) and asks for a redraw.
+    pub fn handle_module_message(
+        &mut self,
+        tab_id: TabId,
+        msg: crate::modules::ModuleMessage,
+    ) {
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root
+            .as_mut()
+            .expect("pane tree present")
+            .all_tabs_mut(&mut tabs);
+        let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) else {
+            return;
+        };
+        match msg {
+            crate::modules::ModuleMessage::SetText { body } => {
+                if tab.last_module_body != body {
+                    tab.last_module_body = body.clone();
+                    if let Some(sess) = tab.module_session.as_mut() {
+                        sess.body = body;
+                    }
+                    tab.content_buffer = None; // force rebuild
+                    self.window.request_redraw();
+                }
+            }
+            crate::modules::ModuleMessage::Log { message } => {
+                crate::logging::info(&format!("module tab {}: {message}", tab_id.0));
+            }
+        }
     }
 
     /// Compute the modal's card + button rectangles for the current surface
@@ -4294,8 +4372,19 @@ impl Renderer {
         let content_h = (rect.h - self.tab_bar_height - pad.top - pad.bottom)
             .max(self.line_height);
 
-        // Build / refresh content_buffer if needed.
-        let body = non_shell_body(&kind, &self.modules);
+        // Build / refresh content_buffer if needed. For modules,
+        // prefer the live session's body (what the module asked us
+        // to render); fall back to the placeholder while waiting.
+        let body = {
+            let session_body = self
+                .root
+                .as_ref()
+                .and_then(|n| n.find(pid))
+                .and_then(|p| p.active_tab_ref().module_session.as_ref())
+                .map(|s| s.body.clone())
+                .filter(|s| !s.is_empty());
+            session_body.unwrap_or_else(|| non_shell_body(&kind, &self.modules))
+        };
         let font_size = self.font_size;
         let line_height = self.line_height;
         let family = self.font_family.clone();

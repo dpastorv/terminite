@@ -183,6 +183,12 @@ pub enum UserEvent {
     },
     /// The connected module disconnected. Clears the subscriber slot.
     ProtoDisconnect,
+    /// A module process pushed a message via its stdout. Bundle 6
+    /// step 2b — drives the pane's rendered content.
+    ModuleMessage {
+        tab_id: TabId,
+        msg: modules::ModuleMessage,
+    },
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -325,6 +331,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::ProtoDisconnect => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_proto_disconnect();
+                }
+            }
+            UserEvent::ModuleMessage { tab_id, msg } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_module_message(tab_id, msg);
                 }
             }
             UserEvent::Exit => event_loop.exit(),

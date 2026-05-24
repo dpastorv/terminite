@@ -14,9 +14,25 @@
 //! the dropdown shows. Override the modules dir with
 //! `$TERMINITE_MODULES_DIR`.
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::thread;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use winit::event_loop::EventLoopProxy;
+
+use crate::{TabId, UserEvent};
+
+/// Per-connection write queue depth for the input pipe to a module.
+/// Drop-on-overflow rather than buffer-forever, matching the proto
+/// subscriber pattern.
+const MODULE_INPUT_QUEUE_CAP: usize = 1024;
+/// Max bytes terminite will read from a single module stdout line —
+/// defensive ceiling so a runaway module can't grow our buffers
+/// without bound.
+const MODULE_MAX_LINE_BYTES: usize = 256 * 1024;
 
 /// One module's parsed manifest.
 #[derive(Clone, Debug, Serialize)]
@@ -167,6 +183,219 @@ fn strip_quoted(s: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ── ModuleSession ─────────────────────────────────────────────────────
+//
+// A live module: the spawned child process plus its IO threads. Step
+// 2b. Step 2c (later) will expand the wire vocabulary.
+//
+// Wire format (line-delimited JSON, both directions):
+//
+//   terminite → module
+//     {"kind":"init",  "tab_id":N}
+//     {"kind":"input", "bytes":"…"}   (utf-8 string of the keystroke)
+//     {"kind":"close"}
+//
+//   module → terminite
+//     {"kind":"set_text", "body":"…"}
+//     {"kind":"log",      "message":"…"}
+
+/// Message a module sends to terminite. Reader thread parses each line
+/// of the module's stdout into one of these and forwards via
+/// `UserEvent::ModuleMessage`.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModuleMessage {
+    /// Replace the rendered body with this text.
+    SetText { body: String },
+    /// Module-side info log; lands in terminite's regular log.
+    Log { message: String },
+}
+
+/// A spawned module process plus its IO state.
+pub struct ModuleSession {
+    pub manifest_id: String,
+    /// Latest body the module asked us to render. Empty until the
+    /// module sends its first `set_text`.
+    pub body: String,
+    /// Sender for input lines (terminite → module stdin). Bounded;
+    /// overflow drops the keystroke rather than blocking the main
+    /// thread.
+    input_tx: SyncSender<String>,
+    /// Owned so Drop can kill the child if it didn't exit cleanly.
+    child: Child,
+}
+
+impl ModuleSession {
+    /// Spawn the module's binary; start reader + writer threads;
+    /// send the initial `init` command. Returns `None` on spawn
+    /// failure — terminite shows the registration placeholder instead.
+    pub fn spawn(
+        manifest: &ModuleManifest,
+        tab_id: TabId,
+        proxy: EventLoopProxy<UserEvent>,
+    ) -> Option<Self> {
+        let mut child = match Command::new(&manifest.binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                crate::logging::warn(&format!(
+                    "module {}: spawn failed ({e})",
+                    manifest.id
+                ));
+                return None;
+            }
+        };
+
+        let stdin = child.stdin.take()?;
+        let stdout = child.stdout.take()?;
+        let stderr = child.stderr.take();
+
+        let (input_tx, input_rx) = sync_channel::<String>(MODULE_INPUT_QUEUE_CAP);
+
+        // Writer thread: drain input_rx → child stdin. Exits when
+        // input_tx is dropped or the pipe breaks.
+        let writer_id = manifest.id.clone();
+        thread::Builder::new()
+            .name(format!("terminite-mod-w-{}", manifest.id))
+            .spawn(move || writer_loop(stdin, input_rx, writer_id))
+            .ok();
+
+        // Reader thread: read JSON lines from child stdout; forward
+        // each to the main thread as a UserEvent. Exits on EOF.
+        let reader_id = manifest.id.clone();
+        let reader_proxy = proxy.clone();
+        thread::Builder::new()
+            .name(format!("terminite-mod-r-{}", manifest.id))
+            .spawn(move || reader_loop(stdout, tab_id, reader_id, reader_proxy))
+            .ok();
+
+        // Stderr drainer: log each line. Without this, a chatty
+        // module's stderr would block on a full pipe.
+        if let Some(stderr) = stderr {
+            let err_id = manifest.id.clone();
+            thread::Builder::new()
+                .name(format!("terminite-mod-e-{}", manifest.id))
+                .spawn(move || {
+                    let reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stderr);
+                    for line in reader.lines().map_while(Result::ok) {
+                        crate::logging::warn(&format!("module {err_id} stderr: {line}"));
+                    }
+                })
+                .ok();
+        }
+
+        // Send the init command — module knows its tab id.
+        let init = format!(r#"{{"kind":"init","tab_id":{}}}"#, tab_id.0);
+        let _ = input_tx.try_send(init);
+
+        crate::logging::info(&format!(
+            "module {}: spawned (tab_id {})",
+            manifest.id, tab_id.0
+        ));
+
+        Some(ModuleSession {
+            manifest_id: manifest.id.clone(),
+            body: String::new(),
+            input_tx,
+            child,
+        })
+    }
+
+    /// Forward a keystroke (or any user-typed bytes) to the module's
+    /// stdin. Overflow drops the keystroke; the user retries.
+    pub fn send_input(&self, bytes: &[u8]) {
+        let text = String::from_utf8_lossy(bytes);
+        let escaped = json_escape(&text);
+        let msg = format!(r#"{{"kind":"input","bytes":"{escaped}"}}"#);
+        let _ = self.input_tx.try_send(msg);
+    }
+}
+
+impl Drop for ModuleSession {
+    fn drop(&mut self) {
+        // Best-effort polite close, then force-kill so the child can't
+        // outlive the tab. Reader + writer threads exit on pipe
+        // closure.
+        let _ = self.input_tx.try_send(r#"{"kind":"close"}"#.to_string());
+        // Give the module a small moment to exit on its own — then
+        // kill if needed.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        crate::logging::info(&format!("module {}: torn down", self.manifest_id));
+    }
+}
+
+fn writer_loop(
+    mut stdin: std::process::ChildStdin,
+    rx: Receiver<String>,
+    module_id: String,
+) {
+    while let Ok(msg) = rx.recv() {
+        if stdin.write_all(msg.as_bytes()).is_err() {
+            break;
+        }
+        if stdin.write_all(b"\n").is_err() {
+            break;
+        }
+    }
+    let _ = module_id;
+}
+
+fn reader_loop(
+    stdout: std::process::ChildStdout,
+    tab_id: TabId,
+    module_id: String,
+    proxy: EventLoopProxy<UserEvent>,
+) {
+    let reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stdout);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if line.len() > MODULE_MAX_LINE_BYTES {
+            crate::logging::warn(&format!(
+                "module {module_id}: line exceeded MODULE_MAX_LINE_BYTES, dropping"
+            ));
+            continue;
+        }
+        match serde_json::from_str::<ModuleMessage>(line.trim()) {
+            Ok(msg) => {
+                if proxy
+                    .send_event(UserEvent::ModuleMessage { tab_id, msg })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(e) => {
+                crate::logging::warn(&format!(
+                    "module {module_id}: bad JSON line ({e}): {line}"
+                ));
+            }
+        }
+    }
+    crate::logging::info(&format!("module {module_id}: stdout closed"));
+}
+
+/// Minimal JSON string escape — matches `proto_client::json_escape`.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
