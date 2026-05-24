@@ -1962,11 +1962,22 @@ impl Renderer {
         let last_col = tab.cols.saturating_sub(1);
         tab.blocks.iter().find_map(|block| {
             let start = block.prompt_line.or(block.output_start_line)?;
-            let end = block
+            let raw_end = block
                 .output_end_line
                 .or(block.command_end_line)
                 .or(block.prompt_line)?;
+            // Shells fire `D` *after* the trailing newline, so
+            // `output_end_line` is the row the cursor advanced to —
+            // typically the next prompt's row, not the block's last
+            // content row. Trim it off when there's room; for a
+            // single-row block (no output at all), keep it.
+            let end = if raw_end > start { raw_end - 1 } else { raw_end };
             if start <= session_abs && session_abs <= end {
+                Some(((start - history, 0), (end - history, last_col)))
+            } else if start <= session_abs && session_abs <= raw_end {
+                // Click landed on the trimmed-off trailing row — still
+                // counts as inside this block for selection purposes,
+                // but the copy range stops above it.
                 Some(((start - history, 0), (end - history, last_col)))
             } else {
                 None
