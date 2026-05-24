@@ -81,6 +81,13 @@ pub enum OutPayload {
     Block {
         block: BlockData,
     },
+    /// The export surface — every block of a tab as structured data
+    /// (full command + output text), suitable for serialising the
+    /// session as a markdown / JSON artifact.
+    Export {
+        tab_id: u64,
+        blocks: Vec<BlockData>,
+    },
     Subscribed,
     /// Acknowledgement for write methods (`set_tag`, `remove_tag`,
     /// `cursor_at`, `cursor_clear`). Empty on success.

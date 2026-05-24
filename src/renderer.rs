@@ -2719,6 +2719,7 @@ impl Renderer {
             "remove_tag" => self.proto_remove_tag(&req.params),
             "cursor_at" => self.proto_cursor_at(&req.params),
             "cursor_clear" => self.proto_cursor_clear(&req.params),
+            "export_tab" => self.proto_export_tab(&req.params),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -2895,6 +2896,43 @@ impl Renderer {
                 command,
                 output,
             },
+        }
+    }
+
+    fn proto_export_tab(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "missing or invalid tab_id".into(),
+            };
+        };
+        // Optional `since` — include only blocks with id >= since. Lets
+        // the partner stream a session in chunks instead of always
+        // exporting from the beginning.
+        let since: Option<u32> = params
+            .get("since")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let tab_id = TabId(tab_id_u64);
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root.as_ref().expect("pane tree present").all_tabs(&mut all);
+        let Some(tab) = all.into_iter().find(|t| t.id == tab_id) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("no tab with id {tab_id_u64}"),
+            };
+        };
+        let blocks: Vec<crate::proto::BlockData> = tab
+            .blocks
+            .iter()
+            .filter(|b| since.is_none_or(|s| b.id >= s))
+            .map(|b| crate::proto::BlockData {
+                info: block_to_info(b),
+                command: block_command_text(tab, b).unwrap_or_default(),
+                output: block_output_text(tab, b).unwrap_or_default(),
+            })
+            .collect();
+        crate::proto::OutPayload::Export {
+            tab_id: tab_id_u64,
+            blocks,
         }
     }
 

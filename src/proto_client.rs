@@ -68,6 +68,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
             args.get(2).and_then(|s| s.parse().ok()),
         )),
         "cursor-clear" => Some(cmd_cursor_clear(args.get(1).and_then(|s| s.parse().ok()))),
+        "export" => Some(cmd_export(&args[1..])),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -95,6 +96,9 @@ USAGE
   terminite untag <tab> <id> <tag>   remove a tag from a block
   terminite cursor <tab> <id>        move the AI cursor to a block
   terminite cursor-clear <tab>       drop the AI cursor from a tab
+  terminite export <tab> [--json]    write the tab's blocks as markdown
+                                     (or JSON with --json)
+                                     [--since <id>] starts from block id
   terminite help                     this message
 
 ENV
@@ -189,6 +193,158 @@ fn cmd_cursor_clear(tab_id: Option<u64>) -> ExitCode {
     one_shot(&format!(
         r#"{{"id":1,"method":"cursor_clear","params":{{"tab_id":{tab_id}}}}}"#
     ))
+}
+
+fn cmd_export(args: &[String]) -> ExitCode {
+    // Parse: positional tab_id, then `--json` and `--since <id>` flags
+    // in any order. Hand-rolled — clap would be a heavier dep than
+    // this four-arg surface justifies.
+    let mut tab_id: Option<u64> = None;
+    let mut since: Option<u32> = None;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--since" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse::<u32>().ok()) {
+                    Some(n) => since = Some(n),
+                    None => {
+                        eprintln!("usage: terminite export <tab_id> [--json] [--since <block_id>]");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 1;
+            }
+            other => {
+                if tab_id.is_none() {
+                    tab_id = other.parse().ok();
+                }
+                i += 1;
+            }
+        }
+    }
+    let Some(tab_id) = tab_id else {
+        eprintln!("usage: terminite export <tab_id> [--json] [--since <block_id>]");
+        return ExitCode::from(2);
+    };
+
+    let req = match since {
+        Some(s) => format!(
+            r#"{{"id":1,"method":"export_tab","params":{{"tab_id":{tab_id},"since":{s}}}}}"#
+        ),
+        None => format!(
+            r#"{{"id":1,"method":"export_tab","params":{{"tab_id":{tab_id}}}}}"#
+        ),
+    };
+
+    let mut stream = connect_or_exit();
+    if writeln!(stream, "{req}").is_err() {
+        eprintln!("terminite: socket write failed");
+        return ExitCode::from(1);
+    }
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let read = reader.read_line(&mut line);
+    if matches!(read, Ok(0) | Err(_)) {
+        eprintln!("terminite: socket closed before response");
+        return ExitCode::from(1);
+    }
+
+    if json {
+        print!("{line}");
+        return ExitCode::SUCCESS;
+    }
+
+    // Parse the response and render markdown locally. Server-side
+    // formatting would mean the server cares about presentation; this
+    // way the protocol stays format-agnostic and the CLI owns the look.
+    let value: serde_json::Value = match serde_json::from_str(line.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("terminite: response wasn't valid JSON: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if value.get("kind").and_then(|v| v.as_str()) == Some("error") {
+        let msg = value.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        eprintln!("terminite: {msg}");
+        return ExitCode::from(1);
+    }
+    print_markdown(&value);
+    ExitCode::SUCCESS
+}
+
+/// Render an `export_tab` response as a markdown session log to stdout.
+/// Each block becomes a section: `## Bn`, the command in backticks with
+/// its exit code, any tags, then the output in a fenced block. Blank
+/// blocks (no command and no output) are skipped so a half-formed
+/// open block doesn't litter the bottom.
+fn print_markdown(value: &serde_json::Value) {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let tab_id = value.get("tab_id").and_then(|v| v.as_u64()).unwrap_or(0);
+    let _ = writeln!(out, "# terminite tab {tab_id}\n");
+
+    let empty: Vec<serde_json::Value> = Vec::new();
+    let blocks = value
+        .get("blocks")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
+
+    let mut first = true;
+    for block in blocks {
+        let id = block.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let command = block
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let output = block
+            .get("output")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim_end()
+            .to_string();
+        if command.is_empty() && output.is_empty() {
+            continue;
+        }
+        let exit = block
+            .get("exit_code")
+            .and_then(|v| v.as_i64())
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
+        let tags: Vec<&str> = block
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        if !first {
+            let _ = writeln!(out, "---\n");
+        }
+        first = false;
+
+        let _ = writeln!(out, "## B{id}");
+        if !command.is_empty() {
+            let _ = writeln!(out, "`{command}` — exit {exit}");
+        } else {
+            let _ = writeln!(out, "exit {exit}");
+        }
+        if !tags.is_empty() {
+            let _ = writeln!(out, "tags: {}", tags.join(", "));
+        }
+        if !output.is_empty() {
+            let _ = writeln!(out, "\n```");
+            let _ = writeln!(out, "{output}");
+            let _ = writeln!(out, "```");
+        }
+        let _ = writeln!(out);
+    }
 }
 
 /// Escape just enough for JSON-in-a-string: backslash, quote, and the
