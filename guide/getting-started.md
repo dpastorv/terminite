@@ -51,6 +51,12 @@ Split pane: Cmd+D (vertical) / Cmd+Shift+D (horizontal). Drag any
 border between panes to resize. Cmd-drag a pane's corner handle to
 split. Cmd+1…Cmd+9 jumps to tab by index.
 
+Selection: drag to select cells. Double-click selects a word,
+triple-click selects a line — both auto-copy. **Cmd-click inside a
+block selects the whole block (prompt + output) and copies it** —
+the pair-friendly "share what just happened." Cmd-click an OSC 8
+hyperlink opens it instead.
+
 ## Configure
 
 User config lives at `~/.config/terminite/config.toml`. Copy the example

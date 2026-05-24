@@ -1948,6 +1948,32 @@ impl Renderer {
 
     /// Convert a mouse pixel position into an absolute (Line, Column) using
     /// the current display_offset. Used for both selection start and extend.
+    /// Look up the block whose row range contains a clicked selection-abs
+    /// line. Returns the block's selection-coordinate range
+    /// `((start_line, 0), (end_line, last_col))` — ready to drop into a
+    /// `Selection`. Translates between the block store's session-absolute
+    /// coordinates (history + cursor at fire time) and the selection
+    /// model's `vl - display_offset` convention.
+    fn block_at_selection_line(&self, sel_line: i32) -> Option<((i32, usize), (i32, usize))> {
+        let tab = self.active_tab_ref();
+        let (_, history) = tab.live_term.offset_and_history();
+        let history = history as i32;
+        let session_abs = sel_line + history;
+        let last_col = tab.cols.saturating_sub(1);
+        tab.blocks.iter().find_map(|block| {
+            let start = block.prompt_line.or(block.output_start_line)?;
+            let end = block
+                .output_end_line
+                .or(block.command_end_line)
+                .or(block.prompt_line)?;
+            if start <= session_abs && session_abs <= end {
+                Some(((start - history, 0), (end - history, last_col)))
+            } else {
+                None
+            }
+        })
+    }
+
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
         let (pad, line_height) = (self.pad, self.line_height);
         let apr = self.active_pane_rect();
@@ -2208,6 +2234,22 @@ impl Renderer {
         if modifiers.super_key() {
             if let Some(uri) = self.active_tab_mut().live_term.hyperlink_at(line, col) {
                 open_uri(&uri);
+                return;
+            }
+            // Cmd-click inside a block → select the whole block (prompt +
+            // output) and copy it. The command + output reads as a unit on
+            // the clipboard — pair-friendly "share what just happened."
+            if let Some((start, end)) = self.block_at_selection_line(line) {
+                let tab = self.active_tab_mut();
+                tab.selection = Some(Selection {
+                    anchor_line: start.0,
+                    anchor_col: start.1,
+                    head_line: end.0,
+                    head_col: end.1,
+                });
+                tab.dragging = false;
+                self.copy_selection();
+                self.window.request_redraw();
                 return;
             }
         }
