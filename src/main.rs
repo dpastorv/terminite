@@ -32,6 +32,37 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
     a: 1.0,
 };
 
+/// Decode the embedded app icon to an RGBA `winit::window::Icon`. Compiled
+/// into the binary via `include_bytes!`, so terminite carries its own
+/// brand asset — no fs read at runtime, no path dependency.
+///
+/// winit's window-level icon shows on Windows + X11 immediately. On macOS,
+/// proper dock-icon display needs a `.app` bundle (the OS reads the icon
+/// from the bundle's `Icon.icns`, not from a running window). The call is
+/// still worth making — it's free on the platforms where it works, and
+/// the bundling step later just points the packaging tool at the same PNG.
+fn load_app_icon() -> Option<winit::window::Icon> {
+    const ICON_BYTES: &[u8] = include_bytes!("../logo/terminite-icon.png");
+    let decoder = png::Decoder::new(ICON_BYTES);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    // Normalize to RGBA — winit::window::Icon wants exactly 4 bytes/px.
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => {
+            let mut out = Vec::with_capacity(buf.len() / 3 * 4);
+            for chunk in buf.chunks_exact(3) {
+                out.extend_from_slice(chunk);
+                out.push(255);
+            }
+            out
+        }
+        _ => return None,
+    };
+    winit::window::Icon::from_rgba(rgba, info.width, info.height).ok()
+}
+
 // Font size, line height, and text padding are no longer constants — they
 // come from the config (see `config.rs`) and live on the renderer as
 // runtime metrics, measured against the configured font at startup.
@@ -165,9 +196,12 @@ impl ApplicationHandler<UserEvent> for Terminite {
         if self.renderer.is_some() {
             return;
         }
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title("terminite")
             .with_inner_size(LogicalSize::new(900.0, 600.0));
+        if let Some(icon) = load_app_icon() {
+            attributes = attributes.with_window_icon(Some(icon));
+        }
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
