@@ -7,15 +7,38 @@ in its closing bundle, *be a foundation other things can stand on*.
 Phase 3 is *be the pair's terminal that other pairs can adopt, with
 inhabitants for the work they actually do*.
 
-## The pivot Phase 2 didn't finish without
+## The pivots Phase 2 didn't finish without
+
+Two things surfaced during planning that need to land before Phase 3
+begins. The shape is: terminite has to be **a debuggable host** —
+each half of that compound is its own bundle.
+
+### Bundle 7a — Minimal debug surface (ships first)
+
+Three crashes' worth of trust were built without a way to actually
+see what terminite was doing. The framework work coming next is
+harder than anything yet; building it without observability would
+be working blind.
+
+- **Structured logging** to `~/.terminite/log/terminite.log`. Levels
+  (info / warn / error). Size-rotated (keep last N MB).
+- **`terminite stats` proto verb** — single-snapshot of internal
+  state: frame timings, per-tab grid + block-store sizes, proto
+  subscriber queue depth, memory snapshot, RSS.
+- **Panic handler** that writes a dump (stack + key state) to
+  `~/.terminite/log/crashes/<timestamp>.txt` rather than vanishing.
+  Capped by oldest-evict.
+
+Bounded throughout. No new threads. The point is *eyes open* before
+the framework work.
+
+### Bundle 6 — The extension surface
 
 Daniel surfaced it: terminite shouldn't require a rebuild to gain a
 new pane type. Every long-lived editor that hardcoded features first
 paid for it later when extensibility was retrofitted (VSCode and the
 LSP is the modern lesson; Plan 9's 9P is the older one). The surface
 for adding things has to land *before* we add things.
-
-So Phase 2 closes with one more bundle — **the extension surface**:
 
 - A module manifest format (`~/.terminite/modules/<name>/manifest.toml`).
 - Module discovery + registration (`terminite module add/list/remove`).
@@ -31,8 +54,29 @@ restructured as a "well-known built-in module," so the framework
 hosts terminite's *own* code first. If the framework can't host its
 own author's code cleanly, it definitely can't host a third party's.
 
-After this lands, terminite is no longer a fixed product. It's a
-**host**. Phase 3 builds inhabitants for the host.
+### Bundle 7b — Debug as a module (closes Phase 2)
+
+Once Bundle 6 lands, the debug surface levels up — from "logs and a
+proto verb" to a **rich debug pane module** that lives in the
+dropdown alongside shell / viewer / editor. Real-time stats
+visualisation, log tail, block-store inspector, per-tab grid state,
+queue depth meters. Built on the same framework everything else
+will use.
+
+The shape of this matters: it proves the framework can host its
+own observability. After this, Phase 2 is done — terminite is a
+debuggable host. Phase 3 builds inhabitants.
+
+### The completion bar (restated)
+
+Phase 2 isn't done until all three of these land:
+1. Bundle 7a (debug v0) — eyes open.
+2. Bundle 6 (extension surface) — host capability.
+3. Bundle 7b (debug as module) — host hosts its own observability.
+
+Only then does the bar from the blog apply — *use terminite for the
+client work and report whether the partnership held.* Until then
+we're still inside Phase 2's close.
 
 ## The spine — the design call
 
