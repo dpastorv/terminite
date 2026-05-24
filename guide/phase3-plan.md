@@ -101,7 +101,13 @@ the pair routing needs to be designed.
 Today config is window-wide. Tomorrow each pane can override
 specific keys: a sidebar editor pane at `font_size = 14`, the main
 shell at `font_size = 24`. Stored per-pane in memory; survives via
-the persistence work below. Pairs naturally with the dropdown.
+the persistence work below. Pairs naturally with the dropdown — a
+small config gear sits next to the content-type dropdown, exposing
+scale, background color, tab color. **These are core knobs,
+applied by the host;** modules consult them (an editor knows the
+scale, a viewer gets the bg color to compose against) but don't
+write them. See *What's out → chrome as an extension surface* for
+why the line sits there.
 
 ### Text editor
 The biggest item — real editing primitives (cursor, selection,
@@ -421,6 +427,20 @@ same surface — and is free to make it theirs.
   Multi-actor (above) explicitly stays same-machine; trust boundary
   stays *"the local user."* If a real use case ever forces this
   question, we revisit deliberately — not as a creeping convenience.
+
+- **Chrome as an extension surface.** The host stays opinionated
+  about chrome: tab bar layout, divider drawing, the dropdown UI,
+  status decorations, palette. Modules own *content*; the host owns
+  *frame*. Adding "themes / bars / decorations are also extensible"
+  doubles the extension protocol and risks a different terminite
+  per-install. The "first pair" principle pushes the other way —
+  the host has a personality that new pairs *recognize.* Per-pane
+  scale / bg color / tab color are core knobs (user-tunable via the
+  per-pane config overrides), not module hooks. Modules consult
+  these values when rendering; they don't write them. If a real
+  use case forces this question (a working showrunner wants a
+  status bar showing build state), we revisit — same line as the
+  cross-machine question.
 
 ---
 
