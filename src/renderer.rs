@@ -3257,8 +3257,9 @@ impl Renderer {
         };
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
-        self.rects_tab_bar
-            .prepare(&self.queue, &tab_bar, resolution);
+        // `tab_bar` gets more entries in phase 2 (block-label highlights),
+        // so its `prepare` is deferred to after that pass — uploading
+        // here would freeze it before the highlights land.
         self.rects_modal
             .prepare(&self.queue, &overlay_rects, resolution);
 
@@ -3598,6 +3599,13 @@ impl Renderer {
                 )
                 .expect("terminite: tab bar text prepare failed");
         }
+
+        // Upload the tab-bar rects now that phase 2 has pushed any
+        // block-label highlights into the same Vec — render order still
+        // puts these behind `tab_text_renderer`, so the rect sits behind
+        // the label glyphs.
+        self.rects_tab_bar
+            .prepare(&self.queue, &tab_bar, resolution);
 
         // Stage the image instance buffer; render happens between content
         // (text + decorations) and the tab bar, so images sit above the
