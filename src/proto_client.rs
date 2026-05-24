@@ -69,6 +69,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         )),
         "cursor-clear" => Some(cmd_cursor_clear(args.get(1).and_then(|s| s.parse().ok()))),
         "export" => Some(cmd_export(&args[1..])),
+        "stats" => Some(cmd_stats()),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -99,6 +100,8 @@ USAGE
   terminite export <tab> [--json]    write the tab's blocks as markdown
                                      (or JSON with --json)
                                      [--since <id>] starts from block id
+  terminite stats                    snapshot of internal state
+                                     (frames, tabs, blocks, memory)
   terminite help                     this message
 
 ENV
@@ -151,6 +154,10 @@ fn cmd_watch() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn cmd_stats() -> ExitCode {
+    one_shot(r#"{"id":1,"method":"stats"}"#)
 }
 
 fn cmd_tag(tab_id: Option<u64>, block_id: Option<u32>, tag: Option<&String>) -> ExitCode {

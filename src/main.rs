@@ -12,6 +12,7 @@ use winit::window::{Window, WindowId};
 mod blocks;
 mod config;
 mod images;
+mod logging;
 mod palette;
 mod proto;
 mod proto_client;
@@ -23,6 +24,76 @@ mod texture;
 use renderer::{Renderer, SplitDir};
 
 // ── Layout constants shared across modules ─────────────────────────────────
+
+/// Per-process cap on retained crash dumps. Older dumps are dropped.
+const MAX_CRASH_DUMPS: usize = 20;
+
+/// Install a panic hook that writes a crash dump (panic message,
+/// source location, backtrace) to `~/.terminite/log/crashes/`. Also
+/// logs the panic to the regular log so a debug pane can pick it up.
+/// Without this, a panic prints to stderr nobody reads and the
+/// window vanishes.
+fn install_panic_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "<unknown>".into());
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        logging::error(&format!("panic at {location}: {payload}"));
+        write_crash_dump(&location, &payload, &backtrace.to_string());
+        // Let the default hook also fire (stderr) — useful when running
+        // `cargo run` in a console.
+        default(info);
+    }));
+}
+
+/// Write one crash-dump file and trim the oldest if the cap is hit.
+fn write_crash_dump(location: &str, payload: &str, backtrace: &str) {
+    let Some(dir) = logging::crash_dir() else { return };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let filename = format!("{}.txt", logging::filename_timestamp_now());
+    let path = dir.join(&filename);
+    let body = format!(
+        "terminite crash dump\nversion: {}\nlocation: {}\nmessage: {}\n\nbacktrace:\n{}\n",
+        env!("CARGO_PKG_VERSION"),
+        location,
+        payload,
+        backtrace,
+    );
+    let _ = std::fs::write(&path, body);
+    trim_crash_dumps(&dir);
+}
+
+/// Keep at most `MAX_CRASH_DUMPS`; drop oldest by mtime.
+fn trim_crash_dumps(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            let m = e.metadata().ok()?.modified().ok()?;
+            Some((p, m))
+        })
+        .collect();
+    if files.len() <= MAX_CRASH_DUMPS {
+        return;
+    }
+    files.sort_by_key(|(_, m)| *m);
+    for (p, _) in &files[..files.len() - MAX_CRASH_DUMPS] {
+        let _ = std::fs::remove_file(p);
+    }
+}
 
 /// terminite's resting background — deep, quiet, not pure black.
 pub const BACKGROUND: wgpu::Color = wgpu::Color {
@@ -523,6 +594,15 @@ fn main() -> std::process::ExitCode {
     if let Some(code) = proto_client::dispatch(&args) {
         return code;
     }
+
+    // Window-mode bootstrap. Logging + panic hook come up first so
+    // any failure during init has somewhere to land.
+    logging::init();
+    install_panic_hook();
+    logging::info(&format!(
+        "terminite starting (version {})",
+        env!("CARGO_PKG_VERSION")
+    ));
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()

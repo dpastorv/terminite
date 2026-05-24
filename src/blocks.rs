@@ -111,6 +111,11 @@ impl BlockStore {
         self.cursor
     }
 
+    /// The id of the open block, if any. Used by stats / debug.
+    pub fn open_id(&self) -> Option<u32> {
+        self.open.as_ref().map(|b| b.id)
+    }
+
     /// Move the AI cursor to a block. Returns `true` if the block
     /// exists and the cursor moved; `false` if the id is unknown (the
     /// cursor stays where it was).

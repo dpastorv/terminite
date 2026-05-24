@@ -591,6 +591,8 @@ fn split_ratio_from_cursor(pane: PaneRect, dir: SplitDir, cx: f32, cy: f32) -> f
 /// the grid must be bounded at the source.
 const MAX_GRID_COLS: usize = 600;
 const MAX_GRID_ROWS: usize = 400;
+/// Cap on the rolling frame-time window used by the stats verb.
+const FRAME_TIMER_CAP: usize = 120;
 
 // ── Proto helpers ────────────────────────────────────────────────────────
 
@@ -1013,6 +1015,14 @@ pub struct Renderer {
     /// (channel full or disconnected) clears the slot.
     proto_subscriber: Option<std::sync::mpsc::SyncSender<crate::proto::OutMessage>>,
 
+    /// Recent frame timings in milliseconds — rolling window for the
+    /// stats verb. Capped at `FRAME_TIMER_CAP` samples.
+    frame_samples: std::collections::VecDeque<f32>,
+    /// Wall-clock of the last completed frame, for delta computation.
+    last_frame_end: Option<Instant>,
+    /// Monotonic count of frames since startup.
+    frame_count: u64,
+
     pub window: Arc<Window>,
 }
 
@@ -1224,6 +1234,9 @@ impl Renderer {
             config,
             proxy,
             proto_subscriber: None,
+            frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
+            last_frame_end: None,
+            frame_count: 0,
             window,
         };
         // Size the first pane's buffers/grid to the laid-out pane rect
@@ -2825,6 +2838,7 @@ impl Renderer {
             "cursor_at" => self.proto_cursor_at(&req.params),
             "cursor_clear" => self.proto_cursor_clear(&req.params),
             "export_tab" => self.proto_export_tab(&req.params),
+            "stats" => self.proto_stats(),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -3039,6 +3053,57 @@ impl Renderer {
             tab_id: tab_id_u64,
             blocks,
         }
+    }
+
+    fn proto_stats(&self) -> crate::proto::OutPayload {
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root
+            .as_ref()
+            .expect("pane tree present")
+            .all_tabs(&mut all);
+        let tabs: Vec<crate::proto::TabStats> = all
+            .iter()
+            .map(|t| crate::proto::TabStats {
+                tab_id: t.id.0,
+                title: t.title.clone(),
+                cols: t.cols,
+                rows: t.rows,
+                blocks: t.blocks.iter().count(),
+                open_block: t.blocks.open_id(),
+                cursor_block: t.blocks.cursor(),
+                has_image: t.image.is_some(),
+            })
+            .collect();
+
+        // Frame stats — simple sort to find p99. Sample count caps at
+        // `FRAME_TIMER_CAP`, so the sort is O(n log n) on a small n.
+        let samples: Vec<f32> = self.frame_samples.iter().copied().collect();
+        let (avg_ms, p99_ms, max_ms) = if samples.is_empty() {
+            (0.0, 0.0, 0.0)
+        } else {
+            let sum: f32 = samples.iter().sum();
+            let avg = sum / samples.len() as f32;
+            let mut sorted = samples.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let p99_idx = ((sorted.len() as f32 * 0.99) as usize).min(sorted.len() - 1);
+            let p99 = sorted[p99_idx];
+            let max = sorted[sorted.len() - 1];
+            (avg, p99, max)
+        };
+
+        crate::proto::OutPayload::Stats(crate::proto::StatsPayload {
+            version: env!("CARGO_PKG_VERSION"),
+            peak_rss_bytes: process_rss_peak_bytes(),
+            frame: crate::proto::FrameStats {
+                frames_observed: self.frame_count,
+                recent_samples: samples.len(),
+                avg_ms,
+                p99_ms,
+                max_ms,
+            },
+            tabs,
+            subscriber_connected: self.proto_subscriber.is_some(),
+        })
     }
 
     fn proto_emit_event(&mut self, event: crate::proto::EventPayload) {
@@ -3358,6 +3423,7 @@ impl Renderer {
     pub fn render(&mut self) {
         check_rss_kill_switch(self.rss_kill_bytes);
         self.refresh_auto_titles();
+        let frame_start = Instant::now();
 
         self.viewport.update(
             &self.queue,
@@ -3963,6 +4029,18 @@ impl Renderer {
         self.window.pre_present_notify();
         surface_texture.present();
         self.atlas.trim();
+
+        // Frame-time bookkeeping for the stats verb. Sample is the
+        // wall-clock interval from the start of this frame through
+        // present; close enough to "what the user perceives as
+        // frame cost" for debug purposes.
+        let dt = frame_start.elapsed().as_secs_f32() * 1000.0;
+        if self.frame_samples.len() == FRAME_TIMER_CAP {
+            self.frame_samples.pop_front();
+        }
+        self.frame_samples.push_back(dt);
+        self.last_frame_end = Some(Instant::now());
+        self.frame_count = self.frame_count.saturating_add(1);
     }
 
     /// Render one pane into its rect: draw its own tab bar, then tick

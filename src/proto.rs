@@ -92,10 +92,43 @@ pub enum OutPayload {
     /// Acknowledgement for write methods (`set_tag`, `remove_tag`,
     /// `cursor_at`, `cursor_clear`). Empty on success.
     Ok,
+    /// Single-snapshot of terminite's internal state, for the debug
+    /// surface. Bounded — no streaming, no growth.
+    Stats(StatsPayload),
     Error {
         message: String,
     },
     Event(EventPayload),
+}
+
+#[derive(Serialize, Debug)]
+pub struct StatsPayload {
+    pub version: &'static str,
+    pub peak_rss_bytes: Option<u64>,
+    pub frame: FrameStats,
+    pub tabs: Vec<TabStats>,
+    pub subscriber_connected: bool,
+}
+
+#[derive(Serialize, Debug)]
+pub struct FrameStats {
+    pub frames_observed: u64,
+    pub recent_samples: usize,
+    pub avg_ms: f32,
+    pub p99_ms: f32,
+    pub max_ms: f32,
+}
+
+#[derive(Serialize, Debug)]
+pub struct TabStats {
+    pub tab_id: u64,
+    pub title: String,
+    pub cols: usize,
+    pub rows: usize,
+    pub blocks: usize,
+    pub open_block: Option<u32>,
+    pub cursor_block: Option<u32>,
+    pub has_image: bool,
 }
 
 #[derive(Serialize, Debug, Clone)]
