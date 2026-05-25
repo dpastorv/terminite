@@ -204,6 +204,9 @@ struct Tab {
     /// (rather than read off the session) so the render path can
     /// detect changes and rebuild the shaped buffer.
     last_module_body: String,
+    /// Palette index for the tab's color band. `0` is none. Set via
+    /// the right-click "Tab color" item; cycles through the palette.
+    color_idx: u8,
 }
 
 /// What a tab currently shows. `Shell` has a live PTY behind it;
@@ -264,6 +267,7 @@ impl Tab {
             content_buffer: None,
             module_session: None,
             last_module_body: String::new(),
+            color_idx: 0,
         }
     }
 }
@@ -273,11 +277,14 @@ impl Tab {
 struct Pane {
     tabs: Vec<Tab>,
     active_tab: usize,
+    /// Background palette index for the pane's content area. `0` is
+    /// none (transparent). Set via the right-click "Pane bg" item.
+    bg_idx: u8,
 }
 
 impl Pane {
     fn single(tab: Tab) -> Self {
-        Self { tabs: vec![tab], active_tab: 0 }
+        Self { tabs: vec![tab], active_tab: 0, bg_idx: 0 }
     }
 
     fn active_tab_ref(&self) -> &Tab {
@@ -637,6 +644,42 @@ const MAX_GRID_COLS: usize = 600;
 const MAX_GRID_ROWS: usize = 400;
 /// Cap on the rolling frame-time window used by the stats verb.
 const FRAME_TIMER_CAP: usize = 120;
+
+/// Shared palette for the per-tab color band + per-pane background tint.
+/// Index 0 is "none" (transparent, the off state). Colors borrow from
+/// the One Dark family already in `src/palette.rs` so a colored pane
+/// reads as part of terminite's existing visual language.
+const COLOR_PALETTE: &[(&str, [f32; 4])] = &[
+    ("none",    [0.0, 0.0, 0.0, 0.0]),
+    ("red",     [224.0 / 255.0, 108.0 / 255.0, 117.0 / 255.0, 1.0]),
+    ("yellow",  [229.0 / 255.0, 192.0 / 255.0, 123.0 / 255.0, 1.0]),
+    ("green",   [152.0 / 255.0, 195.0 / 255.0, 121.0 / 255.0, 1.0]),
+    ("blue",    [ 97.0 / 255.0, 175.0 / 255.0, 239.0 / 255.0, 1.0]),
+    ("magenta", [198.0 / 255.0, 120.0 / 255.0, 221.0 / 255.0, 1.0]),
+    ("cyan",    [ 86.0 / 255.0, 182.0 / 255.0, 194.0 / 255.0, 1.0]),
+];
+
+/// Cycle the palette index forward by one, wrapping.
+fn next_color_idx(idx: u8) -> u8 {
+    ((idx as usize + 1) % COLOR_PALETTE.len()) as u8
+}
+
+/// Look up `[r, g, b, a]` from the palette at the given index. Out-of-
+/// range falls back to the "none" entry — defensive against stale data.
+fn palette_color(idx: u8) -> [f32; 4] {
+    COLOR_PALETTE
+        .get(idx as usize)
+        .map(|(_, c)| *c)
+        .unwrap_or([0.0, 0.0, 0.0, 0.0])
+}
+
+/// Human-readable name for the palette entry — used in the menu item.
+fn palette_name(idx: u8) -> &'static str {
+    COLOR_PALETTE
+        .get(idx as usize)
+        .map(|(n, _)| *n)
+        .unwrap_or("none")
+}
 /// Width reserved at the left of each pane's tab bar for the content-
 /// kind selector — Blender-style: leftmost element in the area
 /// header. Clicking it opens a popover with the available kinds.
@@ -876,6 +919,10 @@ enum MenuAction {
         pane: PaneId,
         kind: TabContentKind,
     },
+    /// Advance the active tab's color band one step through the palette.
+    CycleTabColor,
+    /// Advance the active pane's background tint one step.
+    CyclePaneBg,
 }
 
 /// One row in the context menu.
@@ -1588,6 +1635,31 @@ impl Renderer {
             enabled: true,
         });
 
+        // Color items — apply to the active tab + active pane. Each
+        // click cycles one step through the shared palette. The label
+        // shows the *current* setting so the user knows what state
+        // they're in before clicking.
+        let tab_color_name =
+            palette_name(self.active_tab_ref().color_idx);
+        let pane_bg_name =
+            palette_name(self.active_pane_ref().bg_idx);
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Tab color: {tab_color_name}"),
+            ),
+            action: MenuAction::CycleTabColor,
+            enabled: true,
+        });
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Pane bg: {pane_bg_name}"),
+            ),
+            action: MenuAction::CyclePaneBg,
+            enabled: true,
+        });
+
         // Keep the menu fully on-screen.
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = x
@@ -1702,6 +1774,16 @@ impl Renderer {
                 let pane = *pane;
                 let kind = kind.clone();
                 self.set_tab_kind(pane, kind);
+            }
+            MenuAction::CycleTabColor => {
+                let tab = self.active_tab_mut();
+                tab.color_idx = next_color_idx(tab.color_idx);
+                self.window.request_redraw();
+            }
+            MenuAction::CyclePaneBg => {
+                let pane = self.active_pane_mut();
+                pane.bg_idx = next_color_idx(pane.bg_idx);
+                self.window.request_redraw();
             }
         }
     }
@@ -3620,6 +3702,17 @@ impl Renderer {
                     },
                 });
             }
+            // Per-tab color band — a thin strip at the top of the tab
+            // slot, so it sits above the active-tab underline at the
+            // bottom and doesn't fight it. Drawn only when the tab
+            // has a non-`none` color picked.
+            let tab = &pane.tabs[i];
+            if tab.color_idx != 0 {
+                out.push(RectInstance {
+                    rect: [x + 6.0, bar_top + 2.0, w - 12.0, 3.0],
+                    color: palette_color(tab.color_idx),
+                });
+            }
             let label_left = x + TAB_LABEL_INSET;
             let label_right = (x + w - TAB_CLOSE_WIDTH).max(label_left);
             let close_left = x + w - TAB_CLOSE_WIDTH + 8.0;
@@ -4499,6 +4592,28 @@ impl Renderer {
         let pad = self.pad;
         // This pane's own tab bar fills the top strip of its rect.
         let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
+
+        // Per-pane background tint — pushed first into `below` so it
+        // sits beneath everything else. Low alpha keeps text legible;
+        // the palette color stays recognisable as a hint, not a wash.
+        let pane_bg_idx = self
+            .root
+            .as_ref()
+            .and_then(|n| n.find(pid))
+            .map(|p| p.bg_idx)
+            .unwrap_or(0);
+        if pane_bg_idx != 0 {
+            let [r, g, b, _] = palette_color(pane_bg_idx);
+            below.push(RectInstance {
+                rect: [
+                    rect.x,
+                    rect.y + self.tab_bar_height,
+                    rect.w,
+                    rect.h - self.tab_bar_height,
+                ],
+                color: [r, g, b, 0.18],
+            });
+        }
 
         // Non-shell content kinds short-circuit the whole shell render
         // path. The Welcome card (and future built-in kinds) lives in
