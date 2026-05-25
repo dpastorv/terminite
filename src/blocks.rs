@@ -27,9 +27,12 @@ pub const MAX_TAGS_PER_BLOCK: usize = 32;
 /// Per-tag character cap. Longer tags are rejected.
 pub const MAX_TAG_LEN: usize = 64;
 
-/// Matches the existing tab-bar chrome font so a block's `B7` label
-/// looks the same as a tab title.
-const LABEL_FONT_SIZE: f32 = 18.0;
+/// Default label font + line height. Block labels are *content-
+/// anchored* — they describe content rows — so they scale with the
+/// pane's content, not the chrome. These defaults are used when a
+/// block is created at the pane's natural 100% scale; the renderer
+/// passes scaled values through for non-100% panes.
+pub const LABEL_FONT_SIZE: f32 = 18.0;
 pub const LABEL_LINE_H: f32 = 26.0;
 
 /// One command + its output, with whatever marks have arrived so far.
@@ -51,6 +54,11 @@ pub struct Block {
     /// the label against the content edge, so it needs to know the label's
     /// actual width to compute the `left` for the TextArea.
     pub label_width: f32,
+    /// Line height the label was shaped at. Equal to `LABEL_LINE_H *
+    /// pane.font_scale` at the time of build. The renderer uses this
+    /// for vertical centering + highlight-rect height so labels and
+    /// boxes stay tight against the content row stride.
+    pub label_line_h: f32,
     /// Free-form labels attached by the pair to give a block a handle
     /// past its id ("flaky-test", "deploy-2026-05-23"). Either side can
     /// add or remove; bounded by `MAX_TAGS_PER_BLOCK` and `MAX_TAG_LEN`.
@@ -184,6 +192,8 @@ impl BlockStore {
         exit: Option<i32>,
         line: i32,
         font_system: &mut FontSystem,
+        label_font_size: f32,
+        label_line_h: f32,
     ) -> MarkEffect {
         let mut effect = MarkEffect::default();
         match kind {
@@ -195,7 +205,13 @@ impl BlockStore {
                     self.push_closed(open);
                     effect.closed = Some((id, None));
                 }
-                let b = self.fresh_block(Some(line), None, font_system);
+                let b = self.fresh_block(
+                    Some(line),
+                    None,
+                    font_system,
+                    label_font_size,
+                    label_line_h,
+                );
                 effect.opened = Some(b.id);
                 self.open = Some(b);
             }
@@ -211,7 +227,13 @@ impl BlockStore {
                     // Some shells emit `C` without a prior `A`. Open a
                     // block anchored at output-start — its prompt range
                     // stays unknown, which is fine.
-                    let b = self.fresh_block(None, Some(line), font_system);
+                    let b = self.fresh_block(
+                        None,
+                        Some(line),
+                        font_system,
+                        label_font_size,
+                        label_line_h,
+                    );
                     effect.opened = Some(b.id);
                     self.open = Some(b);
                 }
@@ -248,10 +270,13 @@ impl BlockStore {
         prompt_line: Option<i32>,
         output_start_line: Option<i32>,
         font_system: &mut FontSystem,
+        label_font_size: f32,
+        label_line_h: f32,
     ) -> Block {
         let id = self.next_id;
         self.next_id += 1;
-        let (label_buffer, label_width) = make_label_buffer(font_system, id);
+        let (label_buffer, label_width) =
+            make_label_buffer(font_system, id, label_font_size, label_line_h);
         Block {
             id,
             prompt_line,
@@ -263,7 +288,31 @@ impl BlockStore {
             finished_at: None,
             label_buffer,
             label_width,
+            label_line_h,
             tags: Vec::new(),
+        }
+    }
+
+    /// Re-shape every block's label buffer at a new font size + line
+    /// height. Called when the owning pane's font_scale changes so
+    /// content-anchored labels stay sized to their content rows.
+    pub fn rescale_labels(
+        &mut self,
+        font_system: &mut FontSystem,
+        label_font_size: f32,
+        label_line_h: f32,
+    ) {
+        for b in self.closed.iter_mut() {
+            let (buf, w) = make_label_buffer(font_system, b.id, label_font_size, label_line_h);
+            b.label_buffer = buf;
+            b.label_width = w;
+            b.label_line_h = label_line_h;
+        }
+        if let Some(b) = self.open.as_mut() {
+            let (buf, w) = make_label_buffer(font_system, b.id, label_font_size, label_line_h);
+            b.label_buffer = buf;
+            b.label_width = w;
+            b.label_line_h = label_line_h;
         }
     }
 
@@ -282,14 +331,21 @@ impl BlockStore {
     }
 }
 
-/// Pre-shape a `Bn` label in the chrome font. Width unconstrained so the
-/// shaped text reports its real pixel width — the renderer right-aligns
-/// against the content edge using that measurement, so a long label like
-/// `B1234` doesn't wrap inside the gutter, it just grows leftward.
-fn make_label_buffer(font_system: &mut FontSystem, id: u32) -> (Buffer, f32) {
+/// Pre-shape a `Bn` label at the given font + line metrics. Width
+/// unconstrained so the shaped text reports its real pixel width —
+/// the renderer right-aligns against the content edge using that
+/// measurement, so a long label like `B1234` doesn't wrap inside the
+/// gutter, it just grows leftward. Per-pane scaling threads its
+/// scaled metrics through here.
+fn make_label_buffer(
+    font_system: &mut FontSystem,
+    id: u32,
+    font_size: f32,
+    line_h: f32,
+) -> (Buffer, f32) {
     let text = format!("B{id}");
-    let mut buf = Buffer::new(font_system, Metrics::new(LABEL_FONT_SIZE, LABEL_LINE_H));
-    buf.set_size(font_system, None, Some(LABEL_LINE_H));
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_h));
+    buf.set_size(font_system, None, Some(line_h));
     let attrs = Attrs::new().family(Family::Monospace);
     buf.set_text(font_system, &text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -310,10 +366,10 @@ mod tests {
     fn full_lifecycle_produces_one_closed_block() {
         let mut fs = fs();
         let mut s = BlockStore::new();
-        s.on_mark('A', None, 10, &mut fs);
-        s.on_mark('B', None, 10, &mut fs);
-        s.on_mark('C', None, 11, &mut fs);
-        s.on_mark('D', Some(0), 15, &mut fs);
+        s.on_mark('A', None, 10, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('B', None, 10, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('C', None, 11, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('D', Some(0), 15, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         let v: Vec<_> = s.iter().collect();
         assert_eq!(v.len(), 1);
         let b = v[0];
@@ -330,8 +386,8 @@ mod tests {
     fn a_without_d_graduates_lossily_on_next_a() {
         let mut fs = fs();
         let mut s = BlockStore::new();
-        s.on_mark('A', None, 0, &mut fs);
-        s.on_mark('A', None, 5, &mut fs);
+        s.on_mark('A', None, 0, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('A', None, 5, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         let v: Vec<_> = s.iter().collect();
         assert_eq!(v.len(), 2); // first one promoted, second one open
         assert_eq!(v[0].id, 1);
@@ -342,8 +398,8 @@ mod tests {
     fn c_without_a_opens_a_block() {
         let mut fs = fs();
         let mut s = BlockStore::new();
-        s.on_mark('C', None, 7, &mut fs);
-        s.on_mark('D', Some(0), 9, &mut fs);
+        s.on_mark('C', None, 7, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('D', Some(0), 9, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         let v: Vec<_> = s.iter().collect();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].prompt_line, None);
@@ -355,7 +411,7 @@ mod tests {
     fn d_without_open_is_a_noop() {
         let mut fs = fs();
         let mut s = BlockStore::new();
-        s.on_mark('D', Some(0), 0, &mut fs);
+        s.on_mark('D', Some(0), 0, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         assert_eq!(s.iter().count(), 0);
     }
 
@@ -364,8 +420,8 @@ mod tests {
         let mut fs = fs();
         let mut s = BlockStore::new();
         for _ in 0..(MAX_BLOCKS_PER_TAB + 50) {
-            s.on_mark('A', None, 0, &mut fs);
-            s.on_mark('D', None, 0, &mut fs);
+            s.on_mark('A', None, 0, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+            s.on_mark('D', None, 0, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         }
         assert_eq!(s.iter().count(), MAX_BLOCKS_PER_TAB);
     }
@@ -374,19 +430,19 @@ mod tests {
     fn anchor_prefers_prompt_then_falls_back() {
         let mut fs = fs();
         // Prompt set → that's the anchor, no matter what else exists.
-        let b = BlockStore::new().fresh_block(Some(3), None, &mut fs);
+        let b = BlockStore::new().fresh_block(Some(3), None, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         assert_eq!(b.anchor_line(), Some(3));
-        let mut b = BlockStore::new().fresh_block(Some(3), Some(5), &mut fs);
+        let mut b = BlockStore::new().fresh_block(Some(3), Some(5), &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         b.command_end_line = Some(4);
         assert_eq!(b.anchor_line(), Some(3));
         // No prompt (e.g. C-without-A path) → fall back through.
-        let b = BlockStore::new().fresh_block(None, Some(5), &mut fs);
+        let b = BlockStore::new().fresh_block(None, Some(5), &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         assert_eq!(b.anchor_line(), Some(5));
     }
 
     fn one_block(s: &mut BlockStore, fs: &mut FontSystem) -> u32 {
-        s.on_mark('A', None, 0, fs);
-        s.on_mark('D', Some(0), 0, fs);
+        s.on_mark('A', None, 0, fs, LABEL_FONT_SIZE, LABEL_LINE_H);
+        s.on_mark('D', Some(0), 0, fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         s.iter().last().unwrap().id
     }
 
@@ -449,7 +505,7 @@ mod tests {
     fn add_tag_on_open_block() {
         let mut fs = fs();
         let mut s = BlockStore::new();
-        s.on_mark('A', None, 0, &mut fs);
+        s.on_mark('A', None, 0, &mut fs, LABEL_FONT_SIZE, LABEL_LINE_H);
         let id = s.iter().last().unwrap().id;
         assert!(s.add_tag(id, "in-flight"));
         assert_eq!(s.find(id).unwrap().tags, vec!["in-flight".to_string()]);

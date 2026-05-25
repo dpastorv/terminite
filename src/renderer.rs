@@ -16,7 +16,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
 use winit::window::{CursorIcon, Window};
 
-use crate::blocks::{BlockStore, LABEL_LINE_H};
+use crate::blocks::BlockStore;
 use crate::config::{BellStyle, Config, Padding};
 use crate::images::{self, Action};
 use crate::palette::{color_to_floats, DEFAULT_FG};
@@ -521,6 +521,19 @@ impl PaneNode {
             }
         }
     }
+
+    /// Collect every leaf `Pane` in the tree. Used when we need
+    /// pane-level state (font_scale, bg) rather than per-tab data.
+    fn all_panes<'a>(&'a self, out: &mut Vec<&'a Pane>) {
+        match self {
+            PaneNode::Leaf { pane, .. } => out.push(pane),
+            PaneNode::Split { first, second, .. } => {
+                first.all_panes(out);
+                second.all_panes(out);
+            }
+        }
+    }
+
 
     /// Find the split divider under a point. Returns the path to the owning
     /// `Split`, that split's outer rect, and its orientation.
@@ -2104,6 +2117,21 @@ impl Renderer {
         self.pane_metrics(self.active_pane)
     }
 
+    /// Find the `font_scale` of whatever pane currently owns `tab_id`,
+    /// or 1.0 if the tab vanished. Used when shaping block labels so
+    /// they're sized to the pane's content from the moment they're
+    /// created.
+    fn scale_for_tab(&self, tab_id: TabId) -> f32 {
+        let mut leaves: Vec<&Pane> = Vec::new();
+        self.root_ref().all_panes(&mut leaves);
+        for p in leaves {
+            if p.tabs.iter().any(|t| t.id == tab_id) {
+                return p.font_scale;
+            }
+        }
+        1.0
+    }
+
     /// Set one pane's font scale and rebuild its tab buffers + grid.
     /// Cheap when nothing changed.
     fn apply_pane_scale(&mut self, pid: PaneId, scale: f32) {
@@ -2125,12 +2153,24 @@ impl Renderer {
         }
         let metrics = self.pane_metrics(pid);
         let font_metrics = Metrics::new(metrics.font_size, metrics.line_height);
+        // Block labels are content-anchored, so they scale too. Use
+        // `LABEL_LINE_H * scale` rather than `metrics.line_height` —
+        // the label has its own line-height ratio independent of the
+        // content's `line_height` multiplier.
+        let scale = metrics.font_size / self.font_size;
+        let label_font_size = crate::blocks::LABEL_FONT_SIZE * scale;
+        let label_line_h = (crate::blocks::LABEL_LINE_H * scale).max(1.0);
         if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pid)) {
             for tab in p.tabs.iter_mut() {
                 tab.text_buffer.set_metrics(&mut self.font_system, font_metrics);
                 tab.content_buffer = None;
                 tab.buffer_dirty = true;
                 tab.last_text_runs.clear();
+                tab.blocks.rescale_labels(
+                    &mut self.font_system,
+                    label_font_size,
+                    label_line_h,
+                );
             }
         }
         self.relayout();
@@ -3175,11 +3215,24 @@ impl Renderer {
         exit: Option<i32>,
         line: i32,
     ) {
+        // Scale the new block's label to its owning pane's font scale
+        // so the label sits flush with content rows at that pane's
+        // size. Content-anchored chrome stays consistent with content.
+        let scale = self.scale_for_tab(tab_id);
+        let label_font_size = crate::blocks::LABEL_FONT_SIZE * scale;
+        let label_line_h = (crate::blocks::LABEL_LINE_H * scale).max(1.0);
         let effect = {
             let mut tabs: Vec<&mut Tab> = Vec::new();
             self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
             tabs.into_iter().find(|t| t.id == tab_id).map(|tab| {
-                tab.blocks.on_mark(kind, exit, line, &mut self.font_system)
+                tab.blocks.on_mark(
+                    kind,
+                    exit,
+                    line,
+                    &mut self.font_system,
+                    label_font_size,
+                    label_line_h,
+                )
             })
         };
         // Fan out to the proto subscriber. `closed` fires before `opened`
@@ -4380,7 +4433,9 @@ impl Renderer {
                 // between the label's right edge and the line content.
                 let label_right = pane_rect.x + pad.left - self.gutter_gap;
                 let label_left_min = pane_rect.x + gutter_left;
-                let v_pad = ((pane_line_height - LABEL_LINE_H) * 0.5).max(0.0);
+                // v_pad + label_line_h are now per-block (labels scale
+                // with the pane that owned them at creation time).
+                // Reads off the block in the loop below.
                 // Visual signal lives in a background highlight behind
                 // the label (like an HTML `<mark>`), not in the text
                 // color. Text color alone reads as "another shade of
@@ -4403,6 +4458,9 @@ impl Renderer {
                         continue;
                     }
                     let row_top = py + vl as f32 * pane_line_height + y_shift;
+                    let label_line_h = block.label_line_h;
+                    let v_pad =
+                        ((pane_line_height - label_line_h) * 0.5).max(0.0);
                     let top = row_top + v_pad;
                     let left = label_right - block.label_width;
                     let is_cursor = Some(block.id) == cursor_block_id;
@@ -4425,7 +4483,7 @@ impl Renderer {
                             .min(pane_rect.x + pad.left);
                         let hw = (hr - hx).max(0.0);
                         let hy = top - highlight_pad_y + highlight_offset_y;
-                        let hh = LABEL_LINE_H + highlight_pad_y * 2.0;
+                        let hh = label_line_h + highlight_pad_y * 2.0;
                         tab_bar.push(RectInstance {
                             rect: [hx, hy, hw, hh],
                             color,
