@@ -34,6 +34,24 @@ const MODULE_INPUT_QUEUE_CAP: usize = 1024;
 /// without bound.
 const MODULE_MAX_LINE_BYTES: usize = 256 * 1024;
 
+/// What protocol terminite uses to talk to a module process.
+///
+/// - `Data` — line-delimited JSON over stdio. Module pushes `set_text`
+///   frames; terminite renders through its glyphon text path. Right
+///   shape for: log tailers, viewers, AI chat, the debug pane.
+/// - `Tty` — module gets a PTY, draws via terminal escape sequences,
+///   terminite renders through the same vte/alacritty path shells
+///   use. Right shape for: file managers (yazi), editors (helix,
+///   nvim), monitors (htop, btop), git UIs (lazygit) — anything with
+///   a real TUI.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModuleKind {
+    #[default]
+    Data,
+    Tty,
+}
+
 /// One module's parsed manifest.
 #[derive(Clone, Debug, Serialize)]
 pub struct ModuleManifest {
@@ -43,11 +61,13 @@ pub struct ModuleManifest {
     pub name: String,
     /// Free-form version string.
     pub version: String,
-    /// Absolute path to the executable terminite will spawn. Step 2b
-    /// uses this; step 2a just surfaces it for `module list`.
+    /// Absolute path to the executable terminite will spawn.
     pub binary: PathBuf,
     /// Optional one-line summary.
     pub description: String,
+    /// Wire protocol — data (JSON over stdio) or tty (PTY). Defaults
+    /// to `data` for backward compatibility with existing manifests.
+    pub kind: ModuleKind,
 }
 
 /// All discovered modules. Built at startup; rebuilt on demand.
@@ -132,6 +152,7 @@ fn parse_manifest(
     let mut version: Option<String> = None;
     let mut binary: Option<String> = None;
     let mut description = String::new();
+    let mut kind = ModuleKind::Data;
 
     for raw in text.lines() {
         let line = raw.trim();
@@ -150,6 +171,17 @@ fn parse_manifest(
             "version" => version = Some(value),
             "binary" => binary = Some(value),
             "description" => description = value,
+            "kind" => {
+                kind = match value.to_ascii_lowercase().as_str() {
+                    "tty" => ModuleKind::Tty,
+                    "data" => ModuleKind::Data,
+                    other => {
+                        return Err(format!(
+                            "unknown `kind` value `{other}` (expected `data` or `tty`)"
+                        ));
+                    }
+                };
+            }
             _ => {} // ignore unknown keys
         }
     }
@@ -169,6 +201,7 @@ fn parse_manifest(
         version,
         binary,
         description,
+        kind,
     })
 }
 

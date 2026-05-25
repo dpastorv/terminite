@@ -246,6 +246,27 @@ impl LiveTerm {
         cwd: Option<PathBuf>,
         scrollback: usize,
     ) -> Self {
+        Self::new_with_command(
+            cols, rows, cell_advance, line_height, proxy, tab_id, cwd, scrollback, None,
+        )
+    }
+
+    /// Same as `new` but runs a specific command instead of the user's
+    /// shell. Used by TTY modules (yazi, helix, nvim, htop, …) — the
+    /// extension-surface inhabitants that draw via terminal escape
+    /// sequences rather than line-delimited JSON.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_command(
+        cols: usize,
+        rows: usize,
+        cell_advance: f32,
+        line_height: f32,
+        proxy: EventLoopProxy<UserEvent>,
+        tab_id: TabId,
+        cwd: Option<PathBuf>,
+        scrollback: usize,
+        command: Option<(String, Vec<String>)>,
+    ) -> Self {
         let pty_sender: Arc<Mutex<Option<EventLoopSender>>> = Arc::new(Mutex::new(None));
         let reported_cwd: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let notifier = Notifier {
@@ -279,6 +300,12 @@ impl LiveTerm {
             .insert("COLORTERM".to_string(), "truecolor".to_string());
         if let Some(cwd) = cwd {
             tty_options.working_directory = Some(cwd);
+        }
+        // TTY-module path: run a specific binary instead of $SHELL.
+        // alacritty's `tty::Options.shell` controls what gets exec'd
+        // when the PTY child starts.
+        if let Some((program, args)) = command {
+            tty_options.shell = Some(tty::Shell::new(program, args));
         }
 
         let pty = tty::new(&tty_options, window_size, 0)

@@ -196,14 +196,17 @@ struct Tab {
     /// `None` when the kind is Shell or the buffer hasn't been built
     /// for the current size. Rebuilt on resize.
     content_buffer: Option<Buffer>,
-    /// Live module process when this tab's kind is `Module(id)`.
-    /// Spawned on kind switch into Module; dropped (killing the
-    /// process) on switch away or tab close.
+    /// Live *data* module session — module talks JSON via stdio,
+    /// pushes `set_text` frames. None when not in a data module.
     module_session: Option<crate::modules::ModuleSession>,
-    /// Cached body the module last asked us to render. Kept here
-    /// (rather than read off the session) so the render path can
-    /// detect changes and rebuild the shaped buffer.
+    /// Cached body a data module last asked us to render.
     last_module_body: String,
+    /// Live *tty* module — a second LiveTerm pointed at the module's
+    /// binary instead of the user's shell. Rendered via the same
+    /// vte/alacritty path as shells; input flows here for the
+    /// duration the pane shows the module. None when not in a TTY
+    /// module.
+    module_pty: Option<LiveTerm>,
     /// Palette index for the tab's color band. `0` is none. Set via
     /// the right-click "Tab color" item; cycles through the palette.
     color_idx: u8,
@@ -267,7 +270,28 @@ impl Tab {
             content_buffer: None,
             module_session: None,
             last_module_body: String::new(),
+            module_pty: None,
             color_idx: 0,
+        }
+    }
+
+    /// The LiveTerm that should drive snapshot / input for this tab.
+    /// TTY modules supply their own; everything else uses the tab's
+    /// permanent shell. Preserves "non-destructive switch" — the
+    /// shell stays alive in `live_term` even while a TTY module is
+    /// running.
+    fn active_term(&self) -> &LiveTerm {
+        match (&self.kind, self.module_pty.as_ref()) {
+            (TabContentKind::Module(_), Some(pty)) => pty,
+            _ => &self.live_term,
+        }
+    }
+
+    fn active_term_mut(&mut self) -> &mut LiveTerm {
+        if matches!(self.kind, TabContentKind::Module(_)) && self.module_pty.is_some() {
+            self.module_pty.as_mut().unwrap()
+        } else {
+            &mut self.live_term
         }
     }
 }
@@ -2202,7 +2226,12 @@ impl Renderer {
                     Some(content_h),
                 );
                 if tab.cols != cols || tab.rows != rows {
+                    // Resize the shell *and* any active TTY module —
+                    // both need to react to pane geometry changes.
                     tab.live_term.resize(cols, rows);
+                    if let Some(pty) = tab.module_pty.as_ref() {
+                        pty.resize(cols, rows);
+                    }
                     tab.cols = cols;
                     tab.rows = rows;
                     // A resize invalidates the snapshot cache and selection.
@@ -2958,7 +2987,7 @@ impl Renderer {
         };
         let line_height = self.pane_metrics(pid).line_height;
 
-        let mode = self.pane_tab_mut(pid).live_term.mode_flags();
+        let mode = self.pane_tab_mut(pid).active_term().mode_flags();
 
         // Alt-screen TUIs (nano, vim, less, htop, man) replace the main
         // screen with their own — alacritty's scrollback is empty there,
@@ -2993,7 +3022,7 @@ impl Renderer {
             for _ in 0..count {
                 bytes.extend_from_slice(seq);
             }
-            self.pane_tab_mut(pid).live_term.write(bytes);
+            self.pane_tab_mut(pid).active_term().write(bytes);
             self.window.request_redraw();
             return;
         }
@@ -3019,7 +3048,7 @@ impl Renderer {
             };
             if let Some((col, row)) = self.cell_at_1indexed(self.mouse_pos.0, self.mouse_pos.1) {
                 if let Some(b) = encode_mouse_report(&mode, direction, modifiers, col, row) {
-                    self.pane_tab_mut(pid).live_term.write(b);
+                    self.pane_tab_mut(pid).active_term().write(b);
                 }
             }
             return;
@@ -3042,7 +3071,7 @@ impl Renderer {
         // boundary. Drop wheel events whose direction is blocked AND
         // whose existing residual is in the same direction (so a tiny
         // reversal still goes through to undo the smooth shift).
-        let (cur_offset, history) = self.pane_tab_mut(pid).live_term.offset_and_history();
+        let (cur_offset, history) = self.pane_tab_mut(pid).active_term().offset_and_history();
         let residual = self.pane_tab_mut(pid).pixel_offset;
         let blocked_up = pixels > 0.0 && cur_offset >= history && residual >= 0.0;
         let blocked_down = pixels < 0.0 && cur_offset == 0 && residual <= 0.0;
@@ -3063,9 +3092,9 @@ impl Renderer {
         // the *actual* offset delta instead.
         let whole = (self.pane_tab_mut(pid).pixel_offset / line_height).floor() as i32;
         if whole != 0 {
-            let (before, _) = self.pane_tab_mut(pid).live_term.offset_and_history();
-            self.pane_tab_mut(pid).live_term.scroll(TermScroll::Delta(whole));
-            let (after, history) = self.pane_tab_mut(pid).live_term.offset_and_history();
+            let (before, _) = self.pane_tab_mut(pid).active_term().offset_and_history();
+            self.pane_tab_mut(pid).active_term_mut().scroll(TermScroll::Delta(whole));
+            let (after, history) = self.pane_tab_mut(pid).active_term().offset_and_history();
             let actual = after as i32 - before as i32;
             self.pane_tab_mut(pid).pixel_offset -= actual as f32 * line_height;
             if actual != whole {
@@ -3654,11 +3683,15 @@ impl Renderer {
         let tab = self.active_tab_ref();
         match &tab.kind {
             TabContentKind::Module(_) => {
+                // TTY module: feed the PTY raw, just like a shell.
+                if let Some(pty) = tab.module_pty.as_ref() {
+                    pty.write(bytes);
+                    return;
+                }
+                // Data module: marshal to JSON via the session.
                 if let Some(sess) = tab.module_session.as_ref() {
                     sess.send_input(&bytes);
                 }
-                // No module session means the module didn't spawn —
-                // input is dropped, the placeholder explains why.
             }
             _ => tab.live_term.write(bytes),
         }
@@ -3675,22 +3708,73 @@ impl Renderer {
         };
         let proxy = self.proxy.clone();
 
+        // Pane metrics + grid size — needed up front for a TTY module
+        // because we have to spawn its LiveTerm at the right size.
+        let pane_metrics = self.pane_metrics(pane);
+        let pane_rect = self
+            .pane_layout()
+            .into_iter()
+            .find(|(id, _)| *id == pane)
+            .map(|(_, r)| r);
+        let scrollback = self.config.scrollback;
+        let pad = self.pad;
+        let tab_bar_height = self.tab_bar_height;
+
         let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pane)) else {
             return;
         };
         let tab = p.active_tab_mut();
         let tab_id = tab.id;
+        let prior_cwd = tab.live_term.current_dir();
 
-        // Tearing down the prior session (if any) drops the Child and
-        // joins the IO threads via the Drop impl.
+        // Tearing down the prior sessions (if any) drops the Child /
+        // PTY and joins the IO threads via Drop.
         tab.module_session = None;
+        tab.module_pty = None;
         tab.last_module_body.clear();
-        tab.kind = kind;
+        tab.kind = kind.clone();
         tab.content_buffer = None;
+        // Bringing the shell back to view: it needs to reshape from
+        // its real state, not the stale TTY-module frame.
+        tab.buffer_dirty = true;
+        tab.last_text_runs.clear();
 
         if let Some(manifest) = manifest {
-            tab.module_session =
-                crate::modules::ModuleSession::spawn(&manifest, tab_id, proxy);
+            match manifest.kind {
+                crate::modules::ModuleKind::Data => {
+                    tab.module_session =
+                        crate::modules::ModuleSession::spawn(&manifest, tab_id, proxy);
+                }
+                crate::modules::ModuleKind::Tty => {
+                    // Compute the grid this LiveTerm should be born at —
+                    // same shape as `pane_grid` so the module starts at
+                    // a size the pane actually has room for.
+                    let (cols, rows) = pane_rect
+                        .map(|rect| {
+                            pane_grid(
+                                rect,
+                                pane_metrics.cell_advance,
+                                pane_metrics.line_height,
+                                pad,
+                                tab_bar_height,
+                            )
+                        })
+                        .unwrap_or((80, 24));
+                    let binary = manifest.binary.to_string_lossy().to_string();
+                    let lt = LiveTerm::new_with_command(
+                        cols,
+                        rows,
+                        pane_metrics.cell_advance,
+                        pane_metrics.line_height,
+                        proxy,
+                        tab_id,
+                        prior_cwd,
+                        scrollback,
+                        Some((binary, Vec::new())),
+                    );
+                    tab.module_pty = Some(lt);
+                }
+            }
         }
         self.window.request_redraw();
     }
@@ -3971,7 +4055,7 @@ impl Renderer {
     pub fn ime_commit(&mut self, text: String) {
         self.preedit.clear();
         if !text.is_empty() {
-            self.active_tab_mut().live_term.write(text.into_bytes());
+            self.active_tab_mut().active_term().write(text.into_bytes());
         }
         self.window.request_redraw();
     }
@@ -4810,7 +4894,18 @@ impl Renderer {
             .and_then(|n| n.find(pid))
             .map(|p| p.active_tab_ref().kind.clone())
             .unwrap_or(TabContentKind::Shell);
-        if active_kind != TabContentKind::Shell {
+        // TTY modules render through the same path shells use (they
+        // draw via terminal escape sequences, parsed by alacritty).
+        // Only data modules + Welcome short-circuit to a static body.
+        let is_tty_module = match &active_kind {
+            TabContentKind::Module(id) => self
+                .modules
+                .find(id)
+                .map(|m| m.kind == crate::modules::ModuleKind::Tty)
+                .unwrap_or(false),
+            _ => false,
+        };
+        if active_kind != TabContentKind::Shell && !is_tty_module {
             return self.render_non_shell_pane(pid, rect, tab_slots, active_kind);
         }
 
@@ -4855,8 +4950,8 @@ impl Renderer {
                     .find_mut(pid)
                     .expect("pane present")
                     .active_tab_mut();
-                tab.live_term.scroll(TermScroll::Delta(dir));
-                let (after, _history) = tab.live_term.offset_and_history();
+                tab.active_term_mut().scroll(TermScroll::Delta(dir));
+                let (after, _history) = tab.active_term().offset_and_history();
                 let (c, r) = (tab.cols, tab.rows);
                 if let Some(sel) = tab.selection.as_mut() {
                     let edge = if dir > 0 {
@@ -4889,7 +4984,7 @@ impl Renderer {
             .find_mut(pid)
             .expect("pane present")
             .active_tab_mut()
-            .live_term
+            .active_term_mut()
             .snapshot();
         let _ = cursor_blinking;
 
@@ -4941,7 +5036,7 @@ impl Renderer {
             (
                 tab.pixel_offset,
                 tab.selection,
-                tab.live_term.offset_and_history().0 as i32,
+                tab.active_term().offset_and_history().0 as i32,
                 tab.cols,
                 tab.rows,
             )
