@@ -1,0 +1,15 @@
+# terminite's own debug pane, shipped as a module.
+#
+# Proves the extension surface can host terminite's observability —
+# the same framework user modules use is what surfaces stats / state
+# inside terminite.
+#
+# Install with:
+#   terminite module add tools/debug-module
+#   terminite module reload
+# Then pick "Debug" from any pane's dropdown.
+
+name = "Debug"
+version = "0.1.0"
+binary = "./debug.py"
+description = "Live view of terminite's stats, tabs, and blocks."
