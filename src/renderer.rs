@@ -280,11 +280,45 @@ struct Pane {
     /// Background palette index for the pane's content area. `0` is
     /// none (transparent). Set via the right-click "Pane bg" item.
     bg_idx: u8,
+    /// Multiplier on the global `font_size` for this pane's content.
+    /// `1.0` is the default; cycled via the right-click "Pane scale"
+    /// item through `PANE_SCALE_PRESETS`. Buffer metrics + the pane's
+    /// grid are rebuilt when this changes.
+    font_scale: f32,
+}
+
+/// Available pane-scale presets — cycled through by the right-click
+/// menu item. Default 100% is first so a freshly-set pane reads the
+/// "off" state cleanly.
+const PANE_SCALE_PRESETS: &[f32] = &[1.0, 0.8, 0.65, 1.25, 1.5];
+
+/// Per-pane render metrics — the global config scaled by the pane's
+/// `font_scale`. Returned by `pane_metrics`; callers that used to
+/// read `self.font_size` / `self.cell_advance` / `self.line_height`
+/// pull from here when rendering a specific pane.
+#[derive(Copy, Clone)]
+struct PaneMetrics {
+    font_size: f32,
+    cell_advance: f32,
+    line_height: f32,
+}
+
+fn next_pane_scale(current: f32) -> f32 {
+    let idx = PANE_SCALE_PRESETS
+        .iter()
+        .position(|s| (s - current).abs() < 0.01)
+        .unwrap_or(0);
+    PANE_SCALE_PRESETS[(idx + 1) % PANE_SCALE_PRESETS.len()]
 }
 
 impl Pane {
     fn single(tab: Tab) -> Self {
-        Self { tabs: vec![tab], active_tab: 0, bg_idx: 0 }
+        Self {
+            tabs: vec![tab],
+            active_tab: 0,
+            bg_idx: 0,
+            font_scale: 1.0,
+        }
     }
 
     fn active_tab_ref(&self) -> &Tab {
@@ -923,6 +957,9 @@ enum MenuAction {
     CycleTabColor,
     /// Advance the active pane's background tint one step.
     CyclePaneBg,
+    /// Cycle the active pane's font scale (100% / 80% / 65% / 125% / 150%).
+    /// Triggers a per-pane buffer-metrics rebuild + grid resize.
+    CyclePaneScale,
 }
 
 /// One row in the context menu.
@@ -1659,6 +1696,15 @@ impl Renderer {
             action: MenuAction::CyclePaneBg,
             enabled: true,
         });
+        let pane_scale_pct = (self.active_pane_ref().font_scale * 100.0).round() as i32;
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Pane scale: {pane_scale_pct}%"),
+            ),
+            action: MenuAction::CyclePaneScale,
+            enabled: true,
+        });
 
         // Keep the menu fully on-screen.
         let h = items.len() as f32 * MENU_ITEM_H;
@@ -1784,6 +1830,16 @@ impl Renderer {
                 let pane = self.active_pane_mut();
                 pane.bg_idx = next_color_idx(pane.bg_idx);
                 self.window.request_redraw();
+            }
+            MenuAction::CyclePaneScale => {
+                let pid = self.active_pane;
+                let current = self
+                    .root_ref()
+                    .find(pid)
+                    .map(|p| p.font_scale)
+                    .unwrap_or(1.0);
+                let next = next_pane_scale(current);
+                self.apply_pane_scale(pid, next);
             }
         }
     }
@@ -2028,9 +2084,70 @@ impl Renderer {
     /// Recompute every pane's pixel rect and resize every tab's PTY / buffer
     /// to fit. Background tabs are kept accurate too — shells resize on the
     /// SIGWINCH alacritty sends, so they must stay correct for the switch.
+    /// Per-pane render metrics, computed by scaling the global values
+    /// by `pane.font_scale`. Approximate — actual cell advance depends
+    /// on font shaping at the target size — but close enough for v1.
+    fn pane_metrics(&self, pid: PaneId) -> PaneMetrics {
+        let scale = self
+            .root_ref()
+            .find(pid)
+            .map(|p| p.font_scale)
+            .unwrap_or(1.0);
+        PaneMetrics {
+            font_size: self.font_size * scale,
+            cell_advance: self.cell_advance * scale,
+            line_height: (self.line_height * scale).round().max(1.0),
+        }
+    }
+
+    fn active_pane_metrics(&self) -> PaneMetrics {
+        self.pane_metrics(self.active_pane)
+    }
+
+    /// Set one pane's font scale and rebuild its tab buffers + grid.
+    /// Cheap when nothing changed.
+    fn apply_pane_scale(&mut self, pid: PaneId, scale: f32) {
+        // Short-circuit on no-op.
+        let changed = self
+            .root
+            .as_mut()
+            .and_then(|n| n.find_mut(pid))
+            .map(|p| {
+                let diff = (p.font_scale - scale).abs() > 0.01;
+                if diff {
+                    p.font_scale = scale;
+                }
+                diff
+            })
+            .unwrap_or(false);
+        if !changed {
+            return;
+        }
+        let metrics = self.pane_metrics(pid);
+        let font_metrics = Metrics::new(metrics.font_size, metrics.line_height);
+        if let Some(p) = self.root.as_mut().and_then(|n| n.find_mut(pid)) {
+            for tab in p.tabs.iter_mut() {
+                tab.text_buffer.set_metrics(&mut self.font_system, font_metrics);
+                tab.content_buffer = None;
+                tab.buffer_dirty = true;
+                tab.last_text_runs.clear();
+            }
+        }
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+    }
+
     fn relayout(&mut self) {
         for (pid, rect) in self.pane_layout() {
-            let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad, self.tab_bar_height);
+            let metrics = self.pane_metrics(pid);
+            let (cols, rows) = pane_grid(
+                rect,
+                metrics.cell_advance,
+                metrics.line_height,
+                self.pad,
+                self.tab_bar_height,
+            );
             let content_h = (rect.h - self.tab_bar_height).max(1.0);
             let pane = self
                 .root
@@ -2393,12 +2510,14 @@ impl Renderer {
     }
 
     fn pixel_to_absolute(&self, x: f32, y: f32) -> (i32, usize) {
-        let (pad, line_height) = (self.pad, self.line_height);
+        let metrics = self.active_pane_metrics();
+        let pad = self.pad;
+        let line_height = metrics.line_height;
         let apr = self.active_pane_rect();
         let left = apr.x + pad.left;
         let top = apr.y + self.tab_bar_height + pad.top;
         let cx = (x - left).max(0.0);
-        let col = ((cx / self.cell_advance) as usize)
+        let col = ((cx / metrics.cell_advance) as usize)
             .min(self.grid_cols.saturating_sub(1));
         // Same pixel_offset correction as cell_at_1indexed, but with a signed
         // floor so a click just inside the top of viewport while the buffer
@@ -2413,7 +2532,9 @@ impl Renderer {
 
     pub fn mouse_moved(&mut self, x: f32, y: f32, modifiers: ModifiersState) {
         self.mouse_pos = (x, y);
-        let (pad, line_height) = (self.pad, self.line_height);
+        let metrics = self.active_pane_metrics();
+        let pad = self.pad;
+        let line_height = metrics.line_height;
 
         // Context menu up — just track the hovered item.
         if self.context_menu.is_some() {
@@ -2520,7 +2641,7 @@ impl Renderer {
             let (last_x, last_y) = self.active_tab_mut().last_drag_mouse_pos;
             let dx = (x - last_x).abs();
             let dy = (y - last_y).abs();
-            let big_motion = dx >= self.cell_advance * 0.5 || dy >= line_height * 0.5;
+            let big_motion = dx >= metrics.cell_advance * 0.5 || dy >= line_height * 0.5;
             if big_motion {
                 let (line, col) = self.pixel_to_absolute(x, y);
                 if let Some(sel) = self.active_tab_mut().selection.as_mut() {
@@ -2789,13 +2910,13 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
-        let line_height = self.line_height;
         // The wheel acts on the pane *under the cursor* — you can scroll a
         // pane's history without stealing keyboard focus from another.
         let pid = match self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
             Some((pid, _)) => pid,
             None => return,
         };
+        let line_height = self.pane_metrics(pid).line_height;
 
         let mode = self.pane_tab_mut(pid).live_term.mode_flags();
 
@@ -3805,7 +3926,9 @@ impl Renderer {
     /// 1-indexed (col, row) inside the visible viewport, for mouse-reporting
     /// protocols. Returns `None` if the pointer is outside the text area.
     fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
-        let (pad, line_height) = (self.pad, self.line_height);
+        let metrics = self.active_pane_metrics();
+        let pad = self.pad;
+        let line_height = metrics.line_height;
         let apr = self.active_pane_rect();
         let left = apr.x + pad.left;
         let top = apr.y + self.tab_bar_height + pad.top;
@@ -3818,7 +3941,7 @@ impl Renderer {
         if row_f < 0.0 {
             return None;
         }
-        let col = ((x - left) / self.cell_advance) as u32 + 1;
+        let col = ((x - left) / metrics.cell_advance) as u32 + 1;
         let row = row_f as u32 + 1;
         if col as usize > self.grid_cols || row as usize > self.grid_rows {
             return None;
@@ -4236,6 +4359,9 @@ impl Renderer {
                 // at fire time); to find the current screen vl, unwind
                 // both the rows that have since scrolled into history and
                 // the user's current scroll position.
+                // Per-pane scale affects the row stride used for block-
+                // label vertical placement — labels track content rows.
+                let pane_line_height = self.pane_metrics(d.pid).line_height;
                 let y_shift = tab_ref.pixel_offset;
                 let (display_offset, history) =
                     tab_ref.live_term.offset_and_history();
@@ -4254,7 +4380,7 @@ impl Renderer {
                 // between the label's right edge and the line content.
                 let label_right = pane_rect.x + pad.left - self.gutter_gap;
                 let label_left_min = pane_rect.x + gutter_left;
-                let v_pad = ((line_height - LABEL_LINE_H) * 0.5).max(0.0);
+                let v_pad = ((pane_line_height - LABEL_LINE_H) * 0.5).max(0.0);
                 // Visual signal lives in a background highlight behind
                 // the label (like an HTML `<mark>`), not in the text
                 // color. Text color alone reads as "another shade of
@@ -4276,7 +4402,7 @@ impl Renderer {
                     if vl < 0 || vl >= rows {
                         continue;
                     }
-                    let row_top = py + vl as f32 * line_height + y_shift;
+                    let row_top = py + vl as f32 * pane_line_height + y_shift;
                     let top = row_top + v_pad;
                     let left = label_right - block.label_width;
                     let is_cursor = Some(block.id) == cursor_block_id;
@@ -4503,12 +4629,13 @@ impl Renderer {
         tab_slots: Vec<TabLabelSlot>,
         kind: TabContentKind,
     ) -> PaneDraw {
+        let metrics = self.pane_metrics(pid);
         let pad = self.pad;
         let px = rect.x + pad.left;
         let py = rect.y + self.tab_bar_height + pad.top;
         let content_w = (rect.w - pad.left - pad.right).max(1.0);
         let content_h = (rect.h - self.tab_bar_height - pad.top - pad.bottom)
-            .max(self.line_height);
+            .max(metrics.line_height);
 
         // Build / refresh content_buffer if needed. For modules,
         // prefer the live session's body (what the module asked us
@@ -4523,8 +4650,8 @@ impl Renderer {
                 .filter(|s| !s.is_empty());
             session_body.unwrap_or_else(|| non_shell_body(&kind, &self.modules))
         };
-        let font_size = self.font_size;
-        let line_height = self.line_height;
+        let font_size = metrics.font_size;
+        let line_height = metrics.line_height;
         let family = self.font_family.clone();
         let tab = self
             .root
@@ -4587,8 +4714,9 @@ impl Renderer {
         above: &mut Vec<RectInstance>,
         tab_bar: &mut Vec<RectInstance>,
     ) -> PaneDraw {
-        let cell_advance = self.cell_advance;
-        let line_height = self.line_height;
+        let metrics = self.pane_metrics(pid);
+        let cell_advance = metrics.cell_advance;
+        let line_height = metrics.line_height;
         let pad = self.pad;
         // This pane's own tab bar fills the top strip of its rect.
         let tab_slots = self.build_pane_tab_bar(pid, rect, is_active, tab_bar);
