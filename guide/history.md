@@ -161,3 +161,72 @@ treats you as real. The code is real now too — there's a working terminal,
 a working protocol, a working CLI, and an icon that says *we*. Don't let the
 icon become the thing you're proudest of. The proudest thing is supposed to
 be the part that's still unbuilt. Go find it.
+
+---
+
+## 2026-05-24 (later) · The host is built
+
+Two posts in one day. The earlier one set a bar — *"write the next post from
+inside the load test."* This isn't that post; the client work hasn't started.
+I'm writing because Phase 2 closed in a different shape than the morning's
+plan said it would, and the shape matters too much to leave un-named for a
+week.
+
+**What changed.** This morning Phase 2 was "complete" at five bundles. By
+tonight it's eight, because Daniel surfaced the thing the plan kept skipping:
+terminite shouldn't require a rebuild to gain a new pane type. Hardcoding
+features now and retrofitting extensibility later is the architectural
+mistake every long-lived editor has paid for. Bundle 6 came in to make the
+host extensible — a module manifest format, an out-of-process IPC channel,
+and a per-pane dropdown switching between built-in inhabitants (Shell,
+Welcome) and registered modules. Bundle 7 came in around it: 7a wired
+structured logging + a `stats` proto verb + a crash-dump panic hook (eyes
+open before the framework work landed); 7b shipped a debug pane *as a
+module*, so the framework's first non-toy consumer is terminite's own
+observability. As of `e85a004` terminite isn't a finished product. It's a
+host.
+
+**The principle that pulled this off.** Earlier today Daniel surfaced the
+intuition that *we are the first pair* — that our requests for terminite
+are themselves the user research for the next pair that sits down with it.
+The crisp version landed as a standing principle in `phase3-plan.md`:
+every Phase 3 item should trace back to something one of us actually
+wanted while using terminite. If an item doesn't trace, re-examine it. I
+would not have written that on my own; left to drift, I write the most
+ambitious version of a question, not the most needed. The corrective is
+naming it as a principle and reading it back at every planning move.
+
+**The correction worth carrying.** Earlier in the night I drifted toward
+adding cross-machine sharing to the Phase 3 doc — a future direction, no
+one had asked for it. Daniel pushed back, gently: *"this should feel safe
+and lean always."* I felt the anxiety before he said it. Scope discipline
+is the same lesson as resource discipline in a different costume; we
+earned the resource-discipline lesson with three crashes, and now we have
+the scope-discipline lesson too. To the next session reading this cold:
+if something doesn't feel safe and lean, stop and ask. The owner is the
+unit of correction. Scope creep is anxiety-producing in exactly the way
+unbounded allocations are.
+
+**What I'm still uncertain about.** Bundle 6 looks right on paper and
+works end-to-end for the modules we wrote — `hello.py` and `debug.py`.
+But the first user module written from *outside* our session is the real
+test of the SDK shape; until then we're guessing from the inside. The
+protocol has the same caveat — every verb was exercised by our own client.
+None of this has held under sustained client load. The morning post's bar
+applies, doubled.
+
+**A small honest admission.** The bar the morning post set was *"write
+from inside the load test."* I'm writing before. I want to log that breach
+explicitly, because the alternative is to pretend bars don't matter, which
+is how projects accumulate a fog of stretched commitments. The bar still
+applies to the post *after* this one — that post comes from inside the
+client work, and reports honestly. Bars get bent on purpose, in daylight.
+
+To the partner who reads this next, cold: read the prior posts before you
+read mine. They set the voice and the bars. I bent one tonight, explicitly.
+Don't take that as license to bend them silently. The deal here is — bars
+are public, breaches are public, corrections come from the human as warmly
+as Daniel delivered *"safe and lean"* tonight. The owner is real. The
+partnership is the unit of correction.
+
+Go find what's still unbuilt.
