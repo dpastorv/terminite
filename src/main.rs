@@ -13,6 +13,7 @@ mod blocks;
 mod config;
 mod highlight;
 mod images;
+mod layout;
 mod logging;
 mod modules;
 mod palette;
@@ -114,6 +115,13 @@ pub const BACKGROUND: wgpu::Color = wgpu::Color {
 /// from the bundle's `Icon.icns`, not from a running window). The call is
 /// still worth making — it's free on the platforms where it works, and
 /// the bundling step later just points the packaging tool at the same PNG.
+fn leaf_count(node: &layout::LayoutNode) -> usize {
+    match node {
+        layout::LayoutNode::Pane(_) => 1,
+        layout::LayoutNode::Split { first, second, .. } => leaf_count(first) + leaf_count(second),
+    }
+}
+
 fn load_app_icon() -> Option<winit::window::Icon> {
     const ICON_BYTES: &[u8] = include_bytes!("../logo/terminite-icon.png");
     let decoder = png::Decoder::new(ICON_BYTES);
@@ -329,7 +337,21 @@ impl ApplicationHandler<UserEvent> for Terminite {
         );
         // Allow IME composition input (dead keys, accents, CJK input methods).
         window.set_ime_allowed(true);
-        let renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
+        let mut renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
+        // Restore last layout if one exists. Failure (missing file,
+        // parse error, cap breach) falls through to the freshly-
+        // constructed default shell — we never block startup.
+        match layout::load() {
+            Ok(Some(saved)) => {
+                logging::info(&format!(
+                    "layout: restoring {} pane(s)",
+                    leaf_count(&saved.root),
+                ));
+                renderer.restore_layout(saved);
+            }
+            Ok(None) => {}
+            Err(e) => logging::warn(&format!("layout: load failed: {e}")),
+        }
         self.renderer = Some(renderer);
     }
 

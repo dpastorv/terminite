@@ -257,6 +257,11 @@ struct Tab {
     /// on body or language change; reused otherwise so steady-state
     /// cursor moves stay cheap.
     module_highlights: Option<crate::highlight::LineSpans>,
+    /// Last `publish_focus` path this tab's module saw — persisted
+    /// in the layout file so Editor reopens the same file on
+    /// restore. Updated whenever the host sends a focus event to
+    /// this tab's module session.
+    last_focused_path: Option<String>,
     /// Multi-click bookkeeping for data-module panes — mirrors the
     /// shell-tab last_click pattern with body coordinates. Reset
     /// (or rolled over) by `dispatch_data_module_click`.
@@ -396,6 +401,7 @@ impl Tab {
             module_highlight_line: None,
             module_language: None,
             module_highlights: None,
+            last_focused_path: None,
             last_module_click: None,
         }
     }
@@ -1726,6 +1732,7 @@ impl Renderer {
         self.sync_active_grid();
         self.window.set_title(&self.active_tab_ref().title);
         self.window.request_redraw();
+        self.persist_layout();
     }
 
     /// Request closing the active tab. If a non-shell process is in the
@@ -1764,9 +1771,11 @@ impl Renderer {
             self.sync_active_grid();
             self.window.set_title(&self.active_tab_ref().title);
             self.window.request_redraw();
+            self.persist_layout();
             return false;
         }
         // Last tab in this pane — close the pane itself.
+        // close_active_pane already persists on its own.
         self.close_active_pane()
     }
 
@@ -2498,6 +2507,7 @@ impl Renderer {
         self.relayout();
         self.sync_active_grid();
         self.window.request_redraw();
+        self.persist_layout();
     }
 
     /// Close the active pane. Returns true if it was the window's last pane
@@ -2515,6 +2525,7 @@ impl Renderer {
         self.sync_active_grid();
         self.window.set_title(&self.active_tab_ref().title);
         self.window.request_redraw();
+        self.persist_layout();
         false
     }
 
@@ -3954,6 +3965,7 @@ impl Renderer {
             }
         }
         self.window.request_redraw();
+        self.persist_layout();
     }
 
     /// Re-discover modules from disk and refresh chrome labels.
@@ -4117,6 +4129,195 @@ impl Renderer {
             if let Some(sess) = tab.module_session.as_ref() {
                 sess.send_cwd(&path_str);
             }
+        }
+        self.persist_layout();
+    }
+
+    /// Build a fresh pane tree from a saved Layout. Returns false
+    /// if anything went sideways (caller falls back to a default
+    /// shell). Two-phase: build all tabs as plain shells first
+    /// (using the persisted cwds), then walk the tree and switch
+    /// non-shell tabs to their target kind via set_tab_kind, then
+    /// replay focus events for tabs that had a focused_path.
+    pub fn restore_layout(&mut self, layout: crate::layout::Layout) -> bool {
+        let active_path = layout.active_pane_path.clone().unwrap_or_default();
+        // Collect (pane_id, tab_index, target_kind, focused_path)
+        // tuples while building so post-build switching doesn't have
+        // to walk the layout tree again.
+        let mut post_build: Vec<(PaneId, usize, TabContentKind, Option<String>)> = Vec::new();
+        let new_root = self.build_layout_node(layout.root, &mut post_build);
+        let active = pane_id_at_path(&new_root, &active_path)
+            .or_else(|| {
+                let mut first_id: Option<PaneId> = None;
+                fn first_leaf(node: &PaneNode, out: &mut Option<PaneId>) {
+                    if out.is_some() { return; }
+                    match node {
+                        PaneNode::Leaf { id, .. } => *out = Some(*id),
+                        PaneNode::Split { first, second, .. } => {
+                            first_leaf(first, out);
+                            if out.is_none() { first_leaf(second, out); }
+                        }
+                    }
+                }
+                first_leaf(&new_root, &mut first_id);
+                first_id
+            })
+            .unwrap_or(PaneId(0));
+        // Install. The old tree's Drop closes its shells / modules.
+        self.root = Some(new_root);
+        self.active_pane = active;
+        // Switch non-shell tabs to their target kind.
+        for (pid, tab_idx, kind, _focused) in &post_build {
+            // Make the target tab active in its pane, then switch
+            // its kind — set_tab_kind operates on the pane's
+            // currently-active tab.
+            if let Some(pane) = self
+                .root
+                .as_mut()
+                .and_then(|n| n.find_mut(*pid))
+            {
+                if *tab_idx < pane.tabs.len() {
+                    pane.active_tab = *tab_idx;
+                }
+            }
+            if !matches!(kind, TabContentKind::Shell) {
+                self.set_tab_kind(*pid, kind.clone());
+            }
+        }
+        // Replay focused_path for tabs that have one — fires a
+        // synthetic focus event so the module re-renders (Editor
+        // reopens the file, Preview re-renders, …).
+        for (pid, tab_idx, _, focused) in &post_build {
+            let Some(path) = focused.as_ref() else { continue };
+            if let Some(pane) = self.root.as_ref().and_then(|n| n.find(*pid)) {
+                if let Some(tab) = pane.tabs.get(*tab_idx) {
+                    if let Some(sess) = tab.module_session.as_ref() {
+                        sess.send_focus(path);
+                    }
+                }
+            }
+            if let Some(pane) = self.root.as_mut().and_then(|n| n.find_mut(*pid)) {
+                if let Some(tab) = pane.tabs.get_mut(*tab_idx) {
+                    tab.last_focused_path = Some(path.clone());
+                }
+            }
+        }
+        // Restore active tab pointers per pane to whatever the
+        // layout said (we may have moved them above to drive
+        // set_tab_kind; reset to the persisted values).
+        self.sync_active_grid();
+        self.window.set_title(&self.active_tab_ref().title);
+        self.window.request_redraw();
+        true
+    }
+
+    /// Recursively build a PaneNode from a LayoutNode. Logs target
+    /// kinds + focused paths into `post_build` so the caller can
+    /// switch and replay after the tree is in place.
+    fn build_layout_node(
+        &mut self,
+        node: crate::layout::LayoutNode,
+        post_build: &mut Vec<(PaneId, usize, TabContentKind, Option<String>)>,
+    ) -> PaneNode {
+        match node {
+            crate::layout::LayoutNode::Pane(pane_layout) => {
+                let pid = PaneId(self.next_pane_id);
+                self.next_pane_id += 1;
+                let mut tabs: Vec<Tab> = Vec::with_capacity(pane_layout.tabs.len());
+                for (i, tab_layout) in pane_layout.tabs.into_iter().enumerate() {
+                    let kind = match &tab_layout.kind {
+                        crate::layout::LayoutTabKind::Shell => TabContentKind::Shell,
+                        crate::layout::LayoutTabKind::Welcome => TabContentKind::Welcome,
+                        crate::layout::LayoutTabKind::Module { id } => {
+                            TabContentKind::Module(id.clone())
+                        }
+                    };
+                    let cwd = tab_layout
+                        .cwd
+                        .as_deref()
+                        .map(std::path::PathBuf::from)
+                        .filter(|p| p.is_dir());
+                    let tab_id = TabId(self.next_tab_id);
+                    self.next_tab_id += 1;
+                    let live_term = LiveTerm::new(
+                        self.grid_cols,
+                        self.grid_rows,
+                        self.cell_advance,
+                        self.line_height,
+                        self.proxy.clone(),
+                        tab_id,
+                        cwd,
+                        self.config.scrollback,
+                    );
+                    let title_buf = make_title_buffer(
+                        &mut self.font_system,
+                        &tab_layout.title,
+                        self.tab_font_size,
+                        self.tab_line_h,
+                        self.tab_max_width,
+                    );
+                    let text_buf = make_content_buffer(
+                        &mut self.font_system,
+                        self.cell_advance,
+                        self.line_height,
+                        self.font_size,
+                        &self.font_family,
+                        100.0, // placeholder; relayout fixes it
+                        100.0,
+                    );
+                    let mut tab = Tab::new(
+                        tab_id,
+                        tab_layout.title.clone(),
+                        title_buf,
+                        live_term,
+                        text_buf,
+                        self.grid_cols,
+                        self.grid_rows,
+                    );
+                    tab.color_idx = tab_layout.color_idx;
+                    post_build.push((pid, i, kind, tab_layout.focused_path));
+                    tabs.push(tab);
+                }
+                let active_tab = pane_layout.active_tab.min(tabs.len().saturating_sub(1));
+                let pane = Pane {
+                    tabs,
+                    active_tab,
+                    bg_idx: pane_layout.bg_idx,
+                    font_scale: pane_layout.font_scale,
+                };
+                PaneNode::Leaf { id: pid, pane }
+            }
+            crate::layout::LayoutNode::Split { dir, ratio, first, second } => {
+                let dir = match dir {
+                    crate::layout::LayoutSplitDir::Vertical => SplitDir::Vertical,
+                    crate::layout::LayoutSplitDir::Horizontal => SplitDir::Horizontal,
+                };
+                PaneNode::Split {
+                    dir,
+                    ratio: ratio.clamp(0.1, 0.9),
+                    first: Box::new(self.build_layout_node(*first, post_build)),
+                    second: Box::new(self.build_layout_node(*second, post_build)),
+                }
+            }
+        }
+    }
+
+    /// Walk the live pane tree → serializable Layout, then write it
+    /// atomically to disk. Called on every structural change
+    /// (split / close / new_tab / kind switch / publish_focus / cwd)
+    /// so a crash mid-session doesn't lose the workspace.
+    pub fn persist_layout(&self) {
+        let Some(root) = self.root.as_ref() else {
+            return;
+        };
+        let active_path = path_to(root, self.active_pane);
+        let layout = crate::layout::Layout {
+            version: crate::layout::LAYOUT_VERSION,
+            active_pane_path: active_path,
+            root: snapshot_node(root),
+        };
+        if let Err(e) = crate::layout::save(&layout) {
+            crate::logging::warn(&format!("layout: save failed: {e}"));
         }
     }
 
@@ -4308,6 +4509,9 @@ impl Renderer {
                 // Cross-pane signaling — broadcast the new focus to
                 // every *other* live data module session. Paired views
                 // (nav → preview / editor) react via this single event.
+                // We also record the path on each receiving tab so the
+                // layout persistence captures "this pane had file X
+                // open" — Editor reopens the same file on restore.
                 crate::logging::info(&format!(
                     "module tab {}: focus {path}",
                     tab_id.0
@@ -4323,8 +4527,10 @@ impl Renderer {
                     }
                     if let Some(sess) = tab.module_session.as_ref() {
                         sess.send_focus(&path);
+                        tab.last_focused_path = Some(path.clone());
                     }
                 }
+                self.persist_layout();
             }
         }
     }
@@ -6230,6 +6436,98 @@ fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
 /// Build a small cosmic-text `Buffer` holding a tab title. Sized to the
 /// maximum tab width so titles never wrap; bounds at render-time clip to the
 /// actual tab area.
+/// Convert a live `PaneNode` into the persistable `LayoutNode` —
+/// snapshot all the data worth replaying, skip the live state
+/// (PTYs, buffers, undo stacks). Called by `persist_layout` on
+/// every structural change.
+fn snapshot_node(node: &PaneNode) -> crate::layout::LayoutNode {
+    match node {
+        PaneNode::Leaf { pane, .. } => crate::layout::LayoutNode::Pane(snapshot_pane(pane)),
+        PaneNode::Split { dir, ratio, first, second } => crate::layout::LayoutNode::Split {
+            dir: match dir {
+                SplitDir::Vertical => crate::layout::LayoutSplitDir::Vertical,
+                SplitDir::Horizontal => crate::layout::LayoutSplitDir::Horizontal,
+            },
+            ratio: *ratio,
+            first: Box::new(snapshot_node(first)),
+            second: Box::new(snapshot_node(second)),
+        },
+    }
+}
+
+fn snapshot_pane(pane: &Pane) -> crate::layout::LayoutPane {
+    crate::layout::LayoutPane {
+        tabs: pane.tabs.iter().map(snapshot_tab).collect(),
+        active_tab: pane.active_tab,
+        bg_idx: pane.bg_idx,
+        font_scale: pane.font_scale,
+    }
+}
+
+fn snapshot_tab(tab: &Tab) -> crate::layout::LayoutTab {
+    let kind = match &tab.kind {
+        TabContentKind::Shell => crate::layout::LayoutTabKind::Shell,
+        TabContentKind::Welcome => crate::layout::LayoutTabKind::Welcome,
+        TabContentKind::Module(id) => crate::layout::LayoutTabKind::Module { id: id.clone() },
+    };
+    // Capture cwd from the shell side. TTY modules with a PTY also
+    // have a current_dir but it's the module process's cwd — not
+    // useful to restore. Only persist for plain shells.
+    let cwd = if matches!(tab.kind, TabContentKind::Shell) {
+        tab.live_term
+            .current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    crate::layout::LayoutTab {
+        kind,
+        title: tab.title.clone(),
+        color_idx: tab.color_idx,
+        cwd,
+        focused_path: tab.last_focused_path.clone(),
+    }
+}
+
+/// Walk the tree to find the path (0/1 sequence) to the leaf with
+/// the given id. `Some(vec![])` if the target is the root leaf.
+/// `None` if the target doesn't exist in this tree.
+fn path_to(node: &PaneNode, target: PaneId) -> Option<Vec<u8>> {
+    match node {
+        PaneNode::Leaf { id, .. } => {
+            if *id == target { Some(Vec::new()) } else { None }
+        }
+        PaneNode::Split { first, second, .. } => {
+            if let Some(mut p) = path_to(first, target) {
+                p.insert(0, 0);
+                Some(p)
+            } else if let Some(mut p) = path_to(second, target) {
+                p.insert(0, 1);
+                Some(p)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Resolve a path back to a PaneId in a freshly-built tree. Used
+/// during restore to figure out which leaf to make active.
+fn pane_id_at_path(node: &PaneNode, path: &[u8]) -> Option<PaneId> {
+    if path.is_empty() {
+        if let PaneNode::Leaf { id, .. } = node {
+            return Some(*id);
+        }
+        return None;
+    }
+    if let PaneNode::Split { first, second, .. } = node {
+        let (head, rest) = (path[0], &path[1..]);
+        let child = if head == 0 { first.as_ref() } else { second.as_ref() };
+        return pane_id_at_path(child, rest);
+    }
+    None
+}
+
 fn make_title_buffer(
     font_system: &mut FontSystem,
     title: &str,
