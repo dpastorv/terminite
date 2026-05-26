@@ -3815,27 +3815,51 @@ impl Renderer {
         tab_id: TabId,
         msg: crate::modules::ModuleMessage,
     ) {
-        let mut tabs: Vec<&mut Tab> = Vec::new();
-        self.root
-            .as_mut()
-            .expect("pane tree present")
-            .all_tabs_mut(&mut tabs);
-        let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) else {
-            return;
-        };
         match msg {
             crate::modules::ModuleMessage::SetText { body } => {
+                let mut tabs: Vec<&mut Tab> = Vec::new();
+                self.root
+                    .as_mut()
+                    .expect("pane tree present")
+                    .all_tabs_mut(&mut tabs);
+                let Some(tab) =
+                    tabs.into_iter().find(|t| t.id == tab_id)
+                else {
+                    return;
+                };
                 if tab.last_module_body != body {
                     tab.last_module_body = body.clone();
                     if let Some(sess) = tab.module_session.as_mut() {
                         sess.body = body;
                     }
-                    tab.content_buffer = None; // force rebuild
+                    tab.content_buffer = None;
                     self.window.request_redraw();
                 }
             }
             crate::modules::ModuleMessage::Log { message } => {
                 crate::logging::info(&format!("module tab {}: {message}", tab_id.0));
+            }
+            crate::modules::ModuleMessage::PublishFocus { path } => {
+                // Cross-pane signaling — broadcast the new focus to
+                // every *other* live data module session. Paired views
+                // (nav → preview / editor) react via this single event.
+                crate::logging::info(&format!(
+                    "module tab {}: focus {path}",
+                    tab_id.0
+                ));
+                let mut tabs: Vec<&mut Tab> = Vec::new();
+                self.root
+                    .as_mut()
+                    .expect("pane tree present")
+                    .all_tabs_mut(&mut tabs);
+                for tab in tabs {
+                    if tab.id == tab_id {
+                        continue;
+                    }
+                    if let Some(sess) = tab.module_session.as_ref() {
+                        sess.send_focus(&path);
+                    }
+                }
             }
         }
     }

@@ -1,0 +1,15 @@
+# terminite-native text editor.
+#
+# Minimal v1 — line buffer + cursor, arrows to move, printables to
+# insert, Backspace / Enter, Ctrl+S to save. Loads the file pointed to
+# by the most recent `focus` event from another module.
+#
+# Install with:
+#   terminite module add tools/editor-module
+#   terminite module reload
+
+name = "Edit"
+version = "0.1.0"
+binary = "./editor.py"
+description = "Minimal native editor — reacts to focus events."
+kind = "data"

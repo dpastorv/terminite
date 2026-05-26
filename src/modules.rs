@@ -244,6 +244,12 @@ pub enum ModuleMessage {
     SetText { body: String },
     /// Module-side info log; lands in terminite's regular log.
     Log { message: String },
+    /// Announce a file/directory the user just focused. terminite
+    /// remembers the path and broadcasts a `focus` event to every
+    /// other module session so paired views (nav + preview) can
+    /// react. Lean v1 of cross-pane signaling — one event type,
+    /// global broadcast.
+    PublishFocus { path: String },
 }
 
 /// A spawned module process plus its IO state.
@@ -346,6 +352,15 @@ impl ModuleSession {
         let text = String::from_utf8_lossy(bytes);
         let escaped = json_escape(&text);
         let msg = format!(r#"{{"kind":"input","bytes":"{escaped}"}}"#);
+        let _ = self.input_tx.try_send(msg);
+    }
+
+    /// Notify the module that a path was focused somewhere else in
+    /// terminite. Paired views (nav + preview + editor) use this to
+    /// react to each other without knowing about each other directly.
+    pub fn send_focus(&self, path: &str) {
+        let escaped = json_escape(path);
+        let msg = format!(r#"{{"kind":"focus","path":"{escaped}"}}"#);
         let _ = self.input_tx.try_send(msg);
     }
 }

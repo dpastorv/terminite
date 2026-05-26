@@ -1,0 +1,15 @@
+# terminite-native file previewer.
+#
+# Read-only. Receives `focus` events from any other module — typically
+# from Nav — and renders the file's first N lines. Directories get a
+# listing. Binaries get a "binary file" placeholder.
+#
+# Install with:
+#   terminite module add tools/preview-module
+#   terminite module reload
+
+name = "Preview"
+version = "0.1.0"
+binary = "./preview.py"
+description = "Read-only preview pane — reacts to focus events."
+kind = "data"

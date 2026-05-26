@@ -1,0 +1,14 @@
+# terminite-native file navigator. Compact list view with keyboard
+# navigation. Publishes a `focus` event whenever a file is selected;
+# paired Preview / Edit modules pick that up and react.
+#
+# Install with:
+#   terminite module add tools/nav-module
+#   terminite module reload
+# Then pick "Nav" from any pane's dropdown.
+
+name = "Nav"
+version = "0.1.0"
+binary = "./nav.py"
+description = "Native file navigator — publishes focus events."
+kind = "data"
