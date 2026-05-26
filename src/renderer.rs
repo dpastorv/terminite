@@ -233,11 +233,21 @@ struct Tab {
     /// using the same color + blink as a shell cursor. Stays `None`
     /// for modules with no cursor (Preview, Nav, …).
     module_cursor: Option<(u32, u32)>,
-    /// Number of leading body columns rendered in a dim color
-    /// (line-number gutter). `0` / `None` = no dim region.
-    module_dim_cols: Option<u32>,
+    /// Per-source-line gutter labels — empty string = no label for
+    /// that line. Editor sends "1", "2", … for content lines and
+    /// "" for header/prompt/blank. Rendered host-side at the y of
+    /// each line's *first* layout run only, in a dim color, to the
+    /// left of content. Content shifts right by the widest label's
+    /// width when present.
+    module_gutter: Option<Vec<String>>,
+    /// Lazily-shaped buffer for the gutter labels themselves —
+    /// rebuilt whenever `module_gutter` changes. Holds the joined
+    /// gutter strings; the render path places it per first-run y.
+    /// `None` when there's no gutter to render.
+    gutter_buffer: Option<Buffer>,
     /// 0-indexed source line painted with a subtle background rect
-    /// — Nav's selection row, Editor's cursor row.
+    /// — Nav's selection row, Editor's cursor row. Spans all wrap
+    /// segments of that line for continuous highlight.
     module_highlight_line: Option<u32>,
     /// Multi-click bookkeeping for data-module panes — mirrors the
     /// shell-tab last_click pattern with body coordinates. Reset
@@ -373,7 +383,8 @@ impl Tab {
             module_scroll_y: 0.0,
             pending_ensure_visible: None,
             module_cursor: None,
-            module_dim_cols: None,
+            module_gutter: None,
+            gutter_buffer: None,
             module_highlight_line: None,
             last_module_click: None,
         }
@@ -3989,9 +4000,27 @@ impl Renderer {
         let pad = self.pad;
         let px = prect.x + pad.left;
         let py = prect.y + self.tab_bar_height + pad.top;
-        let local_x = self.mouse_pos.0 - px;
+        // Click in the gutter region (line-number column) → treat
+        // as col 0 of the same source line. Subtract the gutter
+        // width so the col we send to the module is in content
+        // cells, not pane cells.
+        let pane_content_w = (prect.w - pad.left - pad.right).max(0.0);
+        let gutter_w = self
+            .root_ref()
+            .find(pid)
+            .and_then(|p| p.active_tab_ref().module_gutter.as_ref())
+            .map(|lbls| {
+                let max_chars = lbls.iter().map(|s| s.chars().count()).max().unwrap_or(0) as f32;
+                if max_chars > 0.0 {
+                    ((max_chars + 1.0) * metrics.cell_advance).min(pane_content_w * 0.5)
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0);
+        let local_x = (self.mouse_pos.0 - px - gutter_w).max(0.0);
         let local_y = self.mouse_pos.1 - py;
-        if local_x < 0.0 || local_y < 0.0 {
+        if local_y < 0.0 {
             return false;
         }
         // Translate local_y → source line via layout_runs lookup so
@@ -4087,7 +4116,7 @@ impl Renderer {
                 body,
                 scroll_to_line,
                 cursor,
-                dim_left_cols,
+                gutter,
                 highlight_line,
             } => {
                 // Bound the body — a runaway module that tries to
@@ -4136,8 +4165,14 @@ impl Renderer {
                     }
                 }
                 tab.module_cursor = new_cursor;
-                let dim_changed = tab.module_dim_cols != dim_left_cols;
-                tab.module_dim_cols = dim_left_cols;
+                let gutter_changed = tab.module_gutter != gutter;
+                if gutter_changed {
+                    tab.module_gutter = gutter;
+                    // Force gutter buffer rebuild — render path
+                    // recreates it from the new labels on the next
+                    // frame.
+                    tab.gutter_buffer = None;
+                }
                 let highlight_changed = tab.module_highlight_line != highlight_line;
                 tab.module_highlight_line = highlight_line;
                 if let Some(line) = scroll_to_line {
@@ -4145,7 +4180,7 @@ impl Renderer {
                 }
                 if body_changed
                     || cursor_changed
-                    || dim_changed
+                    || gutter_changed
                     || highlight_changed
                     || scroll_to_line.is_some()
                 {
@@ -4867,50 +4902,92 @@ impl Renderer {
                 let suppress_text = is_data_module
                     && (tab_ref.image.is_some() || tab_ref.animation.is_some());
                 if !suppress_text {
-                    // Render the body once with the default color
-                    // and (if requested) overlay a second pass with
-                    // a dim color clipped to the leftmost N cells —
-                    // glyphon shapes the buffer once; the two
-                    // TextAreas just write the same glyphs in
-                    // different colors within different clip rects.
+                    // When the module supplied a gutter, content
+                    // shifts right by the gutter width. We compute
+                    // the gutter width here the same way
+                    // render_non_shell_pane did (widest label),
+                    // which is cheap and avoids threading it back
+                    // through PaneDraw.
                     let metrics = self.pane_metrics(d.pid);
-                    let dim_cols = tab_ref.module_dim_cols.unwrap_or(0);
-                    let dim_w = dim_cols as f32 * metrics.cell_advance;
-                    let normal_left_clip = if dim_cols > 0 {
-                        (d.text_left + dim_w) as i32
-                    } else {
-                        d.bounds.left
+                    let pane_content_w = (d.bounds.right - d.text_left as i32).max(0) as f32;
+                    let gutter_w = match tab_ref.module_gutter.as_ref() {
+                        Some(lbls) => {
+                            let max_chars = lbls
+                                .iter()
+                                .map(|s| s.chars().count())
+                                .max()
+                                .unwrap_or(0) as f32;
+                            if max_chars > 0.0 {
+                                ((max_chars + 1.0) * metrics.cell_advance).min(pane_content_w * 0.5)
+                            } else {
+                                0.0
+                            }
+                        }
+                        None => 0.0,
                     };
-                    let normal_bounds = TextBounds {
-                        left: normal_left_clip.max(d.bounds.left),
+                    let body_left = d.text_left + gutter_w;
+                    let body_bounds = TextBounds {
+                        left: (body_left as i32).max(d.bounds.left),
                         ..d.bounds
                     };
                     content_areas.push(TextArea {
                         buffer: body_buffer,
-                        left: d.text_left,
+                        left: body_left,
                         top: d.text_top - scroll_y,
                         scale: 1.0,
-                        bounds: normal_bounds,
+                        bounds: body_bounds,
                         default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                         custom_glyphs: &[],
                     });
-                    if dim_cols > 0 {
-                        let dim_bounds = TextBounds {
-                            left: d.bounds.left,
-                            top: d.bounds.top,
-                            right: ((d.text_left + dim_w) as i32).min(d.bounds.right),
-                            bottom: d.bounds.bottom,
-                        };
-                        if dim_bounds.right > dim_bounds.left {
-                            content_areas.push(TextArea {
-                                buffer: body_buffer,
-                                left: d.text_left,
-                                top: d.text_top - scroll_y,
-                                scale: 1.0,
-                                bounds: dim_bounds,
-                                default_color: Color::rgb(110, 110, 130),
-                                custom_glyphs: &[],
-                            });
+                    // Gutter labels — one TextArea per first-run of
+                    // each source line that has a label. We walk
+                    // body's layout_runs (so wrap continuations
+                    // get no label) and tell glyphon to render
+                    // gutter_buffer with `top` shifted so row N of
+                    // the gutter buffer ends up at the body's
+                    // first-run y for line N, clipped to one row.
+                    if let (Some(gbuf), Some(labels)) = (
+                        tab_ref.gutter_buffer.as_ref(),
+                        tab_ref.module_gutter.as_ref(),
+                    ) {
+                        let line_h = metrics.line_height;
+                        let mut acc = 0.0_f32;
+                        let mut prev_line: Option<u32> = None;
+                        for run in body_buffer.layout_runs() {
+                            let line_i = run.line_i as u32;
+                            let is_first = prev_line != Some(line_i);
+                            prev_line = Some(line_i);
+                            if is_first
+                                && (line_i as usize) < labels.len()
+                                && !labels[line_i as usize].is_empty()
+                            {
+                                let row_y = d.text_top + acc - scroll_y;
+                                // Shift gutter buffer so its row
+                                // line_i aligns with row_y.
+                                let g_top = row_y - (line_i as f32) * line_h;
+                                let row_bounds = TextBounds {
+                                    left: d.text_left as i32,
+                                    top: (row_y as i32).max(d.bounds.top),
+                                    right: ((d.text_left + gutter_w) as i32)
+                                        .min(d.bounds.right),
+                                    bottom: ((row_y + line_h) as i32)
+                                        .min(d.bounds.bottom),
+                                };
+                                if row_bounds.right > row_bounds.left
+                                    && row_bounds.bottom > row_bounds.top
+                                {
+                                    content_areas.push(TextArea {
+                                        buffer: gbuf,
+                                        left: d.text_left,
+                                        top: g_top,
+                                        scale: 1.0,
+                                        bounds: row_bounds,
+                                        default_color: Color::rgb(110, 110, 130),
+                                        custom_glyphs: &[],
+                                    });
+                                }
+                            }
+                            acc += line_h;
                         }
                     }
                 }
@@ -5311,6 +5388,35 @@ impl Renderer {
                 .filter(|s| !s.is_empty());
             session_body.unwrap_or_else(|| non_shell_body(&kind, &self.modules))
         };
+        // Gutter width — content shifts right by this when the
+        // active module supplied gutter labels (Editor's line
+        // numbers). Computed from the widest non-empty label;
+        // capped at content_w/2 to keep an over-eager gutter from
+        // squeezing content off-screen.
+        let gutter_w = {
+            let labels = self
+                .root
+                .as_ref()
+                .and_then(|n| n.find(pid))
+                .and_then(|p| p.active_tab_ref().module_gutter.as_ref())
+                .cloned();
+            match labels {
+                Some(lbls) => {
+                    let max_chars = lbls
+                        .iter()
+                        .map(|s| s.chars().count())
+                        .max()
+                        .unwrap_or(0) as f32;
+                    if max_chars > 0.0 {
+                        ((max_chars + 1.0) * metrics.cell_advance).min(content_w * 0.5)
+                    } else {
+                        0.0
+                    }
+                }
+                None => 0.0,
+            }
+        };
+        let body_w = (content_w - gutter_w).max(1.0);
         let font_size = metrics.font_size;
         let line_height = metrics.line_height;
         let family = self.font_family.clone();
@@ -5326,12 +5432,12 @@ impl Renderer {
                     &mut self.font_system,
                     Metrics::new(font_size, line_height),
                 );
-                // Width-only constraint — glyphon wraps to pane
+                // Width-only constraint — glyphon wraps to body
                 // width but lays out every line. Height = None
                 // means long bodies don't get truncated; the render
                 // path applies `module_scroll_y` + clipping bounds
                 // to show only what fits.
-                buf.set_size(&mut self.font_system, Some(content_w), None);
+                buf.set_size(&mut self.font_system, Some(body_w), None);
                 let attrs = Attrs::new().family(font_family(&family));
                 buf.set_text(
                     &mut self.font_system,
@@ -5343,10 +5449,40 @@ impl Renderer {
                 buf.shape_until_scroll(&mut self.font_system, false);
                 tab.content_buffer = Some(buf);
             } else if let Some(buf) = tab.content_buffer.as_mut() {
-                // Keep the buffer width matched to the current pane.
-                // Height stays unbounded so all lines are laid out
-                // for scrolling.
-                buf.set_size(&mut self.font_system, Some(content_w), None);
+                // Keep the buffer width matched to the (post-gutter)
+                // content area. Height stays unbounded so all lines
+                // are laid out for scrolling.
+                buf.set_size(&mut self.font_system, Some(body_w), None);
+            }
+            // Build / refresh gutter buffer when present. We shape
+            // it as a tall single-column buffer; the render path
+            // pulls per-line slices by adjusting TextArea.top.
+            if tab.module_gutter.is_some() && tab.gutter_buffer.is_none() {
+                let joined = tab
+                    .module_gutter
+                    .as_ref()
+                    .map(|g| g.join("\n"))
+                    .unwrap_or_default();
+                let mut gbuf = Buffer::new(
+                    &mut self.font_system,
+                    Metrics::new(font_size, line_height),
+                );
+                gbuf.set_size(&mut self.font_system, Some(gutter_w), None);
+                let attrs = Attrs::new().family(font_family(&family));
+                gbuf.set_text(
+                    &mut self.font_system,
+                    &joined,
+                    &attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+                gbuf.shape_until_scroll(&mut self.font_system, false);
+                tab.gutter_buffer = Some(gbuf);
+            } else if let Some(gbuf) = tab.gutter_buffer.as_mut() {
+                gbuf.set_size(&mut self.font_system, Some(gutter_w), None);
+            }
+            if tab.module_gutter.is_none() {
+                tab.gutter_buffer = None;
             }
             // Clamp module_scroll_y so a pane shrink or a shorter
             // body can't leave us scrolled past the end. The render
@@ -5387,26 +5523,28 @@ impl Renderer {
             .map(|p| p.active_tab_ref())
         {
             if let Some(hline) = tab.module_highlight_line {
-                let mut found_y: Option<f32> = None;
+                // Walk all layout runs that belong to this source
+                // line — wraps continue the highlight cleanly across
+                // every visual segment. Each qualifying run pushes
+                // its own clipped rect so the band stays inside the
+                // pane's content box even when partially scrolled.
                 if let Some(buf) = tab.content_buffer.as_ref() {
                     let mut acc = 0.0_f32;
+                    let highlight_left = px + gutter_w;
+                    let highlight_w = (content_w - gutter_w).max(0.0);
                     for run in buf.layout_runs() {
                         if run.line_i as u32 == hline {
-                            found_y = Some(acc);
-                            break;
+                            let hy = py + acc - tab.module_scroll_y;
+                            let top = hy.max(py);
+                            let bot = (hy + line_height).min(py + content_h);
+                            if bot > top {
+                                below.push(RectInstance {
+                                    rect: [highlight_left, top, highlight_w, bot - top],
+                                    color: [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.10],
+                                });
+                            }
                         }
                         acc += line_height;
-                    }
-                }
-                if let Some(ly) = found_y {
-                    let hy = py + ly - tab.module_scroll_y;
-                    let top = hy.max(py);
-                    let bot = (hy + line_height).min(py + content_h);
-                    if bot > top {
-                        below.push(RectInstance {
-                            rect: [px, top, content_w, bot - top],
-                            color: [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.10],
-                        });
                     }
                 }
             }
@@ -5425,48 +5563,58 @@ impl Renderer {
             .map(|p| p.active_tab_ref())
         {
             if let Some((cline, ccol)) = tab.module_cursor {
-                // Find the actual y of the cursor's source line by
-                // walking layout_runs. With width-only buffer sizing
-                // a long line wraps into multiple runs — the source
-                // line index ≠ the iteration index. Treating them as
-                // the same was the bug Daniel hit: lines past the
-                // first wrap were drawn one row too low per wrap.
-                let mut found_y: Option<f32> = None;
-                let mut found_run_w: f32 = 0.0;
+                // Walk all layout runs belonging to source line
+                // `cline`, tracking how many glyph columns of that
+                // line have already been laid out. The first run
+                // whose [cols_so_far .. cols_so_far + run_cols]
+                // range contains the cursor column is the wrap
+                // segment we draw on. If the cursor falls past the
+                // last run's end (cursor at end of line / off the
+                // tail), we clamp to the last segment.
+                let mut chosen: Option<(f32, usize, usize)> = None; // (y, cols_consumed, run_cols)
                 if let Some(buf) = tab.content_buffer.as_ref() {
-                    let mut acc = 0.0_f32;
+                    let mut acc_y = 0.0_f32;
+                    let mut cols_so_far = 0usize;
+                    let mut prev_line: Option<u32> = None;
                     for run in buf.layout_runs() {
-                        if run.line_i as u32 == cline {
-                            found_y = Some(acc);
-                            found_run_w = run.line_w;
-                            break;
+                        let line_i = run.line_i as u32;
+                        if prev_line != Some(line_i) {
+                            cols_so_far = 0;
                         }
-                        acc += line_height;
+                        if line_i == cline {
+                            let run_cols = run.glyphs.len();
+                            let after = cols_so_far + run_cols;
+                            // Track latest run on this line so an
+                            // over-end cursor lands on the final
+                            // wrap rather than off-screen.
+                            chosen = Some((acc_y, cols_so_far, run_cols));
+                            if (ccol as usize) <= after {
+                                break;
+                            }
+                            cols_so_far = after;
+                        }
+                        prev_line = Some(line_i);
+                        acc_y += line_height;
                     }
                 }
-                if let Some(line_y) = found_y {
+                if let Some((line_y, cols_consumed, run_cols)) = chosen {
                     let cy = py + line_y - tab.module_scroll_y;
                     let row_top = cy;
                     let row_bottom = cy + line_height;
                     let visible = row_bottom > py && row_top < py + content_h;
                     if visible && blink_on {
-                        // Column → x. For unwrapped lines this is
-                        // exact. For lines that wrap before the
-                        // cursor column the math is still on the
-                        // first run; the cursor appears at start of
-                        // line instead of inside the wrap. v1
-                        // limitation — we don't wrap in editor /
-                        // nav so it's a non-issue in practice.
                         let cell_advance = metrics.cell_advance;
-                        let cx = (px + (ccol as f32) * cell_advance)
-                            .min(px + found_run_w + cell_advance);
+                        let col_in_run = ((ccol as usize)
+                            .saturating_sub(cols_consumed))
+                            .min(run_cols) as f32;
+                        let cx = px + gutter_w + col_in_run * cell_advance;
                         let crect = [
                             cx - CURSOR_PAD_X,
                             cy - CURSOR_PAD_Y,
                             cell_advance + 2.0 * CURSOR_PAD_X,
                             line_height + 2.0 * CURSOR_PAD_Y,
                         ];
-                        let cl = crect[0].max(px);
+                        let cl = crect[0].max(px + gutter_w);
                         let ct = crect[1].max(py);
                         let cr = (crect[0] + crect[2]).min(px + content_w);
                         let cb = (crect[1] + crect[3]).min(py + content_h);

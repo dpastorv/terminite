@@ -273,14 +273,20 @@ pub enum ModuleMessage {
     /// full buffer reshape on every keystroke. `None` means "no
     /// cursor on this pane" (Preview, Nav, …).
     ///
-    /// Optional `dim_left_cols` paints the first N columns of every
-    /// body row in a dim color (typeset over the same buffer with
-    /// split bounds — no extra shaping). Editor uses this for the
-    /// line-number gutter; Preview / Nav leave it `None`.
+    /// Optional `gutter` is a parallel array of labels — one entry
+    /// per body source line. Non-empty entries are rendered to the
+    /// *left* of content in a dim color; the content area shrinks
+    /// by the widest label. Wrap continuations get no gutter label
+    /// (host walks layout_runs and only paints the label at the
+    /// first run of each source line). Header rows (status / prompt)
+    /// just pass empty strings. Editor uses this for line numbers;
+    /// Preview / Nav leave it `None`.
     ///
     /// Optional `highlight_line` paints a subtle background rect
-    /// across that 0-indexed source line. Nav uses it for the
-    /// current selection row; Editor uses it for the cursor row.
+    /// across that 0-indexed source line. Spans every wrap segment
+    /// of that line so the band stays continuous on long content.
+    /// Nav uses it for the current selection row; Editor uses it
+    /// for the cursor row.
     SetText {
         body: String,
         #[serde(default)]
@@ -288,7 +294,7 @@ pub enum ModuleMessage {
         #[serde(default)]
         cursor: Option<CursorPos>,
         #[serde(default)]
-        dim_left_cols: Option<u32>,
+        gutter: Option<Vec<String>>,
         #[serde(default)]
         highlight_line: Option<u32>,
     },

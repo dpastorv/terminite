@@ -722,19 +722,20 @@ class Editor:
 
     def render(self):
         out = []
+        gutter: List[str] = []
+        # Header rows (status + prompt + blank) — body content, no
+        # gutter label. Host renders them across the full pane.
         out.append(self.status_line())
+        gutter.append("")
         out.append(self.prompt_line())
-        out.append("")  # spacer
-        # Line-number gutter width sized to total line count. The
-        # gutter is part of the body; the cursor's col field has to
-        # add the gutter width so the host draws the block over the
-        # right cell.
-        gutter_w = max(2, len(str(len(self.lines))))
-        gutter_total = gutter_w + GUTTER_PAD
+        gutter.append("")
+        out.append("")
+        gutter.append("")
+        gw = max(2, len(str(len(self.lines))))
         sel = self.selection_range()
         # Track how many bracket characters were inserted *before*
-        # the cursor on the cursor row, so we can shift the host
-        # cursor col to land on the actual character (not the bracket).
+        # the cursor on the cursor row so the host cursor col lands
+        # on the actual character (not the bracket).
         cursor_col_shift = 0
         for i, line in enumerate(self.lines):
             content = line
@@ -758,18 +759,17 @@ class Editor:
                 elif sr < i < er and i == self.row:
                     content = SEL_OPEN + content + SEL_CLOSE
                     cursor_col_shift += 1
-            num = str(i + 1).rjust(gutter_w)
-            out.append(f"{num}{' ' * GUTTER_PAD}{content}")
+            out.append(content)
+            gutter.append(str(i + 1).rjust(gw))
         # Cursor's source line in the body = 3 header lines + i.
         cursor_line = 3 + self.row
-        cursor_col = gutter_total + self.col + cursor_col_shift
+        cursor_col = self.col + cursor_col_shift
         msg = {
             "kind": "set_text",
             "body": "\n".join(out),
             "scroll_to_line": cursor_line,
             "cursor": {"line": cursor_line, "col": cursor_col},
-            # Dim the line-number gutter so it reads as chrome.
-            "dim_left_cols": gutter_total,
+            "gutter": gutter,
             # Subtle highlight on the cursor row — only when no
             # selection is active (selection brackets carry the
             # visual; a band would compete).
@@ -1028,18 +1028,16 @@ def main():
         elif kind == "click":
             # Body coords → editor coords. Body has 3 header lines
             # before the content; ignore clicks in the header. Col
-            # is in body cells, which include the gutter + pad —
-            # subtract those to land on a real content column.
-            # `count` (single / double / triple) arrives on the wire
-            # too — editor v1 only uses single-click reposition;
-            # word-select on double / line-select on triple are
-            # natural follow-ups.
+            # arrives already in content cells (host subtracts the
+            # gutter width before sending), so no further adjust.
+            # `count` arrives on the wire too — single-click
+            # repositions cursor; word / line select on double /
+            # triple are natural follow-ups.
             line = int(cmd.get("line", 0))
             col = int(cmd.get("col", 0))
             if line >= 3 and ed.lines:
-                gw = max(2, len(str(len(ed.lines)))) + GUTTER_PAD
                 ed.row = min(line - 3, len(ed.lines) - 1)
-                ed.col = max(0, min(len(ed.lines[ed.row]), col - gw))
+                ed.col = max(0, min(len(ed.lines[ed.row]), col))
                 ed.clear_selection()
                 ed.render()
         elif kind == "init":
