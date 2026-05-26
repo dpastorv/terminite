@@ -189,6 +189,14 @@ pub enum UserEvent {
         tab_id: TabId,
         msg: modules::ModuleMessage,
     },
+    /// A shell pane's cwd changed (OSC 7). The renderer broadcasts a
+    /// `cwd` event to every live data-module session so paired views
+    /// like Nav can follow along. Fires only on actual change to
+    /// keep the wire quiet.
+    CwdChanged {
+        tab_id: TabId,
+        path: std::path::PathBuf,
+    },
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -214,18 +222,51 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
             }
         }
     }
+    // xterm modifier encoding for arrow / Home / End / Delete with
+    // Shift / Alt / Ctrl held. The modifier number is `1 + shift +
+    // alt*2 + ctrl*4` (xterm convention) — `Shift = 2`, `Alt = 3`,
+    // `Shift+Alt = 4`, `Ctrl = 5`, `Ctrl+Shift = 6`, `Ctrl+Alt = 7`,
+    // `Ctrl+Shift+Alt = 8`. Lets editor modules read Shift+Arrow as
+    // selection extension and Opt+Arrow as word jump, and gives
+    // shells (bash/zsh) the modifier info their key bindings expect.
+    let shift = modifiers.shift_key() as u8;
+    let alt = modifiers.alt_key() as u8;
+    let ctrl = modifiers.control_key() as u8;
+    let mod_num = 1 + shift + alt * 2 + ctrl * 4;
+    let arrow_letter = match &event.logical_key {
+        Key::Named(NamedKey::ArrowUp) => Some(b'A'),
+        Key::Named(NamedKey::ArrowDown) => Some(b'B'),
+        Key::Named(NamedKey::ArrowRight) => Some(b'C'),
+        Key::Named(NamedKey::ArrowLeft) => Some(b'D'),
+        Key::Named(NamedKey::Home) => Some(b'H'),
+        Key::Named(NamedKey::End) => Some(b'F'),
+        _ => None,
+    };
+    if let Some(letter) = arrow_letter {
+        return if mod_num > 1 {
+            Some(format!("\x1b[1;{mod_num}{}", letter as char).into_bytes())
+        } else {
+            Some(vec![b'\x1b', b'[', letter])
+        };
+    }
+    if matches!(&event.logical_key, Key::Named(NamedKey::Delete)) {
+        return if mod_num > 1 {
+            Some(format!("\x1b[3;{mod_num}~").into_bytes())
+        } else {
+            Some(b"\x1b[3~".to_vec())
+        };
+    }
     match &event.logical_key {
         Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
         Key::Named(NamedKey::Backspace) => Some(b"\x7f".to_vec()),
-        Key::Named(NamedKey::Tab) => Some(b"\t".to_vec()),
+        Key::Named(NamedKey::Tab) => {
+            if shift > 0 {
+                Some(b"\x1b[Z".to_vec()) // xterm "back-tab"
+            } else {
+                Some(b"\t".to_vec())
+            }
+        }
         Key::Named(NamedKey::Escape) => Some(b"\x1b".to_vec()),
-        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
-        Key::Named(NamedKey::Home) => Some(b"\x1b[H".to_vec()),
-        Key::Named(NamedKey::End) => Some(b"\x1b[F".to_vec()),
-        Key::Named(NamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
         Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
         Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
         _ => event.text.as_ref().map(|s| s.as_bytes().to_vec()),
@@ -336,6 +377,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::ModuleMessage { tab_id, msg } => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_module_message(tab_id, msg);
+                }
+            }
+            UserEvent::CwdChanged { tab_id, path } => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_cwd_changed(tab_id, &path);
                 }
             }
             UserEvent::Exit => event_loop.exit(),

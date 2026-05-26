@@ -240,6 +240,14 @@ fn strip_quoted(s: &str) -> Option<String> {
 // wins on screen, and switching either clears the other so panes
 // don't end up with a stale half of the previous content showing.
 
+/// Cursor position in a module-rendered body. 0-indexed source line
+/// + column, where the line is the body string split on `\n`.
+#[derive(Deserialize, Debug, Clone, Copy)]
+pub struct CursorPos {
+    pub line: u32,
+    pub col: u32,
+}
+
 /// Message a module sends to terminite. Reader thread parses each line
 /// of the module's stdout into one of these and forwards via
 /// `UserEvent::ModuleMessage`.
@@ -248,7 +256,42 @@ fn strip_quoted(s: &str) -> Option<String> {
 pub enum ModuleMessage {
     /// Replace the rendered body with this text. Clears any image
     /// the module had previously asked us to show.
-    SetText { body: String },
+    ///
+    /// Optional `scroll_to_line` asks the host to ensure that
+    /// 0-indexed source line is visible after applying the body. If
+    /// the line is already on screen the scroll position is left
+    /// alone — that way a user wheel-scroll isn't fought by every
+    /// module re-render. If omitted, scroll resets to 0 (old
+    /// behavior — preview wants this, nav doesn't).
+    ///
+    /// Optional `cursor` places the host's terminal cursor (same
+    /// shape + color as a shell cursor) at a 0-indexed (line, col)
+    /// in the body. Modules that need a visible cursor (Editor)
+    /// should use this instead of injecting their own glyph — that
+    /// way (a) the cursor looks identical across panes and (b) the
+    /// body string is stable as the cursor moves, which skips a
+    /// full buffer reshape on every keystroke. `None` means "no
+    /// cursor on this pane" (Preview, Nav, …).
+    ///
+    /// Optional `dim_left_cols` paints the first N columns of every
+    /// body row in a dim color (typeset over the same buffer with
+    /// split bounds — no extra shaping). Editor uses this for the
+    /// line-number gutter; Preview / Nav leave it `None`.
+    ///
+    /// Optional `highlight_line` paints a subtle background rect
+    /// across that 0-indexed source line. Nav uses it for the
+    /// current selection row; Editor uses it for the cursor row.
+    SetText {
+        body: String,
+        #[serde(default)]
+        scroll_to_line: Option<u32>,
+        #[serde(default)]
+        cursor: Option<CursorPos>,
+        #[serde(default)]
+        dim_left_cols: Option<u32>,
+        #[serde(default)]
+        highlight_line: Option<u32>,
+    },
     /// Render the file at `path` as the pane's content. PNG only in
     /// v1; the host returns a `log` line if decode fails so the
     /// module can recover (typically by sending `set_text` with a
@@ -373,6 +416,27 @@ impl ModuleSession {
     pub fn send_focus(&self, path: &str) {
         let escaped = json_escape(path);
         let msg = format!(r#"{{"kind":"focus","path":"{escaped}"}}"#);
+        let _ = self.input_tx.try_send(msg);
+    }
+
+    /// Notify the module that a shell pane's cwd changed (OSC 7).
+    /// Nav uses this to optionally follow the shell; other modules
+    /// can ignore. Fires on actual change only (the host dedupes
+    /// before broadcasting), so the wire stays quiet.
+    pub fn send_cwd(&self, path: &str) {
+        let escaped = json_escape(path);
+        let msg = format!(r#"{{"kind":"cwd","path":"{escaped}"}}"#);
+        let _ = self.input_tx.try_send(msg);
+    }
+
+    /// Report a left-click in the module's content area. `line` is
+    /// the 0-indexed source line of the body (the host translates
+    /// from the visual layout-run index it computed off the pixel
+    /// position) and `col` is the visual column. The editor uses
+    /// this to reposition its cursor; modules that don't care can
+    /// ignore.
+    pub fn send_click(&self, line: u32, col: u32) {
+        let msg = format!(r#"{{"kind":"click","line":{line},"col":{col}}}"#);
         let _ = self.input_tx.try_send(msg);
     }
 }

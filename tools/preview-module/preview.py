@@ -80,6 +80,39 @@ NOT_YET = {
 QLMANAGE = shutil.which("qlmanage")
 THUMB_CACHE = os.path.join(tempfile.gettempdir(), "terminite-preview-thumbs")
 THUMB_SIZE = 1200  # px on the longer edge — wide enough for any pane
+# Bounded cache — without eviction, this grows forever as the user
+# previews new videos. Tune jointly: cap by file count (cheap +
+# predictable) and by total bytes (defends against one huge GIF
+# thumbnail blowing the budget). LRU by mtime.
+THUMB_CACHE_MAX_FILES = 50
+THUMB_CACHE_MAX_BYTES = 256 * 1024 * 1024
+
+
+def evict_thumb_cache():
+    """LRU-evict cached thumbnails until under both caps."""
+    try:
+        files = []
+        for name in os.listdir(THUMB_CACHE):
+            full = os.path.join(THUMB_CACHE, name)
+            try:
+                st = os.stat(full)
+            except OSError:
+                continue
+            files.append((st.st_mtime, st.st_size, full))
+    except OSError:
+        return
+    files.sort()  # oldest first
+    total_bytes = sum(sz for _, sz, _ in files)
+    while files and (
+        len(files) > THUMB_CACHE_MAX_FILES
+        or total_bytes > THUMB_CACHE_MAX_BYTES
+    ):
+        _, sz, full = files.pop(0)
+        try:
+            os.remove(full)
+        except OSError:
+            pass
+        total_bytes -= sz
 
 
 # --- wire helpers -----------------------------------------------------------
@@ -446,6 +479,9 @@ def make_video_thumb(path):
         except OSError as e:
             log(f"preview: thumb copy failed: {e}")
             return None
+    # Evict opportunistically on the path that mutates the cache —
+    # we only walk the cache dir when we actually added to it.
+    evict_thumb_cache()
     return cached
 
 

@@ -217,12 +217,35 @@ struct Tab {
     /// the right-click "Tab color" item; cycles through the palette.
     color_idx: u8,
     /// Vertical scroll offset (pixels) for data-module content. Reset
-    /// to 0 whenever the body changes. Clamped against laid-out
-    /// content height in the render path. Only data modules use
-    /// this; shells have their own scrollback and TTY modules drive
-    /// their own buffer.
+    /// to 0 whenever the body changes (unless `scroll_to_line` was
+    /// supplied). Clamped against laid-out content height in the
+    /// render path. Only data modules use this; shells have their
+    /// own scrollback and TTY modules drive their own buffer.
     module_scroll_y: f32,
+    /// "Please ensure this 0-indexed source line is visible after the
+    /// next render" — set by `SetText { scroll_to_line: Some(N) }`,
+    /// consumed (and cleared) by `render_non_shell_pane` once it
+    /// knows the laid-out content height. Lets nav keep its cursor
+    /// on screen as the user moves it.
+    pending_ensure_visible: Option<u32>,
+    /// Host-rendered cursor position for a data module (Editor). The
+    /// render path draws a block cursor at (line, col) in the body
+    /// using the same color + blink as a shell cursor. Stays `None`
+    /// for modules with no cursor (Preview, Nav, …).
+    module_cursor: Option<(u32, u32)>,
+    /// Number of leading body columns rendered in a dim color
+    /// (line-number gutter). `0` / `None` = no dim region.
+    module_dim_cols: Option<u32>,
+    /// 0-indexed source line painted with a subtle background rect
+    /// — Nav's selection row, Editor's cursor row.
+    module_highlight_line: Option<u32>,
 }
+
+/// Hard cap on a single `set_text` body. A 16 MB body is already past
+/// what glyphon can shape interactively; anything larger is almost
+/// certainly a runaway module. We log + drop the message rather than
+/// rebuild the content buffer for it.
+const MAX_MODULE_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Per-tab animation state for multi-frame images (GIFs). Frames are
 /// uploaded to the GPU once at decode time; the render path picks the
@@ -344,6 +367,10 @@ impl Tab {
             module_pty: None,
             color_idx: 0,
             module_scroll_y: 0.0,
+            pending_ensure_visible: None,
+            module_cursor: None,
+            module_dim_cols: None,
+            module_highlight_line: None,
         }
     }
 
@@ -826,7 +853,13 @@ fn palette_name(idx: u8) -> &'static str {
 /// Width reserved at the left of each pane's tab bar for the content-
 /// kind selector — Blender-style: leftmost element in the area
 /// header. Clicking it opens a popover with the available kinds.
-const KIND_SELECTOR_W: f32 = 110.0;
+/// Scales with the tab font so labels like `Welcome ▾` don't clip
+/// the dropdown arrow at larger fonts.
+fn kind_selector_w(tab_font_size: f32) -> f32 {
+    // Roughly: 9 monospace cells (longest label + arrow) + insets,
+    // floored at 110 so small fonts still feel clickable.
+    (tab_font_size * 6.5 + 36.0).max(110.0)
+}
 
 /// Body text for each non-shell content kind. Modules render a
 /// placeholder until step 2b lands process spawning + IPC.
@@ -960,6 +993,7 @@ fn pane_tab_layout(
     active: usize,
     min_width: f32,
     max_width: f32,
+    kind_selector_w: f32,
 ) -> Vec<(f32, f32, bool)> {
     let n = title_widths.len();
     if n == 0 {
@@ -968,7 +1002,7 @@ fn pane_tab_layout(
     // Reserve the left edge for the kind-selector dropdown (Blender-
     // style area-type picker) and the top-right corner for the split
     // handle.
-    let avail = (rect.w - SPLIT_HANDLE_SIZE - KIND_SELECTOR_W).max(min_width);
+    let avail = (rect.w - SPLIT_HANDLE_SIZE - kind_selector_w).max(min_width);
     let chrome = TAB_LABEL_INSET + TAB_CLOSE_WIDTH;
     let ideal: Vec<f32> = title_widths
         .iter()
@@ -981,7 +1015,7 @@ fn pane_tab_layout(
         let factor = avail / total;
         ideal.iter().map(|w| (w * factor).max(min_width)).collect()
     };
-    let mut x = rect.x + KIND_SELECTOR_W;
+    let mut x = rect.x + kind_selector_w;
     let mut out = Vec::with_capacity(n);
     for (i, w) in widths.into_iter().enumerate() {
         out.push((x, w, i == active));
@@ -1470,6 +1504,7 @@ impl Renderer {
         let modules = crate::modules::Registry::discover();
         let mut kind_label_buffers: std::collections::HashMap<String, Buffer> =
             std::collections::HashMap::new();
+        let ksw_init = kind_selector_w(tab_font_size);
         let mut add_label = |fs: &mut FontSystem, key: &str, name: &str| {
             kind_label_buffers.insert(
                 key.to_string(),
@@ -1478,7 +1513,7 @@ impl Renderer {
                     &format!("{name} ▾"),
                     tab_font_size,
                     tab_line_h,
-                    KIND_SELECTOR_W,
+                    ksw_init,
                 ),
             );
         };
@@ -2556,8 +2591,9 @@ impl Renderer {
     /// Handle a left-click inside pane `pid`'s tab-bar strip: switch to the
     /// clicked tab, or close it if the × close-zone was hit.
     fn tab_bar_click(&mut self, pid: PaneId, prect: PaneRect) {
+        let ksw = kind_selector_w(self.config.tab_font_size);
         // Kind-selector hit first — leftmost zone of the bar.
-        if self.mouse_pos.0 < prect.x + KIND_SELECTOR_W {
+        if self.mouse_pos.0 < prect.x + ksw {
             self.open_kind_dropdown(pid, prect);
             return;
         }
@@ -2570,7 +2606,7 @@ impl Renderer {
                 .collect();
             (widths, pane.active_tab)
         };
-        let layout = pane_tab_layout(prect, &title_widths, active, self.tab_min_width, self.tab_max_width);
+        let layout = pane_tab_layout(prect, &title_widths, active, self.tab_min_width, self.tab_max_width, ksw);
         let mut hit: Option<(usize, f32, f32)> = None;
         for (i, (tx, tw, _)) in layout.iter().enumerate() {
             if self.mouse_pos.0 >= *tx && self.mouse_pos.0 < *tx + *tw {
@@ -2879,6 +2915,17 @@ impl Renderer {
         // Otherwise the click lands in a pane's content — focus that pane
         // before anything routes to "the active pane".
         self.focus_pane_at(self.mouse_pos.0, self.mouse_pos.1);
+
+        // Data-module pane click → translate pixel → (source line,
+        // visual column) in the body and forward to the module so
+        // it can move its cursor (Editor) or pick the row (Nav).
+        if button == MouseButton::Left {
+            if let Some((pid, prect)) = self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
+                if self.dispatch_data_module_click(pid, prect) {
+                    return;
+                }
+            }
+        }
 
         let mode = self.active_tab_mut().live_term.mode_flags();
         if mode.mouse_report_click || mode.mouse_drag || mode.mouse_motion {
@@ -3888,13 +3935,14 @@ impl Renderer {
         // entries reflect the fresh registry.
         let mut next: std::collections::HashMap<String, Buffer> =
             std::collections::HashMap::new();
+        let ksw = kind_selector_w(self.config.tab_font_size);
         let label = |fs: &mut FontSystem, name: &str| {
             make_title_buffer(
                 fs,
                 &format!("{name} ▾"),
                 self.tab_font_size,
                 self.tab_line_h,
-                KIND_SELECTOR_W,
+                ksw,
             )
         };
         next.insert("shell".into(), label(&mut self.font_system, "Shell"));
@@ -3906,6 +3954,98 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Resolve a click in `pid`'s content area to a (source line,
+    /// visual col) inside the data module's body and dispatch as a
+    /// `click` event. Returns true if the click was routed to a
+    /// data module — caller short-circuits selection / hyperlink /
+    /// the rest of the click pipeline in that case.
+    fn dispatch_data_module_click(
+        &mut self,
+        pid: PaneId,
+        prect: PaneRect,
+    ) -> bool {
+        // Only data modules (no PTY behind them) handle clicks via
+        // the wire; TTY modules + shells use the existing selection
+        // / mouse-report paths.
+        let is_data_module = {
+            let pane = match self.root_ref().find(pid) {
+                Some(p) => p,
+                None => return false,
+            };
+            let tab = pane.active_tab_ref();
+            matches!(tab.kind, TabContentKind::Module(_))
+                && tab.module_pty.is_none()
+                && tab.module_session.is_some()
+        };
+        if !is_data_module {
+            return false;
+        }
+        let metrics = self.pane_metrics(pid);
+        let pad = self.pad;
+        let px = prect.x + pad.left;
+        let py = prect.y + self.tab_bar_height + pad.top;
+        let local_x = self.mouse_pos.0 - px;
+        let local_y = self.mouse_pos.1 - py;
+        if local_x < 0.0 || local_y < 0.0 {
+            return false;
+        }
+        // Translate local_y → source line via layout_runs lookup so
+        // wrapped lines map back to their source index correctly.
+        let scroll_y = self
+            .root_ref()
+            .find(pid)
+            .map(|p| p.active_tab_ref().module_scroll_y)
+            .unwrap_or(0.0);
+        let target_y = local_y + scroll_y;
+        let line_height = metrics.line_height;
+        let mut source_line: Option<u32> = None;
+        if let Some(buf) = self
+            .root_ref()
+            .find(pid)
+            .and_then(|p| p.active_tab_ref().content_buffer.as_ref())
+        {
+            let mut acc = 0.0_f32;
+            for run in buf.layout_runs() {
+                if target_y >= acc && target_y < acc + line_height {
+                    source_line = Some(run.line_i as u32);
+                    break;
+                }
+                acc += line_height;
+            }
+        }
+        let Some(line) = source_line else {
+            return false;
+        };
+        let col = (local_x / metrics.cell_advance).max(0.0).round() as u32;
+        if let Some(sess) = self
+            .root_ref()
+            .find(pid)
+            .and_then(|p| p.active_tab_ref().module_session.as_ref())
+        {
+            sess.send_click(line, col);
+        }
+        true
+    }
+
+    /// A shell pane reported a new cwd via OSC 7. Broadcast it to
+    /// every live data-module session so paired views (Nav follows
+    /// shell, …) can react. Same shape as the focus broadcast — one
+    /// event, every other module decides what to do with it.
+    pub fn handle_cwd_changed(&mut self, _tab_id: TabId, path: &std::path::Path) {
+        crate::logging::info(&format!("shell cwd → {}", path.display()));
+        let path_str = path.to_string_lossy().to_string();
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root
+            .as_mut()
+            .expect("pane tree present")
+            .all_tabs_mut(&mut tabs);
+        for tab in tabs {
+            if let Some(sess) = tab.module_session.as_ref() {
+                sess.send_cwd(&path_str);
+            }
+        }
+    }
+
     /// One message from a running module. Updates the tab's cached
     /// body (replace-only in v1) and asks for a redraw.
     pub fn handle_module_message(
@@ -3914,7 +4054,24 @@ impl Renderer {
         msg: crate::modules::ModuleMessage,
     ) {
         match msg {
-            crate::modules::ModuleMessage::SetText { body } => {
+            crate::modules::ModuleMessage::SetText {
+                body,
+                scroll_to_line,
+                cursor,
+                dim_left_cols,
+                highlight_line,
+            } => {
+                // Bound the body — a runaway module that tries to
+                // shape a 1 GB string would freeze the window.
+                if body.len() > MAX_MODULE_BODY_BYTES {
+                    crate::logging::warn(&format!(
+                        "module tab {}: set_text body {} bytes > cap {} — dropped",
+                        tab_id.0,
+                        body.len(),
+                        MAX_MODULE_BODY_BYTES
+                    ));
+                    return;
+                }
                 let mut tabs: Vec<&mut Tab> = Vec::new();
                 self.root
                     .as_mut()
@@ -3925,7 +4082,10 @@ impl Renderer {
                 else {
                     return;
                 };
-                if tab.last_module_body != body {
+                let body_changed = tab.last_module_body != body;
+                let new_cursor = cursor.map(|c| (c.line, c.col));
+                let cursor_changed = tab.module_cursor != new_cursor;
+                if body_changed {
                     tab.last_module_body = body.clone();
                     if let Some(sess) = tab.module_session.as_mut() {
                         sess.body = body;
@@ -3933,10 +4093,33 @@ impl Renderer {
                     tab.content_buffer = None;
                     // set_text and set_image are exclusive — a fresh
                     // body drops whatever image (still or animated)
-                    // was on screen and sends the user back to the top.
+                    // was on screen.
                     tab.image = None;
                     tab.animation = None;
-                    tab.module_scroll_y = 0.0;
+                    // If the module doesn't tell us where to scroll,
+                    // assume "new content, take me to the top." If it
+                    // does (nav, editor, …), respect its position
+                    // through the pending_ensure_visible path below
+                    // so a wheel-scroll isn't reset out from under
+                    // the user every keystroke.
+                    if scroll_to_line.is_none() {
+                        tab.module_scroll_y = 0.0;
+                    }
+                }
+                tab.module_cursor = new_cursor;
+                let dim_changed = tab.module_dim_cols != dim_left_cols;
+                tab.module_dim_cols = dim_left_cols;
+                let highlight_changed = tab.module_highlight_line != highlight_line;
+                tab.module_highlight_line = highlight_line;
+                if let Some(line) = scroll_to_line {
+                    tab.pending_ensure_visible = Some(line);
+                }
+                if body_changed
+                    || cursor_changed
+                    || dim_changed
+                    || highlight_changed
+                    || scroll_to_line.is_some()
+                {
                     self.window.request_redraw();
                 }
             }
@@ -4115,12 +4298,14 @@ impl Renderer {
             .iter()
             .map(|t| measure_title_width(&t.title_buffer))
             .collect();
+        let ksw = kind_selector_w(self.config.tab_font_size);
         let layout = pane_tab_layout(
             rect,
             &title_widths,
             pane.active_tab,
             self.tab_min_width,
             self.tab_max_width,
+            ksw,
         );
         let bar_top = rect.y;
         // Bar background across the pane's width.
@@ -4134,7 +4319,7 @@ impl Renderer {
         // kinds. The label text is emitted in render's phase 2.
         out.push(RectInstance {
             rect: [
-                rect.x + KIND_SELECTOR_W - 1.0,
+                rect.x + ksw - 1.0,
                 bar_top + 6.0,
                 1.0,
                 self.tab_bar_height - 12.0,
@@ -4653,15 +4838,52 @@ impl Renderer {
                 let suppress_text = is_data_module
                     && (tab_ref.image.is_some() || tab_ref.animation.is_some());
                 if !suppress_text {
+                    // Render the body once with the default color
+                    // and (if requested) overlay a second pass with
+                    // a dim color clipped to the leftmost N cells —
+                    // glyphon shapes the buffer once; the two
+                    // TextAreas just write the same glyphs in
+                    // different colors within different clip rects.
+                    let metrics = self.pane_metrics(d.pid);
+                    let dim_cols = tab_ref.module_dim_cols.unwrap_or(0);
+                    let dim_w = dim_cols as f32 * metrics.cell_advance;
+                    let normal_left_clip = if dim_cols > 0 {
+                        (d.text_left + dim_w) as i32
+                    } else {
+                        d.bounds.left
+                    };
+                    let normal_bounds = TextBounds {
+                        left: normal_left_clip.max(d.bounds.left),
+                        ..d.bounds
+                    };
                     content_areas.push(TextArea {
                         buffer: body_buffer,
                         left: d.text_left,
                         top: d.text_top - scroll_y,
                         scale: 1.0,
-                        bounds: d.bounds,
+                        bounds: normal_bounds,
                         default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
                         custom_glyphs: &[],
                     });
+                    if dim_cols > 0 {
+                        let dim_bounds = TextBounds {
+                            left: d.bounds.left,
+                            top: d.bounds.top,
+                            right: ((d.text_left + dim_w) as i32).min(d.bounds.right),
+                            bottom: d.bounds.bottom,
+                        };
+                        if dim_bounds.right > dim_bounds.left {
+                            content_areas.push(TextArea {
+                                buffer: body_buffer,
+                                left: d.text_left,
+                                top: d.text_top - scroll_y,
+                                scale: 1.0,
+                                bounds: dim_bounds,
+                                default_color: Color::rgb(110, 110, 130),
+                                custom_glyphs: &[],
+                            });
+                        }
+                    }
                 }
                 // Kind selector label — leftmost in the bar. Looked up
                 // by the kind's stable key. If a module was unregistered
@@ -4673,6 +4895,7 @@ impl Renderer {
                     let bar_top = pane_rect.y;
                     let text_top =
                         bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
+                    let ksw_label = kind_selector_w(self.config.tab_font_size);
                     tab_areas.push(TextArea {
                         buffer: label_buf,
                         left: pane_rect.x + TAB_LABEL_INSET,
@@ -4681,7 +4904,7 @@ impl Renderer {
                         bounds: TextBounds {
                             left: pane_rect.x as i32,
                             top: bar_top as i32,
-                            right: (pane_rect.x + KIND_SELECTOR_W) as i32,
+                            right: (pane_rect.x + ksw_label) as i32,
                             bottom: (bar_top + self.tab_bar_height) as i32,
                         },
                         default_color: active_color,
@@ -5035,6 +5258,8 @@ impl Renderer {
         rect: PaneRect,
         tab_slots: Vec<TabLabelSlot>,
         kind: TabContentKind,
+        blink_on: bool,
+        below: &mut Vec<RectInstance>,
     ) -> PaneDraw {
         let metrics = self.pane_metrics(pid);
         let pad = self.pad;
@@ -5100,8 +5325,129 @@ impl Renderer {
             if let Some(buf) = tab.content_buffer.as_ref() {
                 let total_h = buf.layout_runs().count() as f32 * line_height;
                 let max_scroll = (total_h - content_h).max(0.0);
+                // Honor a pending ensure_visible from set_text:
+                // adjust scroll just enough to bring the target line
+                // into the visible window. "Just enough" means we
+                // leave the user's wheel position alone when the
+                // target is already on screen.
+                if let Some(line) = tab.pending_ensure_visible.take() {
+                    let target_top = line as f32 * line_height;
+                    let target_bottom = target_top + line_height;
+                    if target_top < tab.module_scroll_y {
+                        tab.module_scroll_y = target_top;
+                    } else if target_bottom > tab.module_scroll_y + content_h {
+                        tab.module_scroll_y = target_bottom - content_h;
+                    }
+                }
                 if tab.module_scroll_y > max_scroll {
                     tab.module_scroll_y = max_scroll;
+                }
+                if tab.module_scroll_y < 0.0 {
+                    tab.module_scroll_y = 0.0;
+                }
+            }
+        }
+
+        // Optional row highlight (Nav's current entry, Editor's
+        // cursor row). Painted below text/cursor so glyphs read
+        // cleanly on top.
+        if let Some(tab) = self
+            .root
+            .as_ref()
+            .and_then(|n| n.find(pid))
+            .map(|p| p.active_tab_ref())
+        {
+            if let Some(hline) = tab.module_highlight_line {
+                let mut found_y: Option<f32> = None;
+                if let Some(buf) = tab.content_buffer.as_ref() {
+                    let mut acc = 0.0_f32;
+                    for run in buf.layout_runs() {
+                        if run.line_i as u32 == hline {
+                            found_y = Some(acc);
+                            break;
+                        }
+                        acc += line_height;
+                    }
+                }
+                if let Some(ly) = found_y {
+                    let hy = py + ly - tab.module_scroll_y;
+                    let top = hy.max(py);
+                    let bot = (hy + line_height).min(py + content_h);
+                    if bot > top {
+                        below.push(RectInstance {
+                            rect: [px, top, content_w, bot - top],
+                            color: [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.10],
+                        });
+                    }
+                }
+            }
+        }
+
+        // Host-rendered cursor for data modules that asked for one
+        // (Editor). Uses the same color the shell cursor uses + the
+        // same blink — same look as anywhere else in terminite.
+        // Cells are sized at this pane's metrics; we compute the
+        // cursor's source-line y, subtract module_scroll_y, and clip
+        // to the content rect via a bounds check.
+        if let Some(tab) = self
+            .root
+            .as_ref()
+            .and_then(|n| n.find(pid))
+            .map(|p| p.active_tab_ref())
+        {
+            if let Some((cline, ccol)) = tab.module_cursor {
+                // Find the actual y of the cursor's source line by
+                // walking layout_runs. With width-only buffer sizing
+                // a long line wraps into multiple runs — the source
+                // line index ≠ the iteration index. Treating them as
+                // the same was the bug Daniel hit: lines past the
+                // first wrap were drawn one row too low per wrap.
+                let mut found_y: Option<f32> = None;
+                let mut found_run_w: f32 = 0.0;
+                if let Some(buf) = tab.content_buffer.as_ref() {
+                    let mut acc = 0.0_f32;
+                    for run in buf.layout_runs() {
+                        if run.line_i as u32 == cline {
+                            found_y = Some(acc);
+                            found_run_w = run.line_w;
+                            break;
+                        }
+                        acc += line_height;
+                    }
+                }
+                if let Some(line_y) = found_y {
+                    let cy = py + line_y - tab.module_scroll_y;
+                    let row_top = cy;
+                    let row_bottom = cy + line_height;
+                    let visible = row_bottom > py && row_top < py + content_h;
+                    if visible && blink_on {
+                        // Column → x. For unwrapped lines this is
+                        // exact. For lines that wrap before the
+                        // cursor column the math is still on the
+                        // first run; the cursor appears at start of
+                        // line instead of inside the wrap. v1
+                        // limitation — we don't wrap in editor /
+                        // nav so it's a non-issue in practice.
+                        let cell_advance = metrics.cell_advance;
+                        let cx = (px + (ccol as f32) * cell_advance)
+                            .min(px + found_run_w + cell_advance);
+                        let crect = [
+                            cx - CURSOR_PAD_X,
+                            cy - CURSOR_PAD_Y,
+                            cell_advance + 2.0 * CURSOR_PAD_X,
+                            line_height + 2.0 * CURSOR_PAD_Y,
+                        ];
+                        let cl = crect[0].max(px);
+                        let ct = crect[1].max(py);
+                        let cr = (crect[0] + crect[2]).min(px + content_w);
+                        let cb = (crect[1] + crect[3]).min(py + content_h);
+                        if cr > cl && cb > ct {
+                            below.push(RectInstance {
+                                rect: [cl, ct, cr - cl, cb - ct],
+                                color: CURSOR_COLOR,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -5180,7 +5526,9 @@ impl Renderer {
             _ => false,
         };
         if active_kind != TabContentKind::Shell && !is_tty_module {
-            return self.render_non_shell_pane(pid, rect, tab_slots, active_kind);
+            return self.render_non_shell_pane(
+                pid, rect, tab_slots, active_kind, blink_on, below,
+            );
         }
 
         // Content origin and clip box — below this pane's tab bar, inset

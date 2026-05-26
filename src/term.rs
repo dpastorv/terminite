@@ -168,8 +168,21 @@ impl EventListener for Notifier {
             TermEvent::CwdChanged(uri) => {
                 // OSC 7: the shell told us its working directory in-band.
                 if let Some(path) = parse_osc7_path(uri) {
-                    if let Ok(mut guard) = self.reported_cwd.lock() {
-                        *guard = Some(path);
+                    let changed = if let Ok(mut guard) = self.reported_cwd.lock() {
+                        let was = guard.clone();
+                        *guard = Some(path.clone());
+                        was.as_deref() != Some(path.as_path())
+                    } else {
+                        false
+                    };
+                    // Fire a UserEvent only when the path actually
+                    // changed — otherwise a chatty shell that re-emits
+                    // OSC 7 every prompt floods the broadcast.
+                    if changed {
+                        let _ = self.proxy.send_event(UserEvent::CwdChanged {
+                            tab_id: self.tab_id,
+                            path,
+                        });
                     }
                 }
             }
