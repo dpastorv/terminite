@@ -16,6 +16,7 @@ mod images;
 mod layout;
 mod logging;
 mod modules;
+mod modules_watch;
 mod palette;
 mod proto;
 mod proto_client;
@@ -206,6 +207,11 @@ pub enum UserEvent {
         tab_id: TabId,
         path: std::path::PathBuf,
     },
+    /// Something in `~/.terminite/modules/` changed on disk —
+    /// a module added, removed, or renamed. The renderer
+    /// re-discovers and refreshes the dropdown. Debounced
+    /// upstream so a multi-file drop only fires once.
+    ModulesChanged,
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -405,6 +411,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::CwdChanged { tab_id, path } => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_cwd_changed(tab_id, &path);
+                }
+            }
+            UserEvent::ModulesChanged => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.handle_modules_changed();
                 }
             }
             UserEvent::Exit => event_loop.exit(),

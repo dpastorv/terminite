@@ -132,7 +132,7 @@ impl Registry {
     }
 }
 
-fn modules_dir() -> Option<PathBuf> {
+pub fn modules_dir() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("TERMINITE_MODULES_DIR") {
         return Some(PathBuf::from(p));
     }

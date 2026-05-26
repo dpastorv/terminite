@@ -1135,6 +1135,10 @@ enum MenuAction {
     /// Cycle the active pane's font scale (100% / 80% / 65% / 125% / 150%).
     /// Triggers a per-pane buffer-metrics rebuild + grid resize.
     CyclePaneScale,
+    /// Reveal `~/.terminite/modules/` in Finder so the user can
+    /// drop a new module in. fs-watch picks it up automatically;
+    /// no CLI dance needed.
+    OpenModulesFolder,
 }
 
 /// One row in the context menu.
@@ -1153,7 +1157,7 @@ struct ContextMenu {
     hovered: Option<usize>,
 }
 
-const MENU_WIDTH: f32 = 240.0;
+const MENU_WIDTH: f32 = 320.0;
 const MENU_ITEM_H: f32 = 40.0;
 const MENU_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
 const MENU_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
@@ -1311,6 +1315,13 @@ pub struct Renderer {
     /// every highlight call against it is read-only. ~10 MB resident
     /// — bought back any time the editor wants to colorize a body.
     highlight_store: crate::highlight::HighlightStore,
+    /// fs-watch on `~/.terminite/modules/`. Holds the live notify
+    /// watcher; dropping it stops the watch. `None` when the dir
+    /// can't be located or the watcher fails to spawn — terminite
+    /// still works, you just need the `module reload` CLI verb to
+    /// pick up changes in that case.
+    #[allow(dead_code)]
+    modules_watcher: Option<crate::modules_watch::ModulesWatcher>,
 
     /// The window's pane tree. Every leaf is a `Pane` (a workspace with its
     /// own tab bar). `Option` only so split / close can `take()` and rebuild
@@ -1599,6 +1610,8 @@ impl Renderer {
             grid_cols: cols,
             grid_rows: rows,
             highlight_store: crate::highlight::HighlightStore::load(),
+            modules_watcher: crate::modules::modules_dir()
+                .and_then(|dir| crate::modules_watch::start(dir, proxy.clone())),
             root: Some(root),
             active_pane: PaneId(0),
             next_tab_id: 1,
@@ -1928,7 +1941,7 @@ impl Renderer {
             entries.push((TabContentKind::Module(m.id.clone()), m.name.clone()));
         }
 
-        let items: Vec<MenuItem> = entries
+        let mut items: Vec<MenuItem> = entries
             .into_iter()
             .map(|(kind, name)| {
                 let label = if kind == current {
@@ -1943,6 +1956,18 @@ impl Renderer {
                 }
             })
             .collect();
+        // Trailing "Open modules folder…" — reveals the install
+        // directory in Finder so the user can drop a new module in
+        // without touching the CLI. fs-watch picks up the drop and
+        // refreshes this dropdown automatically.
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                "  Open modules folder…",
+            ),
+            action: MenuAction::OpenModulesFolder,
+            enabled: crate::modules::modules_dir().is_some(),
+        });
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = prect.x.max(0.0);
         let my = (prect.y + self.tab_bar_height)
@@ -2025,6 +2050,18 @@ impl Renderer {
                     .unwrap_or(1.0);
                 let next = next_pane_scale(current);
                 self.apply_pane_scale(pid, next);
+            }
+            MenuAction::OpenModulesFolder => {
+                if let Some(dir) = crate::modules::modules_dir() {
+                    // Ensure it exists so `open` doesn't bounce
+                    // (a fresh install may not have created it yet).
+                    let _ = std::fs::create_dir_all(&dir);
+                    // open_uri only accepts http(s)/file://mailto —
+                    // wrap the absolute path in file:// so the path
+                    // takes the macOS `open` route rather than being
+                    // silently dropped by the scheme allowlist.
+                    open_uri(&format!("file://{}", dir.to_string_lossy()));
+                }
             }
         }
     }
@@ -3968,12 +4005,19 @@ impl Renderer {
         self.persist_layout();
     }
 
+    /// fs-watch fired — re-discover modules. Coalesced upstream so
+    /// this only runs once per real change.
+    pub fn handle_modules_changed(&mut self) {
+        crate::logging::info("modules_watch: reloading registry");
+        self.reload_modules();
+    }
+
     /// Re-discover modules from disk and refresh chrome labels.
     /// Active sessions keep running — if the user removed a module
     /// whose pane is currently shown, the session lives until the
     /// user switches kind. New modules become selectable from the
     /// dropdown immediately.
-    fn reload_modules(&mut self) {
+    pub fn reload_modules(&mut self) {
         self.modules = crate::modules::Registry::discover();
         // Rebuild the per-kind label buffers. Built-ins stay; module
         // entries reflect the fresh registry.

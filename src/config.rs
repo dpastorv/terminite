@@ -104,6 +104,89 @@ pub struct Config {
     pub scrollback: usize,
 }
 
+/// One row of `schema()` — a known config key with its type, default,
+/// hot-reload semantics, and a short description. Used by the proto
+/// `config` verb (and the future config pane) to introspect what
+/// knobs exist without grepping the source. Keep this in sync when
+/// adding a new field above; the test enforces a presence baseline.
+#[allow(dead_code)]
+pub struct ConfigKey {
+    pub name: &'static str,
+    pub kind: ConfigKind,
+    pub default: ConfigValue,
+    pub hot_reload: bool,
+    pub doc: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub enum ConfigKind {
+    Float,
+    Int,
+    String,
+    Bool,
+    Enum,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub enum ConfigValue {
+    Float(f32),
+    Int(i64),
+    String(&'static str),
+    Bool(bool),
+}
+
+/// Return the full set of known config keys. The order matches the
+/// struct fields above. Stable: callers (proto verb, config pane)
+/// iterate this list and trust the names. Currently unused at the
+/// call sites; the next bundle (config pane) wires it through proto.
+#[allow(dead_code)]
+pub fn schema() -> Vec<ConfigKey> {
+    let k = |name, kind, default, hot_reload, doc| ConfigKey {
+        name, kind, default, hot_reload, doc,
+    };
+    vec![
+        k("font_family", ConfigKind::String, ConfigValue::String(""), false,
+          "Monospace family. Empty = platform default."),
+        k("font_size", ConfigKind::Float, ConfigValue::Float(28.0), false,
+          "Content font size in pixels. Startup-applied."),
+        k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
+          "Inset between the pane edge and content (left)."),
+        k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
+          "Inset between the pane edge and content (right)."),
+        k("padding_top", ConfigKind::Float, ConfigValue::Float(16.0), true,
+          "Inset between the pane edge and content (top)."),
+        k("padding_bottom", ConfigKind::Float, ConfigValue::Float(16.0), true,
+          "Inset between the pane edge and content (bottom)."),
+        k("gutter_left", ConfigKind::Float, ConfigValue::Float(8.0), true,
+          "Left edge of the block-label gutter strip."),
+        k("gutter_gap", ConfigKind::Float, ConfigValue::Float(8.0), true,
+          "Gap between gutter labels and content."),
+        k("highlight_pad_x", ConfigKind::Float, ConfigValue::Float(4.0), true,
+          "Horizontal pad around block-label highlight rects."),
+        k("highlight_pad_y", ConfigKind::Float, ConfigValue::Float(2.0), true,
+          "Vertical pad around block-label highlight rects."),
+        k("highlight_offset_y", ConfigKind::Float, ConfigValue::Float(0.0), true,
+          "Y-offset for block-label highlight (fine-tune)."),
+        k("line_height", ConfigKind::Float, ConfigValue::Float(1.0), true,
+          "Multiplier on the cell line height."),
+        k("tab_min_width", ConfigKind::Float, ConfigValue::Float(140.0), true,
+          "Minimum per-tab label width (px)."),
+        k("tab_max_width", ConfigKind::Float, ConfigValue::Float(360.0), true,
+          "Maximum per-tab label width (px)."),
+        k("tab_font_size", ConfigKind::Float, ConfigValue::Float(18.0), false,
+          "Tab-label font size in pixels. Startup-applied."),
+        k("tab_bar_height", ConfigKind::Float, ConfigValue::Float(44.0), false,
+          "Per-pane tab-bar strip height in pixels."),
+        k("cursor_blink", ConfigKind::Bool, ConfigValue::Bool(true), true,
+          "Blink the cursor while the window is focused."),
+        k("bell_style", ConfigKind::Enum, ConfigValue::String("visual"), true,
+          "How to handle \\a (bell). One of: visual, none."),
+        k("scrollback", ConfigKind::Int, ConfigValue::Int(10_000), false,
+          "Scrollback lines per shell. Applied to new tabs only."),
+    ]
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -327,6 +410,22 @@ fn parse_value(rhs: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_lists_known_keys() {
+        // Presence baseline — bumping when a new config key is added
+        // is the reminder to also extend schema(). The exact set isn't
+        // load-bearing, only that the key list grows monotonically.
+        let s = schema();
+        let names: std::collections::HashSet<&str> =
+            s.iter().map(|k| k.name).collect();
+        for expected in [
+            "font_size", "cursor_blink", "bell_style", "scrollback",
+            "tab_font_size", "tab_bar_height", "line_height",
+        ] {
+            assert!(names.contains(expected), "schema missing: {expected}");
+        }
+    }
 
     #[test]
     fn defaults_when_absent() {
