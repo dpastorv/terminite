@@ -11,6 +11,7 @@ use winit::window::{Window, WindowId};
 
 mod blocks;
 mod config;
+mod highlight;
 mod images;
 mod logging;
 mod modules;

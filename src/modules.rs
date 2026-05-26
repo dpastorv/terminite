@@ -287,6 +287,13 @@ pub enum ModuleMessage {
     /// of that line so the band stays continuous on long content.
     /// Nav uses it for the current selection row; Editor uses it
     /// for the cursor row.
+    ///
+    /// Optional `language` enables syntax highlighting on the host
+    /// side via syntect. The value is a token syntect recognizes —
+    /// usually the file extension (e.g. "rs", "py", "md") but also
+    /// names like "Rust", "Python". `None` = plain rendering.
+    /// Highlighting is recomputed on body or language change and
+    /// otherwise reused, so steady-state cursor moves stay cheap.
     SetText {
         body: String,
         #[serde(default)]
@@ -297,6 +304,8 @@ pub enum ModuleMessage {
         gutter: Option<Vec<String>>,
         #[serde(default)]
         highlight_line: Option<u32>,
+        #[serde(default)]
+        language: Option<String>,
     },
     /// Render the file at `path` as the pane's content. PNG only in
     /// v1; the host returns a `log` line if decode fails so the

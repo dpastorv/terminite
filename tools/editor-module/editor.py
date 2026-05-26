@@ -42,6 +42,55 @@ from typing import List, Optional, Tuple
 MAX_BYTES = 1_000_000
 PAGE_LINES = 16
 GUTTER_PAD = 2  # spaces between line number and content
+
+# Map common file extensions to the syntect language tokens the host
+# recognizes. Bundled syntect grammars cover ~50 languages; this is
+# just the ones likely to appear in everyday work. Anything not
+# listed falls through to plain (uncolored) rendering — the editor
+# stays usable, just without highlighting.
+LANGUAGE_BY_EXT = {
+    "rs": "rs",
+    "py": "py",
+    "js": "js",
+    "jsx": "js",
+    "ts": "ts",
+    "tsx": "ts",
+    "go": "go",
+    "rb": "rb",
+    "php": "php",
+    "java": "java",
+    "c": "c",
+    "h": "c",
+    "cc": "cpp", "cpp": "cpp", "hpp": "cpp",
+    "cs": "cs",
+    "swift": "swift",
+    "kt": "kt",
+    "scala": "scala",
+    "lua": "lua",
+    "sh": "sh", "bash": "sh", "zsh": "sh",
+    "json": "json",
+    "yaml": "yaml", "yml": "yaml",
+    "toml": "toml",
+    "html": "html", "htm": "html",
+    "xml": "xml",
+    "css": "css",
+    "scss": "scss",
+    "sql": "sql",
+    "md": "md", "markdown": "md",
+}
+
+
+def language_for(path):
+    if not path:
+        return None
+    base = os.path.basename(path)
+    if base.startswith("."):
+        # Dotfiles: .gitignore, .bashrc, etc. — best effort.
+        return LANGUAGE_BY_EXT.get(base[1:].lower())
+    _, dot, ext = base.rpartition(".")
+    if not dot:
+        return None
+    return LANGUAGE_BY_EXT.get(ext.lower())
 # Total bytes of buffered undo snapshots. Each snapshot is a copy of
 # the full lines list, so 16 MB caps memory use across pathological
 # edit storms without ever blowing past the host's per-module body
@@ -774,6 +823,10 @@ class Editor:
             # selection is active (selection brackets carry the
             # visual; a band would compete).
             "highlight_line": cursor_line if sel is None else None,
+            # Syntax highlighting hint — host runs syntect against
+            # the body when this is set. `None` for unknown types
+            # (host falls back to plain color rendering).
+            "language": language_for(self.path),
         }
         send(msg)
 

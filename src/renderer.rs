@@ -249,6 +249,14 @@ struct Tab {
     /// — Nav's selection row, Editor's cursor row. Spans all wrap
     /// segments of that line for continuous highlight.
     module_highlight_line: Option<u32>,
+    /// Syntect language token (e.g. "rs", "py") for this body, or
+    /// `None` for plain rendering. Editor sends a value derived
+    /// from the file extension; Nav / Preview leave it `None`.
+    module_language: Option<String>,
+    /// Cached per-source-line color spans from syntect. Recomputed
+    /// on body or language change; reused otherwise so steady-state
+    /// cursor moves stay cheap.
+    module_highlights: Option<crate::highlight::LineSpans>,
     /// Multi-click bookkeeping for data-module panes — mirrors the
     /// shell-tab last_click pattern with body coordinates. Reset
     /// (or rolled over) by `dispatch_data_module_click`.
@@ -386,6 +394,8 @@ impl Tab {
             module_gutter: None,
             gutter_buffer: None,
             module_highlight_line: None,
+            module_language: None,
+            module_highlights: None,
             last_module_click: None,
         }
     }
@@ -1291,6 +1301,11 @@ pub struct Renderer {
     grid_cols: usize,
     grid_rows: usize,
 
+    /// Bundled syntect grammars + theme. Loaded once at startup;
+    /// every highlight call against it is read-only. ~10 MB resident
+    /// — bought back any time the editor wants to colorize a body.
+    highlight_store: crate::highlight::HighlightStore,
+
     /// The window's pane tree. Every leaf is a `Pane` (a workspace with its
     /// own tab bar). `Option` only so split / close can `take()` and rebuild
     /// — always `Some` between operations.
@@ -1577,6 +1592,7 @@ impl Renderer {
             font_family,
             grid_cols: cols,
             grid_rows: rows,
+            highlight_store: crate::highlight::HighlightStore::load(),
             root: Some(root),
             active_pane: PaneId(0),
             next_tab_id: 1,
@@ -4118,6 +4134,7 @@ impl Renderer {
                 cursor,
                 gutter,
                 highlight_line,
+                language,
             } => {
                 // Bound the body — a runaway module that tries to
                 // shape a 1 GB string would freeze the window.
@@ -4130,6 +4147,13 @@ impl Renderer {
                     ));
                     return;
                 }
+                // Highlight up front — we need &self.highlight_store
+                // before we take the mut borrow on tabs. The result
+                // is dropped later if nothing actually changed.
+                let new_highlights = language.as_deref().and_then(|lang| {
+                    let spans = self.highlight_store.highlight(&body, lang);
+                    if spans.is_empty() { None } else { Some(spans) }
+                });
                 let mut tabs: Vec<&mut Tab> = Vec::new();
                 self.root
                     .as_mut()
@@ -4175,6 +4199,18 @@ impl Renderer {
                 }
                 let highlight_changed = tab.module_highlight_line != highlight_line;
                 tab.module_highlight_line = highlight_line;
+                let language_changed = tab.module_language != language;
+                let needs_rehighlight = body_changed || language_changed;
+                if language_changed {
+                    tab.module_language = language;
+                }
+                if needs_rehighlight {
+                    tab.module_highlights = new_highlights;
+                    // Force content buffer rebuild — rich-text
+                    // construction uses the new spans (or absence
+                    // thereof) on the next render pass.
+                    tab.content_buffer = None;
+                }
                 if let Some(line) = scroll_to_line {
                     tab.pending_ensure_visible = Some(line);
                 }
@@ -4182,6 +4218,7 @@ impl Renderer {
                     || cursor_changed
                     || gutter_changed
                     || highlight_changed
+                    || language_changed
                     || scroll_to_line.is_some()
                 {
                     self.window.request_redraw();
@@ -5439,13 +5476,66 @@ impl Renderer {
                 // to show only what fits.
                 buf.set_size(&mut self.font_system, Some(body_w), None);
                 let attrs = Attrs::new().family(font_family(&family));
-                buf.set_text(
-                    &mut self.font_system,
-                    &body,
-                    &attrs,
-                    Shaping::Advanced,
-                    None,
-                );
+                // When syntect produced per-source-line spans, build
+                // the rich-text input by walking the body's lines
+                // in parallel with the spans and emitting (text,
+                // attrs.color) chunks. Anything outside a span (e.g.
+                // header lines, gaps) falls back to default color.
+                if let Some(highlights) = tab.module_highlights.as_ref() {
+                    let mut runs: Vec<(String, Color)> = Vec::new();
+                    let default_color = Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2);
+                    let mut first_line = true;
+                    for (line_idx, line) in body.split('\n').enumerate() {
+                        if !first_line {
+                            runs.push(("\n".to_string(), default_color));
+                        }
+                        first_line = false;
+                        let spans = highlights.get(line_idx);
+                        match spans {
+                            Some(spans) if !spans.is_empty() => {
+                                let mut cursor = 0usize;
+                                for span in spans {
+                                    if span.start > cursor && span.start <= line.len() {
+                                        runs.push((
+                                            line[cursor..span.start].to_string(),
+                                            default_color,
+                                        ));
+                                    }
+                                    let s = span.start.min(line.len());
+                                    let e = span.end.min(line.len());
+                                    if e > s {
+                                        runs.push((
+                                            line[s..e].to_string(),
+                                            Color::rgb(span.rgb[0], span.rgb[1], span.rgb[2]),
+                                        ));
+                                    }
+                                    cursor = e.max(cursor);
+                                }
+                                if cursor < line.len() {
+                                    runs.push((line[cursor..].to_string(), default_color));
+                                }
+                            }
+                            _ => {
+                                runs.push((line.to_string(), default_color));
+                            }
+                        }
+                    }
+                    buf.set_rich_text(
+                        &mut self.font_system,
+                        runs.iter().map(|(t, c)| (t.as_str(), attrs.clone().color(*c))),
+                        &attrs,
+                        Shaping::Advanced,
+                        None,
+                    );
+                } else {
+                    buf.set_text(
+                        &mut self.font_system,
+                        &body,
+                        &attrs,
+                        Shaping::Advanced,
+                        None,
+                    );
+                }
                 buf.shape_until_scroll(&mut self.font_system, false);
                 tab.content_buffer = Some(buf);
             } else if let Some(buf) = tab.content_buffer.as_mut() {
