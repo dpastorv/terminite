@@ -432,11 +432,15 @@ impl ModuleSession {
     /// Report a left-click in the module's content area. `line` is
     /// the 0-indexed source line of the body (the host translates
     /// from the visual layout-run index it computed off the pixel
-    /// position) and `col` is the visual column. The editor uses
-    /// this to reposition its cursor; modules that don't care can
-    /// ignore.
-    pub fn send_click(&self, line: u32, col: u32) {
-        let msg = format!(r#"{{"kind":"click","line":{line},"col":{col}}}"#);
+    /// position), `col` is the visual column, and `count` is the
+    /// multi-click index (1 = single, 2 = double, 3 = triple).
+    /// Same MULTI_CLICK_WINDOW the shell selection path uses. Nav
+    /// treats count=2 as "activate" (cd into / focus); editor
+    /// treats count=1 as cursor reposition.
+    pub fn send_click(&self, line: u32, col: u32, count: u8) {
+        let msg = format!(
+            r#"{{"kind":"click","line":{line},"col":{col},"count":{count}}}"#
+        );
         let _ = self.input_tx.try_send(msg);
     }
 }

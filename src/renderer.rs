@@ -239,6 +239,10 @@ struct Tab {
     /// 0-indexed source line painted with a subtle background rect
     /// — Nav's selection row, Editor's cursor row.
     module_highlight_line: Option<u32>,
+    /// Multi-click bookkeeping for data-module panes — mirrors the
+    /// shell-tab last_click pattern with body coordinates. Reset
+    /// (or rolled over) by `dispatch_data_module_click`.
+    last_module_click: Option<(Instant, u32, u32, u8)>,
 }
 
 /// Hard cap on a single `set_text` body. A 16 MB body is already past
@@ -371,6 +375,7 @@ impl Tab {
             module_cursor: None,
             module_dim_cols: None,
             module_highlight_line: None,
+            last_module_click: None,
         }
     }
 
@@ -4017,12 +4022,36 @@ impl Renderer {
             return false;
         };
         let col = (local_x / metrics.cell_advance).max(0.0).round() as u32;
+        // Multi-click bookkeeping — rolls over the count if the
+        // user clicks the same body cell within MULTI_CLICK_WINDOW.
+        // Cap at 3 (single/double/triple); modules that don't care
+        // about higher counts can clamp on their end.
+        let now = Instant::now();
+        let mut count = 1u8;
+        if let Some(tab_mut) = self
+            .root
+            .as_mut()
+            .and_then(|n| n.find_mut(pid))
+            .map(|p| p.active_tab_mut())
+        {
+            count = match tab_mut.last_module_click {
+                Some((t, l, c, n))
+                    if now.duration_since(t) < MULTI_CLICK_WINDOW
+                        && l == line
+                        && c == col =>
+                {
+                    (n + 1).min(3)
+                }
+                _ => 1,
+            };
+            tab_mut.last_module_click = Some((now, line, col, count));
+        }
         if let Some(sess) = self
             .root_ref()
             .find(pid)
             .and_then(|p| p.active_tab_ref().module_session.as_ref())
         {
-            sess.send_click(line, col);
+            sess.send_click(line, col, count);
         }
         true
     }

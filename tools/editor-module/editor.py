@@ -131,6 +131,11 @@ class Editor:
         self.confirm: Optional[Tuple[str, dict]] = None  # (kind, payload)
         self.prompt_text = ""
 
+        # Focus event the user hasn't yet committed to — held while
+        # we wait for the discard/save confirmation. Cleared on
+        # commit, cancel, or when a fresh focus replaces it.
+        self.pending_focus_path: Optional[str] = None
+
         # Selection — sel_anchor None means no selection. The head is
         # always (self.row, self.col).
         self.sel_anchor: Optional[Tuple[int, int]] = None
@@ -701,7 +706,14 @@ class Editor:
         if self.mode == "save_as":
             return f"save as: {self.prompt_text}_   Enter = save, Esc = cancel"
         if self.mode == "confirm" and self.confirm:
-            kind, _ = self.confirm
+            kind, payload = self.confirm
+            if kind == "discard_focus":
+                target = os.path.basename(payload.get("path", "")) or "file"
+                cur = os.path.basename(self.path or "untitled")
+                return (
+                    f"Unsaved changes in {cur}. "
+                    f"Open {target}? (s = save+open, y = discard+open, n = stay)"
+                )
             prompts = {
                 "overwrite_changed": "File changed on disk since loaded. Overwrite anyway? (y/n)",
             }
@@ -826,7 +838,32 @@ class Editor:
         if not self.confirm:
             self.mode = "normal"
             return
-        kind, _ = self.confirm
+        kind, payload = self.confirm
+        if kind == "discard_focus":
+            target = payload.get("path", "")
+            if raw in ("s", "S"):
+                self.mode = "normal"
+                self.confirm = None
+                self.save()
+                # If save bounced into save-as or another confirm, hold
+                # the focus until those resolve — _take_pending_focus
+                # picks it up. Otherwise load now.
+                if self.mode == "normal" and not self.dirty and target:
+                    self.load(target)
+                else:
+                    self.pending_focus_path = target
+            elif raw in ("y", "Y"):
+                self.mode = "normal"
+                self.confirm = None
+                if target:
+                    self.load(target)
+                else:
+                    self.message = "discarded; nothing to open"
+            elif raw in ("n", "N", "\x1b"):
+                self.mode = "normal"
+                self.confirm = None
+                self.message = f"stayed in {os.path.basename(self.path or 'untitled')}"
+            return
         if raw in ("y", "Y"):
             self.mode = "normal"
             self.confirm = None
@@ -936,6 +973,37 @@ class Editor:
             self.dedent_line()
 
 
+def request_focus(ed: Editor, path: str):
+    """Open `path`, but guard unsaved work behind a confirm prompt.
+
+    Three resolutions for a dirty buffer:
+      s = save current then open
+      y = discard current and open
+      n / Esc = stay on current file
+
+    No-ops if the user re-focused the file already open (so a stray
+    double-click in Nav doesn't drop their position). Cancels any
+    transient mode (find / save_as) so the UI doesn't end up with a
+    stale prompt floating over a freshly-loaded buffer.
+    """
+    if ed.path == path:
+        return
+    # Drop transient modes so we never load underneath a prompt.
+    if ed.mode in ("find", "save_as"):
+        ed.mode = "normal"
+        ed.find_query = ""
+        ed.find_matches = []
+        ed.prompt_text = ""
+    if ed.dirty:
+        ed.pending_focus_path = path
+        ed.confirm = ("discard_focus", {"path": path})
+        ed.mode = "confirm"
+        return
+    log(f"editor: load {path}")
+    ed.load(path)
+    ed.pending_focus_path = None
+
+
 def main():
     ed = Editor()
     ed.render()
@@ -951,8 +1019,7 @@ def main():
         if kind == "focus":
             path = cmd.get("path", "")
             if path:
-                log(f"editor: load {path}")
-                ed.load(path)
+                request_focus(ed, path)
                 ed.render()
         elif kind == "input":
             ed.handle_input(cmd.get("bytes", ""))
@@ -963,6 +1030,10 @@ def main():
             # before the content; ignore clicks in the header. Col
             # is in body cells, which include the gutter + pad —
             # subtract those to land on a real content column.
+            # `count` (single / double / triple) arrives on the wire
+            # too — editor v1 only uses single-click reposition;
+            # word-select on double / line-select on triple are
+            # natural follow-ups.
             line = int(cmd.get("line", 0))
             col = int(cmd.get("col", 0))
             if line >= 3 and ed.lines:

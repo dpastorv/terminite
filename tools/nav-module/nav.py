@@ -456,14 +456,19 @@ def main():
         elif kind == "click":
             # Body coords → entry index. Header takes HEADER_LINES
             # rows; clicks above that, or past the last entry, are
-            # ignored. Doubles as "click to activate" on a second
-            # click is a future polish — v1 just selects.
+            # ignored. Single click = select; double click =
+            # activate (cd into dir, publish_focus on file) —
+            # matches the standard file-manager affordance.
             line = int(cmd.get("line", 0))
+            count = int(cmd.get("count", 1))
             if line >= HEADER_LINES and nav.entries:
                 idx = line - HEADER_LINES
                 if 0 <= idx < len(nav.entries):
                     nav.idx = idx
-                    nav.render()
+                    if count >= 2:
+                        nav.activate()
+                    else:
+                        nav.render()
         elif kind == "close":
             break
 
