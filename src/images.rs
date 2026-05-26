@@ -22,6 +22,24 @@ use base64::prelude::BASE64_STANDARD;
 /// RGBA in memory. Keeps one rogue image from OOMing the renderer.
 pub const MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Total cap on decoded RGBA bytes across all frames of an animated
+/// image. A typical Twitter GIF lands around 5–20 MB; this leaves
+/// headroom for ~30s of mid-resolution looped content without letting
+/// a pathological file claim arbitrary GPU memory. Multi-frame decode
+/// stops at the first frame that would breach this budget.
+pub const MAX_ANIMATED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Hard cap on decoded frame count for animations. With the byte
+/// budget above this is belt-and-suspenders for files that pack many
+/// tiny frames — stop iterating regardless of size.
+pub const MAX_ANIMATED_FRAMES: usize = 500;
+
+/// Minimum per-frame delay clamp. Some GIF authors set delay=0 to
+/// mean "as fast as possible," which different viewers interpret
+/// differently — and uncapped, we'd burn CPU on per-frame redraws.
+/// 20ms = 50fps, a sane ceiling that still feels animated.
+const MIN_FRAME_DELAY_MS: u64 = 20;
+
 /// The Kitty action — what to do with the payload.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -209,6 +227,104 @@ pub fn decode_image(
             Some(ImageData { width: w, height: h, rgba })
         }
     }
+}
+
+/// Either a still image or a frame sequence with timing. The Preview
+/// module path returns this so animated GIFs can loop; static formats
+/// just yield `Static`.
+pub enum DecodedImage {
+    Static(ImageData),
+    /// One or more frames + per-frame delays in ms. `total_ms` is the
+    /// sum of delays, precomputed so the render path can do `elapsed %
+    /// total_ms` lookups without re-summing.
+    Animated {
+        frames: Vec<(ImageData, u64)>,
+        total_ms: u64,
+    },
+}
+
+/// Auto-detect format and decode. Used by the Preview module path —
+/// the file bytes carry their own magic. Supports whatever decoder
+/// features are enabled on the `image` crate in `Cargo.toml`
+/// (currently png/jpeg/gif/webp/bmp). Rejects images whose RGBA
+/// footprint would exceed [`MAX_IMAGE_BYTES`] — keeps a hostile
+/// 50k×50k header from allocating 10 GB before we notice.
+///
+/// Multi-frame GIFs come back as `DecodedImage::Animated`. Single-
+/// frame GIFs and every other format come back as `Static`.
+pub fn decode_any_animated(bytes: &[u8]) -> Option<DecodedImage> {
+    // GIF magic: try animated decode first so multi-frame files
+    // animate. Single-frame GIFs fall through to the static path.
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        if let Some((frames, total_ms)) = decode_animated_gif(bytes) {
+            if frames.len() > 1 {
+                return Some(DecodedImage::Animated { frames, total_ms });
+            }
+        }
+    }
+    decode_any_static(bytes).map(DecodedImage::Static)
+}
+
+/// Single-frame decode. Used when the caller knows it doesn't care
+/// about animation (or as the static fallback inside the animated
+/// path).
+pub fn decode_any_static(bytes: &[u8]) -> Option<ImageData> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let need = (w as usize).checked_mul(h as usize)?.checked_mul(4)?;
+    if need > MAX_IMAGE_BYTES {
+        return None;
+    }
+    Some(ImageData { width: w, height: h, rgba: rgba.into_raw() })
+}
+
+/// Backwards-compatible alias for the older single-frame entry point.
+/// Kept so the Kitty graphics path (which only emits static PNGs)
+/// doesn't need to know about the new animated wrapper.
+#[allow(dead_code)]
+pub fn decode_any(bytes: &[u8]) -> Option<ImageData> {
+    decode_any_static(bytes)
+}
+
+/// Decode an animated GIF into a sequence of (frame, delay_ms) pairs.
+/// Stops iterating once either [`MAX_ANIMATED_BYTES`] or
+/// [`MAX_ANIMATED_FRAMES`] is hit — the partial result is still
+/// returned so a single oversized frame deep into a long GIF doesn't
+/// nuke the whole preview.
+fn decode_animated_gif(bytes: &[u8]) -> Option<(Vec<(ImageData, u64)>, u64)> {
+    use image::AnimationDecoder;
+    use image::codecs::gif::GifDecoder;
+    let decoder = GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut frames_out: Vec<(ImageData, u64)> = Vec::new();
+    let mut total_ms: u64 = 0;
+    let mut total_bytes: usize = 0;
+    for (i, frame_res) in decoder.into_frames().enumerate() {
+        if i >= MAX_ANIMATED_FRAMES {
+            break;
+        }
+        let frame = match frame_res {
+            Ok(f) => f,
+            Err(_) => break,
+        };
+        let delay = frame.delay();
+        let (num, den) = delay.numer_denom_ms();
+        let delay_ms = if den == 0 { 100 } else { (num as u64) / (den as u64).max(1) };
+        let delay_ms = delay_ms.max(MIN_FRAME_DELAY_MS);
+        let buffer = frame.into_buffer();
+        let (w, h) = buffer.dimensions();
+        let rgba = buffer.into_raw();
+        if total_bytes.saturating_add(rgba.len()) > MAX_ANIMATED_BYTES {
+            break;
+        }
+        total_bytes += rgba.len();
+        total_ms = total_ms.saturating_add(delay_ms);
+        frames_out.push((ImageData { width: w, height: h, rgba }, delay_ms));
+    }
+    if frames_out.is_empty() {
+        return None;
+    }
+    Some((frames_out, total_ms.max(MIN_FRAME_DELAY_MS)))
 }
 
 fn decode_png(data: &[u8]) -> Option<ImageData> {

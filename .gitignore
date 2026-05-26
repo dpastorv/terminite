@@ -10,6 +10,10 @@
 *~
 *.save
 
+# Python bytecode from native modules in tools/
+__pycache__/
+*.pyc
+
 
 # Added by cargo
 #

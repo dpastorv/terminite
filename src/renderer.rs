@@ -184,6 +184,12 @@ struct Tab {
     /// one image per tab at the pane's top-left, scaled to fit. Dropped
     /// when the tab drops (closes the GPU texture too).
     image: Option<TextureImage>,
+    /// Set when an animated image (multi-frame GIF) is showing. Holds
+    /// pre-uploaded per-frame textures + timing; the render path picks
+    /// the current frame and the wakeup scheduler keeps the loop
+    /// ticking. Mutually exclusive with `image` in practice — set_image
+    /// clears both before installing one or the other.
+    animation: Option<TabAnimation>,
     /// Per-tab block Model — populated from OSC 133 marks. Phase 2's
     /// shared coordinate system (`B7`) for the pair lives here.
     blocks: BlockStore,
@@ -210,6 +216,70 @@ struct Tab {
     /// Palette index for the tab's color band. `0` is none. Set via
     /// the right-click "Tab color" item; cycles through the palette.
     color_idx: u8,
+    /// Vertical scroll offset (pixels) for data-module content. Reset
+    /// to 0 whenever the body changes. Clamped against laid-out
+    /// content height in the render path. Only data modules use
+    /// this; shells have their own scrollback and TTY modules drive
+    /// their own buffer.
+    module_scroll_y: f32,
+}
+
+/// Per-tab animation state for multi-frame images (GIFs). Frames are
+/// uploaded to the GPU once at decode time; the render path picks the
+/// current one off the cumulative-delay table without copying.
+///
+/// Bounded by [`crate::images::MAX_ANIMATED_BYTES`] and
+/// [`crate::images::MAX_ANIMATED_FRAMES`] upstream — by the time we
+/// allocate textures the frame list is already capped.
+struct TabAnimation {
+    /// Frame textures in playback order. `frames.len() == cumulative.len()`.
+    frames: Vec<TextureImage>,
+    /// Display dimensions (max width/height across frames). Frames in
+    /// a GIF can technically vary in size; we render every frame
+    /// scaled into the same envelope so the pane doesn't jitter.
+    width: u32,
+    height: u32,
+    /// `cumulative[i]` is the ms timestamp at which frame `i` *ends*.
+    /// Lookup is a partition_point against `elapsed % total_ms`.
+    cumulative: Vec<u64>,
+    /// Total loop length in ms (== `cumulative.last()`).
+    total_ms: u64,
+    /// Wall-clock origin for the running loop. Stays fixed; the
+    /// render path reads `started_at.elapsed()` for the position.
+    started_at: Instant,
+}
+
+impl TabAnimation {
+    fn current_index(&self) -> usize {
+        if self.total_ms == 0 || self.frames.is_empty() {
+            return 0;
+        }
+        let elapsed = self.started_at.elapsed().as_millis() as u64 % self.total_ms;
+        self.cumulative
+            .partition_point(|c| *c <= elapsed)
+            .min(self.frames.len() - 1)
+    }
+
+    fn current_frame(&self) -> &TextureImage {
+        &self.frames[self.current_index()]
+    }
+
+    /// Wall-clock instant when the next frame should appear. The main
+    /// loop uses this for `ControlFlow::WaitUntil` so we wake exactly
+    /// at the frame boundary, no per-tick polling.
+    fn next_wakeup(&self) -> Option<Instant> {
+        if self.total_ms == 0 || self.frames.is_empty() {
+            return None;
+        }
+        let total_elapsed = self.started_at.elapsed().as_millis() as u64;
+        let phase = total_elapsed % self.total_ms;
+        let loops = total_elapsed / self.total_ms;
+        let idx = self.cumulative.partition_point(|c| *c <= phase);
+        let boundary = *self.cumulative.get(idx).unwrap_or(&self.total_ms);
+        let absolute_ms = loops * self.total_ms + boundary;
+        let offset_ms = absolute_ms.saturating_sub(total_elapsed);
+        Some(Instant::now() + Duration::from_millis(offset_ms))
+    }
 }
 
 /// What a tab currently shows. `Shell` has a live PTY behind it;
@@ -265,6 +335,7 @@ impl Tab {
             buffer_dirty: true,
             autoscroll_dir: None,
             image: None,
+            animation: None,
             blocks: BlockStore::new(),
             kind: TabContentKind::Shell,
             content_buffer: None,
@@ -272,6 +343,7 @@ impl Tab {
             last_module_body: String::new(),
             module_pty: None,
             color_idx: 0,
+            module_scroll_y: 0.0,
         }
     }
 
@@ -2987,6 +3059,32 @@ impl Renderer {
         };
         let line_height = self.pane_metrics(pid).line_height;
 
+        // Data-module panes have no PTY — wheel events scroll the
+        // rendered body instead of being forwarded as arrow keys to
+        // a shell that isn't there. TTY modules have their own PTY
+        // and fall through to the regular path below.
+        {
+            let tab = self.pane_tab_mut(pid);
+            let is_data_module = matches!(tab.kind, TabContentKind::Module(_))
+                && tab.module_pty.is_none();
+            if is_data_module {
+                let pixels = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y * 3.0 * line_height,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                // Up wheel (positive y) reveals earlier content =
+                // scroll_y goes negative (text moves down on screen).
+                // The render path clamps against laid-out content
+                // height, so over-scroll past the ends is a no-op.
+                tab.module_scroll_y -= pixels;
+                if tab.module_scroll_y < 0.0 {
+                    tab.module_scroll_y = 0.0;
+                }
+                self.window.request_redraw();
+                return;
+            }
+        }
+
         let mode = self.pane_tab_mut(pid).active_term().mode_flags();
 
         // Alt-screen TUIs (nano, vim, less, htop, man) replace the main
@@ -3833,6 +3931,89 @@ impl Renderer {
                         sess.body = body;
                     }
                     tab.content_buffer = None;
+                    // set_text and set_image are exclusive — a fresh
+                    // body drops whatever image (still or animated)
+                    // was on screen and sends the user back to the top.
+                    tab.image = None;
+                    tab.animation = None;
+                    tab.module_scroll_y = 0.0;
+                    self.window.request_redraw();
+                }
+            }
+            crate::modules::ModuleMessage::SetImage { path } => {
+                // Read + decode in the host so the module wire stays
+                // a small text protocol. Errors go back to the module
+                // as log lines so the module's author can spot them
+                // in the regular log without crashing the pane.
+                let bytes = match std::fs::read(&path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        crate::logging::warn(&format!(
+                            "module tab {}: set_image read failed for {path}: {e}",
+                            tab_id.0
+                        ));
+                        return;
+                    }
+                };
+                let Some(decoded) = crate::images::decode_any_animated(&bytes) else {
+                    crate::logging::warn(&format!(
+                        "module tab {}: set_image decode failed for {path} \
+                         (supported: png/jpeg/gif/webp/bmp; oversize images rejected)",
+                        tab_id.0
+                    ));
+                    return;
+                };
+                // Upload all frames *before* taking a mut borrow on
+                // the pane tree — the texture path needs &device/&queue
+                // off self while the tree lookup wants &mut self.root.
+                let (still, animation) = match decoded {
+                    crate::images::DecodedImage::Static(img) => {
+                        let tex = self
+                            .texture_renderer
+                            .upload(&self.device, &self.queue, &img);
+                        (Some(tex), None)
+                    }
+                    crate::images::DecodedImage::Animated { frames, total_ms } => {
+                        let mut textures = Vec::with_capacity(frames.len());
+                        let mut cumulative = Vec::with_capacity(frames.len());
+                        let mut max_w = 0u32;
+                        let mut max_h = 0u32;
+                        let mut acc = 0u64;
+                        for (img, delay) in frames {
+                            max_w = max_w.max(img.width);
+                            max_h = max_h.max(img.height);
+                            let tex = self
+                                .texture_renderer
+                                .upload(&self.device, &self.queue, &img);
+                            textures.push(tex);
+                            acc = acc.saturating_add(delay);
+                            cumulative.push(acc);
+                        }
+                        let anim = TabAnimation {
+                            frames: textures,
+                            width: max_w,
+                            height: max_h,
+                            cumulative,
+                            total_ms,
+                            started_at: Instant::now(),
+                        };
+                        (None, Some(anim))
+                    }
+                };
+                let mut tabs: Vec<&mut Tab> = Vec::new();
+                self.root
+                    .as_mut()
+                    .expect("pane tree present")
+                    .all_tabs_mut(&mut tabs);
+                if let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) {
+                    tab.image = still;
+                    tab.animation = animation;
+                    tab.last_module_body.clear();
+                    if let Some(sess) = tab.module_session.as_mut() {
+                        sess.body.clear();
+                    }
+                    tab.content_buffer = None;
+                    tab.module_scroll_y = 0.0;
                     self.window.request_redraw();
                 }
             }
@@ -4041,10 +4222,29 @@ impl Renderer {
     /// Earliest pending deadline the main loop should wake on
     /// (`ControlFlow::WaitUntil`). `None` = sleep until the next real event.
     pub fn next_wakeup(&self) -> Option<Instant> {
+        // Collect deadlines from every tab's animation state (GIFs in
+        // any visible — or hidden — pane). Walking every tab is fine:
+        // animations are rare, and the alternative (tracking the
+        // earliest globally) adds bookkeeping for negligible savings.
+        let mut earliest_anim: Option<Instant> = None;
+        if let Some(root) = self.root.as_ref() {
+            let mut tabs: Vec<&Tab> = Vec::new();
+            root.all_tabs(&mut tabs);
+            for tab in tabs {
+                if let Some(anim) = tab.animation.as_ref() {
+                    if let Some(when) = anim.next_wakeup() {
+                        earliest_anim = Some(
+                            earliest_anim.map(|e| e.min(when)).unwrap_or(when),
+                        );
+                    }
+                }
+            }
+        }
         [
             self.bell_flash_until,
             self.next_blink_deadline,
             self.next_autoscroll_deadline,
+            earliest_anim,
         ]
         .into_iter()
         .flatten()
@@ -4439,15 +4639,30 @@ impl Renderer {
                         .as_ref()
                         .unwrap_or(&tab_ref.text_buffer),
                 };
-                content_areas.push(TextArea {
-                    buffer: body_buffer,
-                    left: d.text_left,
-                    top: d.text_top,
-                    scale: 1.0,
-                    bounds: d.bounds,
-                    default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
-                    custom_glyphs: &[],
-                });
+                // Data modules scroll their body via `module_scroll_y`.
+                // Bounds clip the over-flow so scrolled-out content
+                // doesn't leak past the pane.
+                let is_data_module = matches!(tab_ref.kind, TabContentKind::Module(_))
+                    && tab_ref.module_pty.is_none();
+                let scroll_y = if is_data_module { tab_ref.module_scroll_y } else { 0.0 };
+                // When a data-module pane is showing an image (still or
+                // animated), suppress the text body — otherwise the
+                // placeholder body bleeds through behind the image.
+                // Shells with kitty images keep both (text + overlaid
+                // image) as before.
+                let suppress_text = is_data_module
+                    && (tab_ref.image.is_some() || tab_ref.animation.is_some());
+                if !suppress_text {
+                    content_areas.push(TextArea {
+                        buffer: body_buffer,
+                        left: d.text_left,
+                        top: d.text_top - scroll_y,
+                        scale: 1.0,
+                        bounds: d.bounds,
+                        default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+                        custom_glyphs: &[],
+                    });
+                }
                 // Kind selector label — leftmost in the bar. Looked up
                 // by the kind's stable key. If a module was unregistered
                 // since the tab last switched to it, the buffer is gone
@@ -4498,22 +4713,48 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
-                // Pane's image (v1): top-left of content area, scaled to
-                // fit (no upscaling). Clone is cheap — wgpu BindGroup is
-                // ref-counted internally.
-                if let Some(img) = tab_ref.image.as_ref() {
+                // Pane's image. Scaled to fit the content area (never
+                // upscaled). Data-module panes (Preview, etc.) center
+                // the image — that's the natural "viewer" framing.
+                // Shell panes keep the top-left placement that kitty
+                // graphics emitters expect for inline display. Clone
+                // is cheap — wgpu BindGroup is ref-counted internally.
+                //
+                // For animated images we pick the current frame here
+                // and scale against the animation's envelope (max
+                // width/height across frames) so the layout doesn't
+                // wobble between frames of different sizes.
+                let img_info: Option<(&TextureImage, u32, u32)> =
+                    if let Some(anim) = tab_ref.animation.as_ref() {
+                        Some((anim.current_frame(), anim.width, anim.height))
+                    } else if let Some(img) = tab_ref.image.as_ref() {
+                        Some((img, img.width, img.height))
+                    } else {
+                        None
+                    };
+                if let Some((tex, nw_u, nh_u)) = img_info {
                     let ox = pane_rect.x + pad.left;
                     let oy = pane_rect.y + self.tab_bar_height + pad.top;
                     let max_w = (pane_rect.x + pane_rect.w - ox - pad.right).max(1.0);
                     let max_h =
                         (pane_rect.y + pane_rect.h - oy - pad.bottom).max(1.0);
-                    let nw = img.width as f32;
-                    let nh = img.height as f32;
+                    let nw = nw_u as f32;
+                    let nh = nh_u as f32;
                     let scale = (max_w / nw).min(max_h / nh).min(1.0);
+                    let sw = nw * scale;
+                    let sh = nh * scale;
+                    let (x, y) = if is_data_module {
+                        (
+                            ox + (max_w - sw) * 0.5,
+                            oy + (max_h - sh) * 0.5,
+                        )
+                    } else {
+                        (ox, oy)
+                    };
                     texture_instances.push(TextureInstance {
-                        rect: [ox, oy, nw * scale, nh * scale],
+                        rect: [x, y, sw, sh],
                     });
-                    texture_bgs.push(img.bind_group().clone());
+                    texture_bgs.push(tex.bind_group().clone());
                 }
                 // Block IDs (`Bn`) in the pane's left-gutter strip.
                 // Coords are session-absolute (`abs = history + cursor.line`
@@ -4831,11 +5072,12 @@ impl Renderer {
                     &mut self.font_system,
                     Metrics::new(font_size, line_height),
                 );
-                buf.set_size(
-                    &mut self.font_system,
-                    Some(content_w),
-                    Some(content_h),
-                );
+                // Width-only constraint — glyphon wraps to pane
+                // width but lays out every line. Height = None
+                // means long bodies don't get truncated; the render
+                // path applies `module_scroll_y` + clipping bounds
+                // to show only what fits.
+                buf.set_size(&mut self.font_system, Some(content_w), None);
                 let attrs = Attrs::new().family(font_family(&family));
                 buf.set_text(
                     &mut self.font_system,
@@ -4847,12 +5089,20 @@ impl Renderer {
                 buf.shape_until_scroll(&mut self.font_system, false);
                 tab.content_buffer = Some(buf);
             } else if let Some(buf) = tab.content_buffer.as_mut() {
-                // Keep the buffer sized to the current pane.
-                buf.set_size(
-                    &mut self.font_system,
-                    Some(content_w),
-                    Some(content_h),
-                );
+                // Keep the buffer width matched to the current pane.
+                // Height stays unbounded so all lines are laid out
+                // for scrolling.
+                buf.set_size(&mut self.font_system, Some(content_w), None);
+            }
+            // Clamp module_scroll_y so a pane shrink or a shorter
+            // body can't leave us scrolled past the end. The render
+            // pass subtracts this from text_top to scroll content.
+            if let Some(buf) = tab.content_buffer.as_ref() {
+                let total_h = buf.layout_runs().count() as f32 * line_height;
+                let max_scroll = (total_h - content_h).max(0.0);
+                if tab.module_scroll_y > max_scroll {
+                    tab.module_scroll_y = max_scroll;
+                }
             }
         }
 

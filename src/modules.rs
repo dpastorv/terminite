@@ -231,8 +231,14 @@ fn strip_quoted(s: &str) -> Option<String> {
 //     {"kind":"close"}
 //
 //   module → terminite
-//     {"kind":"set_text", "body":"…"}
-//     {"kind":"log",      "message":"…"}
+//     {"kind":"set_text",  "body":"…"}
+//     {"kind":"set_image", "path":"/abs/file.png"}
+//     {"kind":"publish_focus", "path":"/abs/file"}
+//     {"kind":"log",       "message":"…"}
+//
+// set_text and set_image are exclusive — the most recent of the two
+// wins on screen, and switching either clears the other so panes
+// don't end up with a stale half of the previous content showing.
 
 /// Message a module sends to terminite. Reader thread parses each line
 /// of the module's stdout into one of these and forwards via
@@ -240,8 +246,14 @@ fn strip_quoted(s: &str) -> Option<String> {
 #[derive(Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ModuleMessage {
-    /// Replace the rendered body with this text.
+    /// Replace the rendered body with this text. Clears any image
+    /// the module had previously asked us to show.
     SetText { body: String },
+    /// Render the file at `path` as the pane's content. PNG only in
+    /// v1; the host returns a `log` line if decode fails so the
+    /// module can recover (typically by sending `set_text` with a
+    /// fallback message). Clears any prior text body.
+    SetImage { path: String },
     /// Module-side info log; lands in terminite's regular log.
     Log { message: String },
     /// Announce a file/directory the user just focused. terminite
