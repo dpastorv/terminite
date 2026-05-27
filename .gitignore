@@ -1,6 +1,9 @@
 # Rust build output
 /target
 
+# macOS .app bundle output from tools/build-app.sh
+/dist
+
 # macOS
 .DS_Store
 

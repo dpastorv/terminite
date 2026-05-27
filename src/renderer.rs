@@ -2243,6 +2243,15 @@ impl Renderer {
         if idx >= pane.tabs.len() || idx == pane.active_tab {
             return;
         }
+        // Drop the prior tab's selection + drag state — same reason
+        // we clear them on a pane switch. Otherwise a stale highlight
+        // (and worse, a silent "your Cmd+C did nothing, clipboard
+        // kept tab N's text") survives the switch.
+        {
+            let prior = pane.active_tab_mut();
+            prior.selection = None;
+            prior.dragging = false;
+        }
         pane.active_tab = idx;
         self.sync_active_grid();
         self.window.set_title(&self.active_tab_ref().title);

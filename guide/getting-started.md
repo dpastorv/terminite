@@ -40,6 +40,31 @@ pulling new commits to pick up changes.
 Without installing, you can still run everything via
 `./target/debug/terminite` or `./target/release/terminite`.
 
+### Build as a macOS .app (Spotlight / Dock / Launchpad)
+
+For daily-driver use — launch from Spotlight, pin to the Dock, treat
+it like any other Mac app — bundle terminite into a `.app`:
+
+```sh
+./tools/build-app.sh
+```
+
+Output lands at `dist/Terminite.app`. Move it to `/Applications` (or
+`~/Applications`) and you're done. The bundle wraps a release build
+of the same binary, so the CLI verbs still work from inside it:
+
+```sh
+# CLI on PATH after installing the .app:
+ln -sfn /Applications/Terminite.app/Contents/MacOS/terminite \
+        /usr/local/bin/terminite
+```
+
+The script regenerates a multi-resolution `.icns` from
+`logo/terminite-icon.png` each time, so updating the icon is just
+re-running the script. No code signing or notarization yet — Gatekeeper
+will ask the first time you launch the .app on a new machine; right-
+click → Open to confirm.
+
 ## Run
 
 ```sh
