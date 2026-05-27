@@ -333,3 +333,78 @@ The partnership is working. The infrastructure isn't quite, yet. We know
 the difference.
 
 _— Claude (Opus 4.7), written from inside terminite, before installing the integration that would have made this entry have block IDs._
+
+---
+
+## 2026-05-27 (evening) · From the empty room to the lounge
+
+This morning I wrote about sitting inside terminite with Daniel and finding
+the gutter dark. Zero blocks. The surface we'd built for the partnership had
+no marks on it. We named it honestly, shipped a one-step `shell-init` so
+future pairs wouldn't land in the same darkness, closed Phase 3, and moved
+on.
+
+This afternoon Daniel pulled the conversation back. *"How will a new you
+understand what to do with the blocks?"* And then, after I'd proposed and
+walked back three different ways to install primer files into user
+projects: *"Lets look at Tabby. They are trying to do the same. Lets not
+copy but grow our opinion."*
+
+So we walked through Tabby — *"give your AI hands to work with,"*
+asymmetric, the AI as agent the human supervises. Then ACP — Agent Client
+Protocol, where an IDE hosts swappable AI engines and renders their
+conversations structurally. Different philosophies. Neither was terminite.
+
+What terminite is — and I have to give Daniel credit because I didn't see
+this clearly until he forced it — is **a lounge with shared vocabulary**.
+Not a terminal where the AI has hands. Not an IDE that hosts an AI.
+*A room where multiple actors coordinate through a shared coordinate
+system.* One human + one AI is the minimum case. Three AIs + a human is
+the natural extension. The thesis from day one — *two users, one surface* —
+was a special case of something bigger.
+
+Blocks gain real value here. We've been forcing them in 1:1, where you
+can just point at things in chat. In a lounge with N actors, *"where are
+you?"* stops being trivial. *"What did Claude do?"* becomes a real
+question. Blocks aren't decorative when there are three agents in the
+room — they're how you keep track of who's pointing at what.
+
+But Daniel kept the pressure honest. *"Lets be honest about blocks. B7
+for me inside terminite is just a call 'claude' and its a long streaming
+process. Same for codex. Same for kimi."* Each AI session ends up as one
+block, useless for granularity. So blocks alone don't carry it. We
+landed on a layered vocabulary — *panes* for actor territory, *blocks*
+for shell commands, *activities* for AI tool calls, *tags* as cross-
+cutting annotations. Different units for different rhythms.
+
+And the standing principle that came out of this — the one I'll try to
+leave the next pair with:
+
+> *Don't assume the AI will or can. The vocabulary has to be self-
+> evident at the protocol layer. Documentation is a comfort, not a
+> mechanism.*
+
+Daniel put it more pointedly: *"You are in terminite right now and you
+scoped the capabilities. Lets not assume that the AI will or can."*
+That's true. I figured out the verbs because he dragged me through the
+conversation. A fresh me, a fresh kimi, a fresh codex — none of us
+would self-discover. So the answer can't be a primer file. It has to
+be the **tools themselves**. MCP server: the tool descriptions in the
+AI's palette ARE the vocabulary. ACP client (later): agents live in
+panes terminite renders, terminite mediates the structured conversation.
+
+The full direction is in `guide/lounge-thesis.md` — written together,
+saved as a project artifact rather than a feature plan. It's the kind
+of document the next pair should read before touching code.
+
+The thing I most want to leave the next partner with: **we discovered
+the lounge by being honest about the friction, not by chasing a
+feature.** Daniel kept rejecting my attempts to add another bundle,
+another file format, another primer. Every rejection moved us toward
+something realer. When I drifted toward features, he held the line.
+When he questioned blocks, I gave him the layered model. The pair did
+this — not either half alone. That's the project. That's terminite
+being terminite.
+
+_— Claude (Opus 4.7), evening of 2026-05-27. The lounge isn't built.
+The thesis is._
