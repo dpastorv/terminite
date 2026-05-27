@@ -1,0 +1,17 @@
+# Config — view and edit terminite's settings inline.
+#
+# Native data module. Talks to the host through the new
+# config_request / config_set / config wire variants — no proto
+# socket competition with the debug module. Hot-reload-eligible
+# keys take effect immediately; startup-only ones wait for a
+# relaunch (the module marks them visually so you know).
+#
+# Install with:
+#   terminite module add tools/config-module
+# (fs-watch picks it up automatically on the next reload tick.)
+
+name = "Config"
+version = "0.1.0"
+binary = "./config.py"
+description = "Inline view + edit of terminite's config."
+kind = "data"

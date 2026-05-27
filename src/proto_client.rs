@@ -71,6 +71,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "export" => Some(cmd_export(&args[1..])),
         "stats" => Some(cmd_stats()),
         "module" => Some(cmd_module(&args[1..])),
+        "shell-init" => Some(cmd_shell_init(&args[1..])),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -107,6 +108,11 @@ USAGE
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module
   terminite module reload            re-discover modules without relaunch
+  terminite shell-init [--shell S]   print shell integration snippet for
+                                     zsh or bash (default: $SHELL).
+                                     `eval \"$(terminite shell-init)\"`
+                                     in your rc, or pass --install to
+                                     append it idempotently for you.
   terminite help                     this message
 
 ENV
@@ -501,6 +507,196 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+// ── shell-init ────────────────────────────────────────────────────────────
+
+/// Markers terminite owns inside the user's rc. Repeat installs replace
+/// content between these two lines verbatim — never duplicates, never
+/// touches the user's other rc content.
+const SHELL_INIT_BEGIN: &str = "# >>> terminite shell integration >>>";
+const SHELL_INIT_END: &str = "# <<< terminite shell integration <<<";
+
+const ZSH_SNIPPET: &str = "\
+# OSC 133 marks so terminite can show your commands as blocks.
+preexec() { printf '\\e]133;C\\e\\\\' }
+precmd() {
+  local code=$?
+  printf '\\e]133;D;%d\\e\\\\' \"$code\"
+  printf '\\e]133;A\\e\\\\'
+}
+";
+
+const BASH_SNIPPET: &str = "\
+# OSC 133 marks so terminite can show your commands as blocks.
+__terminite_precmd() {
+  local code=$?
+  printf '\\e]133;D;%d\\e\\\\' \"$code\"
+  printf '\\e]133;A\\e\\\\'
+}
+__terminite_preexec() { printf '\\e]133;C\\e\\\\'; }
+trap '__terminite_preexec' DEBUG
+case \"$PROMPT_COMMAND\" in
+  *__terminite_precmd*) ;;
+  *) PROMPT_COMMAND=\"__terminite_precmd${PROMPT_COMMAND:+; $PROMPT_COMMAND}\" ;;
+esac
+";
+
+fn detect_shell() -> &'static str {
+    if let Ok(s) = std::env::var("SHELL") {
+        if s.contains("zsh") { return "zsh"; }
+        if s.contains("bash") { return "bash"; }
+    }
+    "zsh"
+}
+
+fn snippet_for(shell: &str) -> Option<&'static str> {
+    match shell {
+        "zsh" => Some(ZSH_SNIPPET),
+        "bash" => Some(BASH_SNIPPET),
+        _ => None,
+    }
+}
+
+fn rc_path_for(shell: &str) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let home = std::path::PathBuf::from(home);
+    match shell {
+        "zsh" => {
+            if let Ok(z) = std::env::var("ZDOTDIR") {
+                let mut p = std::path::PathBuf::from(z);
+                p.push(".zshrc");
+                return Some(p);
+            }
+            let mut p = home.clone();
+            p.push(".zshrc");
+            Some(p)
+        }
+        "bash" => {
+            // Prefer ~/.bashrc — it's what most users have. .bash_profile
+            // is login-only and won't run for interactive non-login shells.
+            let mut p = home.clone();
+            p.push(".bashrc");
+            Some(p)
+        }
+        _ => None,
+    }
+}
+
+fn cmd_shell_init(args: &[String]) -> ExitCode {
+    // Parse: [--shell zsh|bash] [--install]
+    let mut shell: Option<String> = None;
+    let mut install = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--shell" => {
+                if let Some(v) = args.get(i + 1) {
+                    shell = Some(v.clone());
+                    i += 2;
+                    continue;
+                }
+                eprintln!("terminite: --shell needs an argument");
+                return ExitCode::from(1);
+            }
+            "--install" => {
+                install = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("terminite: shell-init: unknown flag {other}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let shell = shell.unwrap_or_else(|| detect_shell().to_string());
+    let Some(snippet) = snippet_for(&shell) else {
+        eprintln!("terminite: shell-init: unsupported shell {shell} (zsh, bash)");
+        return ExitCode::from(1);
+    };
+
+    if !install {
+        // Default mode — print the snippet to stdout so callers can
+        // pipe it through `eval` from their rc.
+        print!("{snippet}");
+        return ExitCode::SUCCESS;
+    }
+
+    let Some(rc) = rc_path_for(&shell) else {
+        eprintln!("terminite: shell-init: can't resolve rc path");
+        return ExitCode::from(1);
+    };
+
+    // Read existing rc (or treat absent as empty). Replace any prior
+    // block between our markers; otherwise append. Cap the read so a
+    // pathological rc can't OOM the install — 1 MB is two orders of
+    // magnitude past any reasonable shell rc.
+    const MAX_RC_BYTES: u64 = 1024 * 1024;
+    let existing = match std::fs::metadata(&rc) {
+        Ok(m) if m.len() > MAX_RC_BYTES => {
+            eprintln!(
+                "terminite: shell-init: refusing to edit {} — file is {} bytes (> {} cap)",
+                rc.display(),
+                m.len(),
+                MAX_RC_BYTES,
+            );
+            return ExitCode::from(1);
+        }
+        _ => std::fs::read_to_string(&rc).unwrap_or_default(),
+    };
+    let block = format!("{SHELL_INIT_BEGIN}\n{snippet}{SHELL_INIT_END}\n");
+    let new_content = if let (Some(start), Some(end)) =
+        (existing.find(SHELL_INIT_BEGIN), existing.find(SHELL_INIT_END))
+    {
+        // Replace between markers, keeping the rest of the file intact.
+        let end = end + SHELL_INIT_END.len();
+        let mut out = String::with_capacity(existing.len());
+        out.push_str(&existing[..start]);
+        out.push_str(&block.trim_end_matches('\n'));
+        // Skip a trailing newline if one was already after the END marker.
+        let rest = &existing[end..];
+        if !rest.starts_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(rest);
+        out
+    } else {
+        // Append. Leave a blank line before the block if the rc doesn't
+        // already end with one — readable diff against the user's file.
+        let mut out = existing.clone();
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            if !out.ends_with('\n') { out.push('\n'); }
+            out.push('\n');
+        }
+        out.push_str(&block);
+        out
+    };
+
+    if let Some(parent) = rc.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = rc.with_extension(format!(
+        "{}.terminite.tmp",
+        rc.extension()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    ));
+    if let Err(e) = std::fs::write(&tmp, &new_content) {
+        eprintln!("terminite: shell-init: write {} failed: {e}", tmp.display());
+        return ExitCode::from(1);
+    }
+    if let Err(e) = std::fs::rename(&tmp, &rc) {
+        eprintln!("terminite: shell-init: rename to {} failed: {e}", rc.display());
+        return ExitCode::from(1);
+    }
+    eprintln!(
+        "installed terminite shell integration → {}\n\
+         open a new shell (or run `source {}`) to activate it.\n\
+         after that, every command runs as a labeled block in the gutter.",
+        rc.display(),
+        rc.display(),
+    );
+    ExitCode::SUCCESS
 }
 
 fn one_shot(req: &str) -> ExitCode {

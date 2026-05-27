@@ -314,6 +314,22 @@ pub enum ModuleMessage {
     SetImage { path: String },
     /// Module-side info log; lands in terminite's regular log.
     Log { message: String },
+    /// Ask the host for the current config schema + values. Host
+    /// replies with a `config` event carrying the list of known
+    /// keys plus their current settings. Used by the Config module
+    /// to populate its view; other modules ignore.
+    ConfigRequest,
+    /// Update one config key. `value` matches the key's declared
+    /// kind (number for floats / ints, bool for booleans, string
+    /// for everything else). Host writes through `~/.config/
+    /// terminite/config.toml` via toml_edit (preserving formatting),
+    /// reloads the in-memory Config, applies hot-reload-eligible
+    /// fields, and then re-fires a `config` event so the module
+    /// re-renders with the new state.
+    ConfigSet {
+        name: String,
+        value: serde_json::Value,
+    },
     /// Announce a file/directory the user just focused. terminite
     /// remembers the path and broadcasts a `focus` event to every
     /// other module session so paired views (nav + preview) can
@@ -457,6 +473,13 @@ impl ModuleSession {
             r#"{{"kind":"click","line":{line},"col":{col},"count":{count}}}"#
         );
         let _ = self.input_tx.try_send(msg);
+    }
+
+    /// Deliver a fully-serialized config event JSON. The host
+    /// produces the payload (since it owns the schema + the live
+    /// Config); this just hands the bytes to the module's stdin.
+    pub fn send_config_event(&self, payload_json: &str) {
+        let _ = self.input_tx.try_send(payload_json.to_string());
     }
 }
 

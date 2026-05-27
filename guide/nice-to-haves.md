@@ -11,33 +11,30 @@ Required for the block model to populate from real prompts. Without it,
 the block gutter stays empty unless you fire marks manually via the
 `tools/blocks_demo.sh` script.
 
-**zsh** — add to `~/.zshrc`:
+terminite has an installer:
+
+```sh
+terminite shell-init --install            # auto-detects zsh / bash
+terminite shell-init --shell bash --install
+```
+
+It writes an idempotent block (between `# >>> terminite shell
+integration >>>` and `# <<<` markers) into `~/.zshrc` or `~/.bashrc`.
+Re-running replaces only the marked block; everything else in your rc
+is left alone.
+
+If you prefer to keep the integration out-of-tree, drive it from your
+rc instead:
 
 ```zsh
-preexec() { printf '\e]133;C\e\\' }
-precmd() {
-  local code=$?
-  printf '\e]133;D;%d\e\\' "$code"
-  printf '\e]133;A\e\\'
-}
+# ~/.zshrc
+eval "$(terminite shell-init)"
 ```
 
-**bash** — `PROMPT_COMMAND` analogue:
-
-```bash
-__terminite_preexec() { printf '\e]133;C\e\\'; }
-__terminite_precmd() {
-  local code=$?
-  printf '\e]133;D;%d\e\\' "$code"
-  printf '\e]133;A\e\\'
-}
-trap '__terminite_preexec' DEBUG
-PROMPT_COMMAND='__terminite_precmd'
-```
-
-After this, every command run in the shell auto-populates a block in
-terminite's gutter (`B1`, `B2`, …), and `terminite watch` streams
-`block_opened` / `block_closed` events the AI partner can subscribe to.
+After installation, open a new shell (or `source ~/.zshrc`) and every
+command becomes a block (`B1`, `B2`, …) in the gutter. `terminite watch`
+streams `block_opened` / `block_closed` events the AI partner can
+subscribe to.
 
 ## Recommended fonts
 

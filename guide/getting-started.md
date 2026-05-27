@@ -73,24 +73,51 @@ click back into a shell pane, the values apply. See
 inline docs (padding, gutter, line height, highlight, cursor blink,
 bell, scrollback).
 
-## Shell integration (recommended)
+## Shell integration (required for blocks)
 
 The block model populates from OSC 133 marks that your shell needs to
-emit. Without them, the gutter stays empty and the AI partner can't
-see structured blocks. **zsh**, add to `~/.zshrc`:
+emit. Without them the gutter stays empty and the AI partner can't see
+structured blocks. terminite ships an installer that writes the snippet
+into your shell's rc, idempotently:
 
-```zsh
-preexec() { printf '\e]133;C\e\\' }
-precmd() {
-  local code=$?
-  printf '\e]133;D;%d\e\\' "$code"
-  printf '\e]133;A\e\\'
-}
+```sh
+terminite shell-init --install        # detects $SHELL, writes ~/.zshrc or ~/.bashrc
+terminite shell-init --shell bash --install
 ```
 
-For **bash** + other shells, see [nice-to-haves.md](nice-to-haves.md).
-After this, every command run in the shell becomes a labeled block
-(`B1`, `B2`, …) in terminite's left gutter.
+Or if you prefer to drive it from your rc:
+
+```zsh
+# ~/.zshrc
+eval "$(terminite shell-init)"
+```
+
+Re-running `--install` is safe — it replaces only the marked block
+between `# >>> terminite shell integration >>>` and `# <<<` markers,
+leaving the rest of your rc untouched.
+
+After installing, open a new shell (or `source ~/.zshrc`) and every
+command becomes a labeled block (`B1`, `B2`, …) in terminite's left
+gutter.
+
+### A note on AI-driven sessions
+
+If you launch an interactive AI agent (`claude`, `aider`, an `ollama`
+chat) *inside* a shell, that agent runs as one long process. From the
+shell's point of view nothing has finished — there's no `precmd` to
+fire, so blocks won't appear for what happens during the AI's session.
+The whole session reads as one open block until you exit the agent.
+
+For granular block coordinates while you collaborate with an AI:
+
+- Keep a **shell pane** dedicated to your own commands (this is where
+  `B1`, `B2`, … appear and where the AI's `terminite cursor` lands).
+- Open the AI in its **own pane** — a separate split, not nested under
+  the shell. The two halves of the pair name the same blocks even if
+  the AI is running across the divider.
+
+A later phase will likely teach terminite to mark the AI's *turns* as
+their own kind of block. For now, the pane split is the workaround.
 
 ## The CLI
 

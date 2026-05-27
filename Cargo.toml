@@ -27,6 +27,10 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 # triggers an auto-reload without the user running `terminite module
 # reload`. Default features include FSEvents on macOS.
 notify = "6"
+# Edit config.toml while preserving the user's comments, whitespace,
+# and key ordering. The schema-driven config module writes through
+# this so a `set` doesn't flatten the file's hand-tuned shape.
+toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "29.0.3"
