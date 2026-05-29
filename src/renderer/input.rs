@@ -748,3 +748,81 @@ impl Renderer {
         Some((col, row))
     }
 }
+
+// ── helpers moved from mod.rs ──────────────────────
+
+/// What kind of mouse event we're reporting. The button is needed for
+/// press/release; motion/wheel use a synthetic encoding.
+#[derive(Clone, Copy)]
+pub(super) enum MouseEvent {
+    Press(MouseButton),
+    Release(MouseButton),
+    Motion,
+    WheelUp,
+    WheelDown,
+}
+
+/// Encode a mouse event in the format the foreground app has asked for.
+/// SGR (1006) preferred; X10 used as fallback. Modifiers add the standard
+/// shift / alt / ctrl bits. Returns `None` if reporting isn't enabled.
+pub(super) fn encode_mouse_report(
+    mode: &ModeFlags,
+    event: MouseEvent,
+    modifiers: ModifiersState,
+    col: u32,
+    row: u32,
+) -> Option<Vec<u8>> {
+    if !mode.mouse_report_click && !mode.mouse_drag && !mode.mouse_motion {
+        return None;
+    }
+
+    // Base button code.
+    let (mut btn, is_release) = match event {
+        MouseEvent::Press(b) => (button_code(b)?, false),
+        MouseEvent::Release(b) => (button_code(b)?, true),
+        MouseEvent::Motion => (32, false),         // motion modifier on no button
+        MouseEvent::WheelUp => (64, false),
+        MouseEvent::WheelDown => (65, false),
+    };
+
+    if modifiers.shift_key() {
+        btn |= 4;
+    }
+    if modifiers.alt_key() {
+        btn |= 8;
+    }
+    if modifiers.control_key() {
+        btn |= 16;
+    }
+
+    if mode.sgr_mouse {
+        let suffix = if is_release { 'm' } else { 'M' };
+        Some(format!("\x1b[<{};{};{}{}", btn, col, row, suffix).into_bytes())
+    } else {
+        // X10: \e[M{btn+32}{col+32}{row+32}. Release uses button 3 (no info
+        // about which button was released).
+        let btn = if is_release { 3 } else { btn };
+        let clamp = |v: u32| (v.min(223)) as u8;
+        let mut out = Vec::with_capacity(6);
+        out.extend_from_slice(b"\x1b[M");
+        out.push((btn as u8).saturating_add(32));
+        out.push(clamp(col).saturating_add(32));
+        out.push(clamp(row).saturating_add(32));
+        Some(out)
+    }
+}
+
+pub(super) fn button_code(button: MouseButton) -> Option<u32> {
+    Some(match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+        _ => return None,
+    })
+}
+
+/// Line height as a multiple of font size — the pre-config ratio (36 at
+/// font size 28). Derives `line_height` from the configured `font_size`.
+pub(super) const LINE_H_RATIO: f32 = 36.0 / 28.0;
+
+

@@ -604,3 +604,108 @@ impl Renderer {
     }
 
 }
+
+// ── helpers moved from mod.rs ──────────────────────
+
+/// Build a small cosmic-text `Buffer` holding a tab title. Sized to the
+/// maximum tab width so titles never wrap; bounds at render-time clip to the
+/// actual tab area.
+/// Convert a live `PaneNode` into the persistable `LayoutNode` —
+/// snapshot all the data worth replaying, skip the live state
+/// (PTYs, buffers, undo stacks). Called by `persist_layout` on
+/// every structural change.
+pub(super) fn snapshot_node(node: &PaneNode) -> crate::layout::LayoutNode {
+    match node {
+        PaneNode::Leaf { pane, .. } => crate::layout::LayoutNode::Pane(snapshot_pane(pane)),
+        PaneNode::Split { dir, ratio, first, second } => crate::layout::LayoutNode::Split {
+            dir: match dir {
+                SplitDir::Vertical => crate::layout::LayoutSplitDir::Vertical,
+                SplitDir::Horizontal => crate::layout::LayoutSplitDir::Horizontal,
+            },
+            ratio: *ratio,
+            first: Box::new(snapshot_node(first)),
+            second: Box::new(snapshot_node(second)),
+        },
+    }
+}
+
+pub(super) fn snapshot_pane(pane: &Pane) -> crate::layout::LayoutPane {
+    crate::layout::LayoutPane {
+        tabs: pane.tabs.iter().map(snapshot_tab).collect(),
+        active_tab: pane.active_tab,
+        bg_idx: pane.bg_idx,
+        font_scale: pane.font_scale,
+    }
+}
+
+pub(super) fn snapshot_tab(tab: &Tab) -> crate::layout::LayoutTab {
+    let kind = match &tab.kind {
+        TabContentKind::Shell => crate::layout::LayoutTabKind::Shell,
+        TabContentKind::Welcome => crate::layout::LayoutTabKind::Welcome,
+        TabContentKind::Module(id) => crate::layout::LayoutTabKind::Module { id: id.clone() },
+        TabContentKind::Agent(name) => crate::layout::LayoutTabKind::Agent { name: name.clone() },
+    };
+    // Capture cwd from the shell side. TTY modules with a PTY also
+    // have a current_dir but it's the module process's cwd — not
+    // useful to restore. Only persist for plain shells.
+    let cwd = if matches!(tab.kind, TabContentKind::Shell) {
+        tab.live_term
+            .current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+    } else {
+        None
+    };
+    crate::layout::LayoutTab {
+        kind,
+        title: tab.title.clone(),
+        color_idx: tab.color_idx,
+        cwd,
+        focused_path: tab.last_focused_path.clone(),
+    }
+}
+
+/// Walk the tree to find the path (0/1 sequence) to the leaf with
+/// the given id. `Some(vec![])` if the target is the root leaf.
+/// `None` if the target doesn't exist in this tree.
+pub(super) fn path_to(node: &PaneNode, target: PaneId) -> Option<Vec<u8>> {
+    match node {
+        PaneNode::Leaf { id, .. } => {
+            if *id == target { Some(Vec::new()) } else { None }
+        }
+        PaneNode::Split { first, second, .. } => {
+            if let Some(mut p) = path_to(first, target) {
+                p.insert(0, 0);
+                Some(p)
+            } else if let Some(mut p) = path_to(second, target) {
+                p.insert(0, 1);
+                Some(p)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Resolve a path back to a PaneId in a freshly-built tree. Used
+/// during restore to figure out which leaf to make active.
+pub(super) fn pane_id_at_path(node: &PaneNode, path: &[u8]) -> Option<PaneId> {
+    if path.is_empty() {
+        if let PaneNode::Leaf { id, .. } = node {
+            return Some(*id);
+        }
+        return None;
+    }
+    if let PaneNode::Split { first, second, .. } = node {
+        let (head, rest) = (path[0], &path[1..]);
+        let child = if head == 0 { first.as_ref() } else { second.as_ref() };
+        return pane_id_at_path(child, rest);
+    }
+    None
+}
+
+/// Cap for ACP-driven fs reads — same shape as the editor's load
+/// limit. Keeps a hostile agent asking for /dev/zero from OOMing
+/// the host.
+pub(super) const ACP_FS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+

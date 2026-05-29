@@ -323,3 +323,70 @@ impl Renderer {
         }
     }
 }
+
+// ── helpers moved from mod.rs ──────────────────────
+
+pub(super) fn block_to_info(b: &crate::blocks::Block) -> crate::proto::BlockInfo {
+    crate::proto::BlockInfo {
+        id: b.id,
+        exit_code: b.exit_code,
+        prompt_line: b.prompt_line,
+        command_end_line: b.command_end_line,
+        output_start_line: b.output_start_line,
+        output_end_line: b.output_end_line,
+        tags: b.tags.clone(),
+    }
+}
+
+/// Extract the command text for a block, converting from session-absolute
+/// line coordinates back to alacritty's `Line` frame using the current
+/// `history_size`. Returns `None` if the block lacks the marks needed to
+/// bracket a range (e.g. `C` arrived without `A`).
+pub(super) fn block_command_text(tab: &Tab, block: &crate::blocks::Block) -> Option<String> {
+    let start_abs = block.prompt_line?;
+    // Prefer the explicit command-end mark; fall back to output-start.
+    let end_abs = block.command_end_line.or(block.output_start_line)?;
+    if end_abs < start_abs {
+        return None;
+    }
+    let (_, history) = tab.live_term.offset_and_history();
+    let start_line = start_abs - history as i32;
+    let end_line = end_abs - history as i32;
+    let max_col = tab.cols.saturating_sub(1);
+    Some(
+        tab.live_term
+            .extract_text((start_line, 0), (end_line, max_col)),
+    )
+}
+
+/// Extract the output text for a closed block. An open block returns
+/// `None` — the AI should wait for the `block_closed` event, then ask.
+///
+/// Shells fire `D` *after* the trailing newline of the last output line,
+/// so `output_end_line` is the row the cursor advanced to — which the
+/// next prompt then takes. Trim that off; otherwise every block's
+/// `.output` leaks the next block's `demo$ ...` line. Same trim Bundle 4
+/// applies to Cmd-click block selection.
+pub(super) fn block_output_text(tab: &Tab, block: &crate::blocks::Block) -> Option<String> {
+    let start_abs = block.output_start_line?;
+    let end_abs = block.output_end_line?;
+    if end_abs <= start_abs {
+        // C and D fired on the same row — the command produced no
+        // output rows before finishing. Empty string, not `None` —
+        // callers want to know "block has no output," not "data
+        // unavailable."
+        return Some(String::new());
+    }
+    let (_, history) = tab.live_term.offset_and_history();
+    let start_line = start_abs - history as i32;
+    // `end_abs - 1` excludes the row the cursor moved to after the last
+    // output newline — that row belongs to whatever comes next.
+    let end_line = (end_abs - 1) - history as i32;
+    let max_col = tab.cols.saturating_sub(1);
+    Some(
+        tab.live_term
+            .extract_text((start_line, 0), (end_line, max_col)),
+    )
+}
+
+

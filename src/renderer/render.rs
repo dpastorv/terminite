@@ -923,3 +923,158 @@ impl Renderer {
     }
 
 }
+
+// ── helpers moved from mod.rs ──────────────────────
+
+/// Body text for each non-shell content kind. Modules render a
+/// placeholder until step 2b lands process spawning + IPC.
+pub(super) fn non_shell_body(
+    kind: &TabContentKind,
+    registry: &crate::modules::Registry,
+) -> String {
+    match kind {
+        TabContentKind::Shell => String::new(),
+        TabContentKind::Welcome => "\
+welcome to terminite — a terminal for the human + AI pair.
+
+each pane runs a shell (Shell) or some other kind of inhabitant.
+the leftmost dropdown in this pane's tab bar switches between them.
+this pane is showing the Welcome inhabitant — read-only, static.
+pick Shell from the dropdown to drop into a real shell.
+
+two halves of the pair share one surface here. blocks (B1, B2, …)
+in the left gutter are command + output units the pair can name.
+the AI partner connects to ~/.terminite/socket and gets the same
+coordinates you do. see guide/getting-started.md for more."
+            .to_string(),
+        TabContentKind::Module(id) => match registry.find(id) {
+            Some(m) => format!(
+                "module: {}  (v{})\nbinary: {}\nwaiting for the module to send its first frame…",
+                m.name,
+                m.version,
+                m.binary.display(),
+            ),
+            None => format!(
+                "module '{id}' is no longer registered.\npick a different kind from the dropdown."
+            ),
+        },
+        TabContentKind::Agent(name) => format!(
+            "agent: {name}\n\nspawning agent process…\nwaiting for the initialize handshake."
+        ),
+    }
+}
+
+// ── Proto helpers ────────────────────────────────────────────────────────
+
+
+/// The cosmic-text font family for a config `font_family` string — empty
+/// means terminite's built-in monospace default.
+pub(super) fn font_family(name: &str) -> Family<'_> {
+    if name.is_empty() {
+        Family::Monospace
+    } else {
+        Family::Name(name)
+    }
+}
+
+/// Build a content `Buffer` for a pane — monospace, one-cell glyph advance,
+/// sized to the pane's pixel rect.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn make_content_buffer(
+    font_system: &mut FontSystem,
+    cell_advance: f32,
+    line_height: f32,
+    font_size: f32,
+    family: &str,
+    w: f32,
+    h: f32,
+) -> Buffer {
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    buf.set_size(font_system, Some(w.max(1.0)), Some(h.max(1.0)));
+    buf.set_monospace_width(font_system, Some(cell_advance));
+    buf.set_text(
+        font_system,
+        "",
+        &Attrs::new().family(font_family(family)),
+        Shaping::Advanced,
+        None,
+    );
+    buf.shape_until_scroll(font_system, false);
+    buf
+}
+
+/// Build a `Buffer` for modal-card text at a larger font size.
+pub(super) fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
+    let metrics = Metrics::new(MODAL_FONT_SIZE, MODAL_LINE_H);
+    let mut buf = Buffer::new(font_system, metrics);
+    buf.set_size(font_system, Some(MODAL_CARD_W), Some(MODAL_LINE_H * 3.0));
+    let attrs = Attrs::new().family(Family::Monospace);
+    buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+    buf.shape_until_scroll(font_system, false);
+    buf
+}
+
+
+pub(super) fn make_title_buffer(
+    font_system: &mut FontSystem,
+    title: &str,
+    font_size: f32,
+    line_h: f32,
+    max_w: f32,
+) -> Buffer {
+    let metrics = Metrics::new(font_size, line_h);
+    let mut buf = Buffer::new(font_system, metrics);
+    // The buffer is sized to twice the max tab width so long titles
+    // don't get pre-wrapped — the tab's `TextBounds` clips at display.
+    buf.set_size(font_system, Some(max_w * 2.0), Some(line_h));
+    let attrs = Attrs::new().family(Family::Monospace);
+    buf.set_text(font_system, title, &attrs, Shaping::Advanced, None);
+    buf.shape_until_scroll(font_system, false);
+    buf
+}
+
+
+pub(super) fn compute_grid_size(
+    physical_width: f32,
+    physical_height: f32,
+    cell_advance: f32,
+    line_height: f32,
+    pad: Padding,
+    tab_bar_height: f32,
+) -> (usize, usize) {
+    // Full window as a single pane: one tab-bar strip plus per-edge pads.
+    let available_w = (physical_width - pad.left - pad.right).max(cell_advance);
+    let available_h =
+        (physical_height - tab_bar_height - pad.top - pad.bottom).max(line_height);
+    let cols = ((available_w / cell_advance) as usize).clamp(2, MAX_GRID_COLS);
+    let rows = ((available_h / line_height) as usize).clamp(2, MAX_GRID_ROWS);
+    (cols, rows)
+}
+
+/// Measure the one-cell advance width of the configured font at the
+/// configured size, by shaping an `M` and reading its glyph advance.
+pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32, family: &str) -> f32 {
+    let line_height = font_size * LINE_H_RATIO;
+    let mut probe = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    probe.set_size(font_system, Some(1000.0), Some(line_height * 2.0));
+    probe.set_text(
+        font_system,
+        "M",
+        &Attrs::new().family(font_family(family)),
+        Shaping::Advanced,
+        None,
+    );
+    probe.shape_until_scroll(font_system, false);
+    probe
+        .layout_runs()
+        .next()
+        .and_then(|run| run.glyphs.first())
+        .map(|glyph| glyph.w)
+        .unwrap_or(font_size * 0.6)
+        // Floor it: a degenerate measurement must never explode the grid.
+        .max(2.0)
+}
+
+// ── Memory kill-switch ────────────────────────────────────────────────────
+
+

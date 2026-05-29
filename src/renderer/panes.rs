@@ -884,3 +884,122 @@ pub(super) const COLOR_PALETTE: &[(&str, [f32; 4])] = &[
 ];
 
 
+
+// ── helpers moved from mod.rs ──────────────────────
+
+/// Grid (cols, rows) that fits inside a pane's pixel rect. Each pane carves
+/// its own `self.tab_bar_height` strip off the top, then the per-edge padding.
+pub(super) fn pane_grid(
+    rect: PaneRect,
+    cell_advance: f32,
+    line_height: f32,
+    pad: Padding,
+    tab_bar_height: f32,
+) -> (usize, usize) {
+    let avail_w = (rect.w - pad.left - pad.right).max(cell_advance);
+    let avail_h =
+        (rect.h - tab_bar_height - pad.top - pad.bottom).max(line_height);
+    let cols = (avail_w / cell_advance).floor().max(1.0) as usize;
+    let rows = (avail_h / line_height).floor().max(1.0) as usize;
+    (cols.min(MAX_GRID_COLS), rows.min(MAX_GRID_ROWS))
+}
+
+/// Geometry of each tab inside a pane's tab bar: `(x_start, width, is_active)`.
+///
+/// Widths are per-tab dynamic: each tab's *ideal* width is its measured
+/// title width plus the chrome insets (label inset + close-glyph
+/// reservation), clamped to `[min_width, max_width]`. If the sum fits in
+/// the available bar, each tab gets exactly its ideal. If not, every
+/// tab shrinks proportionally; nothing drops below `min_width` even
+/// then. With enough tabs this can overflow — accept that, the user
+/// either closes some or lives with clipping.
+pub(super) fn pane_tab_layout(
+    rect: PaneRect,
+    title_widths: &[f32],
+    active: usize,
+    min_width: f32,
+    max_width: f32,
+    kind_selector_w: f32,
+) -> Vec<(f32, f32, bool)> {
+    let n = title_widths.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    // Reserve the left edge for the kind-selector dropdown (Blender-
+    // style area-type picker) and the top-right corner for the split
+    // handle.
+    let avail = (rect.w - SPLIT_HANDLE_SIZE - kind_selector_w).max(min_width);
+    let chrome = TAB_LABEL_INSET + TAB_CLOSE_WIDTH;
+    let ideal: Vec<f32> = title_widths
+        .iter()
+        .map(|w| (w + chrome).clamp(min_width, max_width))
+        .collect();
+    let total: f32 = ideal.iter().sum();
+    let widths: Vec<f32> = if total <= avail {
+        ideal
+    } else {
+        let factor = avail / total;
+        ideal.iter().map(|w| (w * factor).max(min_width)).collect()
+    };
+    let mut x = rect.x + kind_selector_w;
+    let mut out = Vec::with_capacity(n);
+    for (i, w) in widths.into_iter().enumerate() {
+        out.push((x, w, i == active));
+        x += w;
+    }
+    out
+}
+
+/// Render-shaped width of a chrome buffer's first line. Used to size
+/// tabs to their actual title text rather than equal share.
+pub(super) fn measure_title_width(buf: &Buffer) -> f32 {
+    buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0)
+}
+
+/// Walk the pane tree, emitting one rect per split divider gap.
+pub(super) fn collect_dividers(node: &PaneNode, rect: PaneRect, out: &mut Vec<RectInstance>) {
+    if let PaneNode::Split { dir, ratio, first, second } = node {
+        let (r1, r2) = split_rect(rect, *dir, *ratio);
+        let gap = match dir {
+            SplitDir::Vertical => [r1.x + r1.w, rect.y, DIVIDER_THICKNESS, rect.h],
+            SplitDir::Horizontal => [rect.x, r1.y + r1.h, rect.w, DIVIDER_THICKNESS],
+        };
+        out.push(RectInstance { rect: gap, color: DIVIDER_COLOR });
+        collect_dividers(first, r1, out);
+        collect_dividers(second, r2, out);
+    }
+}
+
+pub(super) fn split_rect(r: PaneRect, dir: SplitDir, ratio: f32) -> (PaneRect, PaneRect) {
+    let d = DIVIDER_THICKNESS;
+    match dir {
+        SplitDir::Vertical => {
+            let first_w = ((r.w - d) * ratio).max(0.0);
+            let second_w = (r.w - d - first_w).max(0.0);
+            (
+                PaneRect { x: r.x, y: r.y, w: first_w, h: r.h },
+                PaneRect {
+                    x: r.x + first_w + d,
+                    y: r.y,
+                    w: second_w,
+                    h: r.h,
+                },
+            )
+        }
+        SplitDir::Horizontal => {
+            let first_h = ((r.h - d) * ratio).max(0.0);
+            let second_h = (r.h - d - first_h).max(0.0);
+            (
+                PaneRect { x: r.x, y: r.y, w: r.w, h: first_h },
+                PaneRect {
+                    x: r.x,
+                    y: r.y + first_h + d,
+                    w: r.w,
+                    h: second_h,
+                },
+            )
+        }
+    }
+}
+
+

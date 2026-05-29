@@ -134,3 +134,135 @@ impl Renderer {
     }
 
 }
+
+// ── helpers moved from mod.rs ──────────────────────
+
+pub(super) fn read_text_for_agent(
+    path: &str,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| format!("stat {path}: {e}"))?;
+    if meta.len() > ACP_FS_MAX_BYTES {
+        return Err(format!(
+            "{path}: {} bytes > cap {}",
+            meta.len(),
+            ACP_FS_MAX_BYTES
+        ));
+    }
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut buf = String::with_capacity(meta.len() as usize);
+    f.read_to_string(&mut buf).map_err(|e| format!("read {path}: {e}"))?;
+    if line.is_none() && limit.is_none() {
+        return Ok(buf);
+    }
+    let start = line.unwrap_or(1).saturating_sub(1) as usize;
+    let mut out = String::new();
+    for (i, l) in buf.lines().enumerate().skip(start) {
+        if let Some(n) = limit {
+            if (i - start) as u32 >= n {
+                break;
+            }
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(l);
+    }
+    Ok(out)
+}
+
+pub(super) fn write_text_for_agent(path: &str, content: &str) -> Result<(), String> {
+    if content.len() as u64 > ACP_FS_MAX_BYTES {
+        return Err(format!(
+            "{path}: write payload {} bytes > cap {}",
+            content.len(),
+            ACP_FS_MAX_BYTES
+        ));
+    }
+    let path_buf = std::path::PathBuf::from(path);
+    if let Some(parent) = path_buf.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {e}"))?;
+    }
+    std::fs::write(&path_buf, content).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Render an ACP session's turn list as a plain-text body the
+/// existing non-shell content_buffer path can shape. Each turn gets
+/// a `─── role ───` divider; tool calls show inline with status;
+/// a trailing `> draft` line shows what the user is composing.
+pub(super) fn render_acp_body(session: &crate::acp::AcpSession) -> String {
+    use crate::acp::{ToolCallStatus, Turn};
+    let mut out = String::new();
+    let agent_label = "Agent";
+    for turn in &session.turns {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        match turn {
+            Turn::User { text } => {
+                out.push_str("─── You ───\n");
+                out.push_str(text);
+            }
+            Turn::Assistant { text, tool_calls, streaming } => {
+                let header = if *streaming {
+                    format!("─── {agent_label} (streaming…) ───")
+                } else {
+                    format!("─── {agent_label} ───")
+                };
+                out.push_str(&header);
+                out.push('\n');
+                if !text.is_empty() {
+                    out.push_str(text);
+                }
+                for tc in tool_calls {
+                    let marker = match tc.status {
+                        ToolCallStatus::Pending => "○",
+                        ToolCallStatus::InProgress => "◐",
+                        ToolCallStatus::Completed => "●",
+                        ToolCallStatus::Failed => "✗",
+                    };
+                    out.push_str(&format!(
+                        "\n\n  {marker} [{}] {}",
+                        tc.kind, tc.title
+                    ));
+                    if let Some(o) = &tc.output {
+                        for line in o.lines() {
+                            out.push_str("\n    ");
+                            out.push_str(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Pending permission prompt — inline.
+    if let Some(prompt) = &session.pending_permission {
+        out.push_str("\n\n─── Permission requested ───\n");
+        out.push_str(&prompt.title);
+        out.push('\n');
+        for (i, opt) in prompt.options.iter().enumerate() {
+            let key: &str = match opt.kind.as_str() {
+                "allow_once" => "a",
+                "allow_always" => "A",
+                "reject_once" => "r",
+                "reject_always" => "R",
+                _ => match i {
+                    0 => "1",
+                    1 => "2",
+                    2 => "3",
+                    _ => "4",
+                },
+            };
+            out.push_str(&format!("\n  [{key}] {}", opt.name));
+        }
+    }
+    // Composing draft at the bottom — what the user is typing.
+    out.push_str("\n\n> ");
+    out.push_str(&session.draft);
+    out.push('_'); // cursor marker
+    out
+}
+
+
