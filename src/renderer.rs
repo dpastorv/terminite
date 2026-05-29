@@ -266,6 +266,11 @@ struct Tab {
     /// shell-tab last_click pattern with body coordinates. Reset
     /// (or rolled over) by `dispatch_data_module_click`.
     last_module_click: Option<(Instant, u32, u32, u8)>,
+    /// Live ACP session when this tab is hosting an Agent (kind ==
+    /// Agent). Holds the subprocess, the turn list, and the
+    /// composing draft. None when the tab is a Shell / Welcome /
+    /// Module / TTY module.
+    acp_session: Option<crate::acp::AcpSession>,
 }
 
 /// Hard cap on a single `set_text` body. A 16 MB body is already past
@@ -335,12 +340,14 @@ impl TabAnimation {
 /// What a tab currently shows. `Shell` has a live PTY behind it;
 /// `Welcome` is a built-in static card; `Module(id)` is an
 /// externally-registered module (step 2a: placeholder render only;
-/// step 2b spawns the process and wires IPC).
+/// step 2b spawns the process and wires IPC); `Agent(name)` is an
+/// ACP-hosted AI agent rendered as a structured chat surface.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum TabContentKind {
     Shell,
     Welcome,
     Module(String),
+    Agent(String),
 }
 
 impl TabContentKind {
@@ -351,6 +358,7 @@ impl TabContentKind {
             TabContentKind::Shell => "shell",
             TabContentKind::Welcome => "welcome",
             TabContentKind::Module(id) => id.as_str(),
+            TabContentKind::Agent(name) => name.as_str(),
         }
     }
 }
@@ -403,6 +411,7 @@ impl Tab {
             module_highlights: None,
             last_focused_path: None,
             last_module_click: None,
+            acp_session: None,
         }
     }
 
@@ -925,6 +934,9 @@ coordinates you do. see guide/getting-started.md for more."
                 "module '{id}' is no longer registered.\npick a different kind from the dropdown."
             ),
         },
+        TabContentKind::Agent(name) => format!(
+            "agent: {name}\n\nspawning agent process…\nwaiting for the initialize handshake."
+        ),
     }
 }
 
@@ -1570,6 +1582,13 @@ impl Renderer {
         for m in modules.list() {
             add_label(&mut font_system, &m.id, &m.name);
         }
+        for preset in crate::acp::presets() {
+            add_label(
+                &mut font_system,
+                preset.display_name,
+                preset.display_name,
+            );
+        }
 
         let mut renderer = Self {
             instance,
@@ -1956,6 +1975,22 @@ impl Renderer {
                 }
             })
             .collect();
+        // ACP-speaking agent presets. Greyed out when the binary
+        // isn't on PATH so the user sees the menu shape without
+        // hitting a confusing "no binary" error mid-click.
+        for preset in crate::acp::presets() {
+            let kind = TabContentKind::Agent(preset.display_name.to_string());
+            let is_current = kind == current;
+            let installed = crate::acp::resolve_preset(preset).is_some();
+            let prefix = if is_current { "• " } else { "  " };
+            let suffix = if installed { "" } else { "  (not on PATH)" };
+            let label = format!("{prefix}Agent: {}{}", preset.display_name, suffix);
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, &label),
+                action: MenuAction::SetTabKind { pane: pid, kind },
+                enabled: installed,
+            });
+        }
         // Trailing "Open modules folder…" — reveals the install
         // directory in Finder so the user can drop a new module in
         // without touching the CLI. fs-watch picks up the drop and
@@ -3913,7 +3948,16 @@ impl Renderer {
     }
 
     /// Write bytes to the active tab's PTY (keyboard input path).
-    pub fn write_active(&self, bytes: Vec<u8>) {
+    pub fn write_active(&mut self, bytes: Vec<u8>) {
+        // Agent panes intercept input — keystrokes build the draft,
+        // Enter sends it as a session/prompt, Esc cancels, the
+        // permission keys (a/A/r/R) close a pending prompt.
+        let is_agent = matches!(self.active_tab_ref().kind, TabContentKind::Agent(_))
+            && self.active_tab_ref().acp_session.is_some();
+        if is_agent {
+            self.write_to_agent(&bytes);
+            return;
+        }
         let tab = self.active_tab_ref();
         match &tab.kind {
             TabContentKind::Module(_) => {
@@ -3929,6 +3973,64 @@ impl Renderer {
             }
             _ => tab.live_term.write(bytes),
         }
+    }
+
+    fn write_to_agent(&mut self, bytes: &[u8]) {
+        let Some(session) = self.active_tab_mut().acp_session.as_mut() else {
+            return;
+        };
+        // Convert the byte input — likely one keystroke — into a
+        // single decision: extend draft, send draft, cancel, or
+        // resolve a pending permission prompt.
+        let s = std::str::from_utf8(bytes).unwrap_or("");
+        // Permission keys first — when a prompt is pending, the
+        // keyboard is dedicated to picking an option.
+        if let Some(prompt) = session.pending_permission.clone() {
+            let pick: Option<&str> = match s {
+                "a" => Some("allow_once"),
+                "A" => Some("allow_always"),
+                "r" => Some("reject_once"),
+                "R" => Some("reject_always"),
+                _ => None,
+            };
+            if let Some(kind) = pick {
+                if let Some(opt) = prompt.options.iter().find(|o| o.kind == kind) {
+                    let opt_id = opt.option_id.clone();
+                    let req_id = prompt.request_id.clone();
+                    session.respond_permission(req_id, &opt_id);
+                    self.window.request_redraw();
+                    return;
+                }
+            }
+            // Not a permission key — fall through to draft editing.
+        }
+        // Esc → cancel the in-flight prompt and clear the draft.
+        if s == "\x1b" {
+            session.draft.clear();
+            session.cancel();
+            self.window.request_redraw();
+            return;
+        }
+        // Enter (CR) → send prompt.
+        if s == "\r" || s == "\n" {
+            session.send_prompt();
+            self.window.request_redraw();
+            return;
+        }
+        // Backspace.
+        if s == "\x7f" || s == "\u{8}" {
+            session.draft.pop();
+            self.window.request_redraw();
+            return;
+        }
+        // Printable text + tab.
+        if s.chars().all(|c| !c.is_control() || c == '\t') && !s.is_empty() {
+            session.draft.push_str(s);
+            self.window.request_redraw();
+        }
+        // Anything else (control sequences for arrows / function keys)
+        // ignored for v1; the agent doesn't have a cursor in its
+        // composer yet, so they have nowhere meaningful to go.
     }
 
     /// Switch a pane's active tab to a different content kind. Spawns
@@ -3965,6 +4067,7 @@ impl Renderer {
         // PTY and joins the IO threads via Drop.
         tab.module_session = None;
         tab.module_pty = None;
+        tab.acp_session = None;
         tab.last_module_body.clear();
         tab.kind = kind.clone();
         tab.content_buffer = None;
@@ -3987,6 +4090,38 @@ impl Renderer {
         tab.image = None;
         tab.animation = None;
         tab.last_focused_path = None;
+
+        // Agent kind — spawn an ACP-speaking agent subprocess via
+        // the new acp::AcpSession. The session fires the initialize
+        // handshake immediately; the SessionCreated event triggers
+        // session/new from handle_acp_event.
+        if let TabContentKind::Agent(name) = &kind {
+            let preset = crate::acp::presets()
+                .iter()
+                .find(|p| p.display_name == name);
+            if let Some(preset) = preset {
+                if let Some(binary) = crate::acp::resolve_preset(preset) {
+                    let args: Vec<String> = preset
+                        .default_args
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    tab.acp_session = crate::acp::AcpSession::spawn(
+                        &binary,
+                        &args,
+                        tab_id,
+                        proxy.clone(),
+                        prior_cwd.as_deref(),
+                    );
+                } else {
+                    crate::logging::warn(&format!(
+                        "acp: no binary for preset `{name}` found on PATH"
+                    ));
+                }
+            } else {
+                crate::logging::warn(&format!("acp: unknown preset `{name}`"));
+            }
+        }
 
         if let Some(manifest) = manifest {
             match manifest.kind {
@@ -4148,6 +4283,124 @@ impl Renderer {
 
     /// fs-watch fired — re-discover modules. Coalesced upstream so
     /// this only runs once per real change.
+    /// Route one ACP event from a hosted agent in `tab_id` into that
+    /// tab's session state, then ask for a redraw. The reader thread
+    /// dispatches one event per inbound JSON-RPC frame; here we
+    /// mutate `Turn`s and respond to fs callbacks.
+    pub fn handle_acp_event(&mut self, tab_id: TabId, event: crate::acp::AcpEvent) {
+        use crate::acp::AcpEvent;
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root
+            .as_mut()
+            .expect("pane tree present")
+            .all_tabs_mut(&mut tabs);
+        let Some(tab) = tabs.into_iter().find(|t| t.id == tab_id) else {
+            return;
+        };
+        let Some(session) = tab.acp_session.as_mut() else {
+            return;
+        };
+        match event {
+            AcpEvent::Initialized { agent_name, agent_version } => {
+                crate::logging::info(&format!(
+                    "acp tab {}: initialized ({agent_name}{})",
+                    tab_id.0,
+                    agent_version
+                        .as_deref()
+                        .map(|v| format!(" v{v}"))
+                        .unwrap_or_default()
+                ));
+                // Open a session in the project root by default.
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "/".to_string());
+                session.send_new_session(&cwd);
+            }
+            AcpEvent::SessionCreated { session_id } => {
+                crate::logging::info(&format!(
+                    "acp tab {}: session {session_id}",
+                    tab_id.0
+                ));
+                session.session_id = Some(session_id);
+            }
+            AcpEvent::UserMessageChunk(_) => {
+                // We already pushed the user turn locally on send;
+                // ignore the agent's echo to avoid duplicates.
+            }
+            AcpEvent::AgentMessageChunk(text) => {
+                if let Some(turn) = session.turns.last_mut() {
+                    if let crate::acp::Turn::Assistant { text: buf, streaming, .. } = turn {
+                        buf.push_str(&text);
+                        *streaming = true;
+                    }
+                }
+            }
+            AcpEvent::ToolCallStarted { id, title, kind } => {
+                if let Some(crate::acp::Turn::Assistant { tool_calls, .. }) =
+                    session.turns.last_mut()
+                {
+                    tool_calls.push(crate::acp::ToolCall {
+                        id,
+                        title,
+                        kind,
+                        status: crate::acp::ToolCallStatus::Pending,
+                        output: None,
+                    });
+                }
+            }
+            AcpEvent::ToolCallUpdated { id, status, output } => {
+                if let Some(crate::acp::Turn::Assistant { tool_calls, .. }) =
+                    session.turns.last_mut()
+                {
+                    if let Some(tc) = tool_calls.iter_mut().find(|t| t.id == id) {
+                        tc.status = status;
+                        if let Some(o) = output {
+                            tc.output = Some(o);
+                        }
+                    }
+                }
+            }
+            AcpEvent::PermissionRequest { request_id, tool_call_title, options } => {
+                session.pending_permission = Some(crate::acp::PermissionPrompt {
+                    request_id,
+                    title: tool_call_title,
+                    options,
+                });
+            }
+            AcpEvent::FsReadRequest { request_id, path, line, limit } => {
+                let result = read_text_for_agent(&path, line, limit);
+                session.respond_fs_read(request_id, result);
+            }
+            AcpEvent::FsWriteRequest { request_id, path, content } => {
+                // v1: defer to a future permission UI by writing
+                // straight through. Real permission gating happens
+                // when we add the inline modal — until then the
+                // safer move would be to deny by default, but that
+                // makes any agent unusable. Tracked as a follow-up.
+                let result = write_text_for_agent(&path, &content);
+                session.respond_fs_write(request_id, result);
+            }
+            AcpEvent::ProtocolError(message) => {
+                crate::logging::warn(&format!("acp tab {}: {message}", tab_id.0));
+            }
+            AcpEvent::Stderr(_) => {} // logged in the reader thread already
+            AcpEvent::Shutdown => {
+                crate::logging::info(&format!("acp tab {}: shutdown", tab_id.0));
+                session.awaiting_response = false;
+                if let Some(crate::acp::Turn::Assistant { streaming, .. }) =
+                    session.turns.last_mut()
+                {
+                    *streaming = false;
+                }
+            }
+        }
+        // Force content buffer rebuild on next render so the new
+        // turn / chunk / tool-call status shows up.
+        tab.content_buffer = None;
+        self.window.request_redraw();
+    }
+
     pub fn handle_modules_changed(&mut self) {
         crate::logging::info("modules_watch: reloading registry");
         self.reload_modules();
@@ -4178,6 +4431,12 @@ impl Renderer {
         next.insert("welcome".into(), label(&mut self.font_system, "Welcome"));
         for m in self.modules.list() {
             next.insert(m.id.clone(), label(&mut self.font_system, &m.name));
+        }
+        for preset in crate::acp::presets() {
+            next.insert(
+                preset.display_name.into(),
+                label(&mut self.font_system, preset.display_name),
+            );
         }
         self.kind_label_buffers = next;
         self.window.request_redraw();
@@ -4415,6 +4674,9 @@ impl Renderer {
                         crate::layout::LayoutTabKind::Welcome => TabContentKind::Welcome,
                         crate::layout::LayoutTabKind::Module { id } => {
                             TabContentKind::Module(id.clone())
+                        }
+                        crate::layout::LayoutTabKind::Agent { name } => {
+                            TabContentKind::Agent(name.clone())
                         }
                     };
                     let cwd = tab_layout
@@ -5822,16 +6084,24 @@ impl Renderer {
 
         // Build / refresh content_buffer if needed. For modules,
         // prefer the live session's body (what the module asked us
-        // to render); fall back to the placeholder while waiting.
+        // to render); for Agent panes, render the ACP turn list;
+        // fall back to the kind's static placeholder.
         let body = {
-            let session_body = self
+            let tab_opt = self
                 .root
                 .as_ref()
                 .and_then(|n| n.find(pid))
-                .and_then(|p| p.active_tab_ref().module_session.as_ref())
+                .map(|p| p.active_tab_ref());
+            let acp_body = tab_opt
+                .and_then(|t| t.acp_session.as_ref())
+                .map(render_acp_body);
+            let session_body = tab_opt
+                .and_then(|t| t.module_session.as_ref())
                 .map(|s| s.body.clone())
                 .filter(|s| !s.is_empty());
-            session_body.unwrap_or_else(|| non_shell_body(&kind, &self.modules))
+            acp_body
+                .or(session_body)
+                .unwrap_or_else(|| non_shell_body(&kind, &self.modules))
         };
         // Gutter width — content shifts right by this when the
         // active module supplied gutter labels (Editor's line
@@ -6671,6 +6941,7 @@ fn snapshot_tab(tab: &Tab) -> crate::layout::LayoutTab {
         TabContentKind::Shell => crate::layout::LayoutTabKind::Shell,
         TabContentKind::Welcome => crate::layout::LayoutTabKind::Welcome,
         TabContentKind::Module(id) => crate::layout::LayoutTabKind::Module { id: id.clone() },
+        TabContentKind::Agent(name) => crate::layout::LayoutTabKind::Agent { name: name.clone() },
     };
     // Capture cwd from the shell side. TTY modules with a PTY also
     // have a current_dir but it's the module process's cwd — not
@@ -6728,6 +6999,139 @@ fn pane_id_at_path(node: &PaneNode, path: &[u8]) -> Option<PaneId> {
         return pane_id_at_path(child, rest);
     }
     None
+}
+
+/// Cap for ACP-driven fs reads — same shape as the editor's load
+/// limit. Keeps a hostile agent asking for /dev/zero from OOMing
+/// the host.
+const ACP_FS_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_text_for_agent(
+    path: &str,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| format!("stat {path}: {e}"))?;
+    if meta.len() > ACP_FS_MAX_BYTES {
+        return Err(format!(
+            "{path}: {} bytes > cap {}",
+            meta.len(),
+            ACP_FS_MAX_BYTES
+        ));
+    }
+    let mut f = std::fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+    let mut buf = String::with_capacity(meta.len() as usize);
+    f.read_to_string(&mut buf).map_err(|e| format!("read {path}: {e}"))?;
+    if line.is_none() && limit.is_none() {
+        return Ok(buf);
+    }
+    let start = line.unwrap_or(1).saturating_sub(1) as usize;
+    let mut out = String::new();
+    for (i, l) in buf.lines().enumerate().skip(start) {
+        if let Some(n) = limit {
+            if (i - start) as u32 >= n {
+                break;
+            }
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(l);
+    }
+    Ok(out)
+}
+
+fn write_text_for_agent(path: &str, content: &str) -> Result<(), String> {
+    if content.len() as u64 > ACP_FS_MAX_BYTES {
+        return Err(format!(
+            "{path}: write payload {} bytes > cap {}",
+            content.len(),
+            ACP_FS_MAX_BYTES
+        ));
+    }
+    let path_buf = std::path::PathBuf::from(path);
+    if let Some(parent) = path_buf.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent: {e}"))?;
+    }
+    std::fs::write(&path_buf, content).map_err(|e| format!("write {path}: {e}"))
+}
+
+/// Render an ACP session's turn list as a plain-text body the
+/// existing non-shell content_buffer path can shape. Each turn gets
+/// a `─── role ───` divider; tool calls show inline with status;
+/// a trailing `> draft` line shows what the user is composing.
+fn render_acp_body(session: &crate::acp::AcpSession) -> String {
+    use crate::acp::{ToolCallStatus, Turn};
+    let mut out = String::new();
+    let agent_label = "Agent";
+    for turn in &session.turns {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        match turn {
+            Turn::User { text } => {
+                out.push_str("─── You ───\n");
+                out.push_str(text);
+            }
+            Turn::Assistant { text, tool_calls, streaming } => {
+                let header = if *streaming {
+                    format!("─── {agent_label} (streaming…) ───")
+                } else {
+                    format!("─── {agent_label} ───")
+                };
+                out.push_str(&header);
+                out.push('\n');
+                if !text.is_empty() {
+                    out.push_str(text);
+                }
+                for tc in tool_calls {
+                    let marker = match tc.status {
+                        ToolCallStatus::Pending => "○",
+                        ToolCallStatus::InProgress => "◐",
+                        ToolCallStatus::Completed => "●",
+                        ToolCallStatus::Failed => "✗",
+                    };
+                    out.push_str(&format!(
+                        "\n\n  {marker} [{}] {}",
+                        tc.kind, tc.title
+                    ));
+                    if let Some(o) = &tc.output {
+                        for line in o.lines() {
+                            out.push_str("\n    ");
+                            out.push_str(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Pending permission prompt — inline.
+    if let Some(prompt) = &session.pending_permission {
+        out.push_str("\n\n─── Permission requested ───\n");
+        out.push_str(&prompt.title);
+        out.push('\n');
+        for (i, opt) in prompt.options.iter().enumerate() {
+            let key: &str = match opt.kind.as_str() {
+                "allow_once" => "a",
+                "allow_always" => "A",
+                "reject_once" => "r",
+                "reject_always" => "R",
+                _ => match i {
+                    0 => "1",
+                    1 => "2",
+                    2 => "3",
+                    _ => "4",
+                },
+            };
+            out.push_str(&format!("\n  [{key}] {}", opt.name));
+        }
+    }
+    // Composing draft at the bottom — what the user is typing.
+    out.push_str("\n\n> ");
+    out.push_str(&session.draft);
+    out.push('_'); // cursor marker
+    out
 }
 
 fn make_title_buffer(
