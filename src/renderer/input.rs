@@ -13,7 +13,7 @@ impl Renderer {
     /// `Selection`. Translates between the block store's session-absolute
     /// coordinates (history + cursor at fire time) and the selection
     /// model's `vl - display_offset` convention.
-    fn block_at_selection_line(&self, sel_line: i32) -> Option<((i32, usize), (i32, usize))> {
+    pub(super) fn block_at_selection_line(&self, sel_line: i32) -> Option<((i32, usize), (i32, usize))> {
         let tab = self.active_tab_ref();
         let (_, history) = tab.live_term.offset_and_history();
         let history = history as i32;

@@ -50,7 +50,7 @@ impl Renderer {
         let _ = out.try_send(crate::proto::OutMessage { id: req.id, payload });
     }
 
-    fn proto_list_tabs(&self) -> crate::proto::OutPayload {
+    pub(super) fn proto_list_tabs(&self) -> crate::proto::OutPayload {
         let mut all: Vec<&Tab> = Vec::new();
         self.root.as_ref().expect("pane tree present").all_tabs(&mut all);
         let tabs = all
@@ -63,7 +63,7 @@ impl Renderer {
         crate::proto::OutPayload::Tabs { tabs }
     }
 
-    fn proto_list_blocks(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_list_blocks(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid tab_id".into(),
@@ -82,7 +82,7 @@ impl Renderer {
         crate::proto::OutPayload::Blocks { blocks, cursor }
     }
 
-    fn proto_mutate_tab<F>(&mut self, params: &serde_json::Value, f: F) -> crate::proto::OutPayload
+    pub(super) fn proto_mutate_tab<F>(&mut self, params: &serde_json::Value, f: F) -> crate::proto::OutPayload
     where
         F: FnOnce(&mut Tab) -> crate::proto::OutPayload,
     {
@@ -105,7 +105,7 @@ impl Renderer {
         f(tab)
     }
 
-    fn proto_set_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_set_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid block_id".into(),
@@ -131,7 +131,7 @@ impl Renderer {
         payload
     }
 
-    fn proto_remove_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_remove_tag(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid block_id".into(),
@@ -157,7 +157,7 @@ impl Renderer {
         payload
     }
 
-    fn proto_cursor_at(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_cursor_at(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(block_id) = params.get("block_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid block_id".into(),
@@ -177,7 +177,7 @@ impl Renderer {
         payload
     }
 
-    fn proto_cursor_clear(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_cursor_clear(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let payload = self.proto_mutate_tab(params, |tab| {
             tab.blocks.clear_cursor();
             crate::proto::OutPayload::Ok
@@ -186,7 +186,7 @@ impl Renderer {
         payload
     }
 
-    fn proto_get_block(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_get_block(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid tab_id".into(),
@@ -222,7 +222,7 @@ impl Renderer {
         }
     }
 
-    fn proto_export_tab(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
+    pub(super) fn proto_export_tab(&self, params: &serde_json::Value) -> crate::proto::OutPayload {
         let Some(tab_id_u64) = params.get("tab_id").and_then(|v| v.as_u64()) else {
             return crate::proto::OutPayload::Error {
                 message: "missing or invalid tab_id".into(),
@@ -259,7 +259,7 @@ impl Renderer {
         }
     }
 
-    fn proto_stats(&self) -> crate::proto::OutPayload {
+    pub(super) fn proto_stats(&self) -> crate::proto::OutPayload {
         let mut all: Vec<&Tab> = Vec::new();
         self.root
             .as_ref()

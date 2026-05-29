@@ -803,7 +803,7 @@ impl Renderer {
     /// (or rebuilds) the tab's `content_buffer` to fit the current pane
     /// rect, then returns a `PaneDraw` pointing into it. Welcome lives
     /// here in Bundle 6 step 1; future built-in kinds slot in alongside.
-    fn render_non_shell_pane(
+    pub(super) fn render_non_shell_pane(
         &mut self,
         pid: PaneId,
         rect: PaneRect,
@@ -1149,7 +1149,7 @@ impl Renderer {
         }
     }
 
-    fn render_pane(
+    pub(super) fn render_pane(
         &mut self,
         pid: PaneId,
         rect: PaneRect,

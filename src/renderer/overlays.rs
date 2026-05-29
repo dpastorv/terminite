@@ -1,0 +1,467 @@
+//! Modal, context-menu, and find overlays.
+
+use super::*;
+
+impl Renderer {
+    /// True while an in-window modal is up — callers (main.rs) should route
+    /// keyboard / mouse input to the modal handlers below.
+    pub fn has_modal(&self) -> bool {
+        self.modal.is_some()
+    }
+
+    pub fn modal_cancel(&mut self) {
+        self.modal = None;
+        self.window.request_redraw();
+    }
+
+    /// Confirm the open modal. Returns true if the window should exit.
+    pub fn modal_confirm(&mut self) -> bool {
+        let Some(modal) = self.modal.take() else { return false };
+        self.window.request_redraw();
+        match modal.action {
+            ModalAction::CloseTab => self.do_close_active_tab(),
+            ModalAction::ClosePane => {
+                // close_active_pane is guarded against the last pane, so it
+                // never signals an exit here.
+                let _ = self.close_active_pane();
+                false
+            }
+        }
+    }
+
+    /// Mouse click while the modal is up. Returns true if the window should
+    /// exit (confirm hit on the last tab).
+    pub fn modal_click(&mut self, x: f32, y: f32) -> bool {
+        let Some(modal) = self.modal.as_ref() else { return false };
+        let in_rect = |r: (f32, f32, f32, f32)| {
+            x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
+        };
+        if in_rect(modal.confirm_rect) {
+            return self.modal_confirm();
+        }
+        if in_rect(modal.cancel_rect) {
+            self.modal_cancel();
+        }
+        false
+    }
+
+    /// Open the right-click context menu at a pixel position. Items depend
+    /// on context: Copy is enabled only with a selection, Open Link only
+    /// appears when the click landed on an OSC 8 hyperlink.
+    pub(super) fn open_context_menu(&mut self, x: f32, y: f32) {
+        let (line, col) = self.pixel_to_absolute(x, y);
+        let link = self.active_tab_mut().live_term.hyperlink_at(line, col);
+        let has_selection = self
+            .active_tab_ref()
+            .selection
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        let mut items: Vec<MenuItem> = Vec::new();
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Copy"),
+            action: MenuAction::Copy,
+            enabled: has_selection,
+        });
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Paste"),
+            action: MenuAction::Paste,
+            enabled: true,
+        });
+        if let Some(uri) = link {
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, "Open Link"),
+                action: MenuAction::OpenLink(uri),
+                enabled: true,
+            });
+        }
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(&mut self.font_system, "Select All"),
+            action: MenuAction::SelectAll,
+            enabled: true,
+        });
+
+        // Color items — apply to the active tab + active pane. Each
+        // click cycles one step through the shared palette. The label
+        // shows the *current* setting so the user knows what state
+        // they're in before clicking.
+        let tab_color_name =
+            palette_name(self.active_tab_ref().color_idx);
+        let pane_bg_name =
+            palette_name(self.active_pane_ref().bg_idx);
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Tab color: {tab_color_name}"),
+            ),
+            action: MenuAction::CycleTabColor,
+            enabled: true,
+        });
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Pane bg: {pane_bg_name}"),
+            ),
+            action: MenuAction::CyclePaneBg,
+            enabled: true,
+        });
+        let pane_scale_pct = (self.active_pane_ref().font_scale * 100.0).round() as i32;
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                &format!("Pane scale: {pane_scale_pct}%"),
+            ),
+            action: MenuAction::CyclePaneScale,
+            enabled: true,
+        });
+
+        // Keep the menu fully on-screen.
+        let h = items.len() as f32 * MENU_ITEM_H;
+        let mx = x
+            .min(self.surface_config.width as f32 - MENU_WIDTH - 4.0)
+            .max(0.0);
+        let my = y
+            .min(self.surface_config.height as f32 - h - 4.0)
+            .max(0.0);
+        self.context_menu = Some(ContextMenu {
+            x: mx,
+            y: my,
+            items,
+            hovered: None,
+        });
+        self.window.request_redraw();
+    }
+
+    /// Open the kind-selector dropdown for one pane. Anchored at the
+    /// bottom-left of that pane's selector slot, so it falls open like
+    /// a normal dropdown rather than appearing where the cursor was.
+    pub(super) fn open_kind_dropdown(&mut self, pid: PaneId, prect: PaneRect) {
+        let current = self
+            .root_ref()
+            .find(pid)
+            .map(|p| p.active_tab_ref().kind.clone())
+            .unwrap_or(TabContentKind::Shell);
+
+        // Menu: built-ins first, then every discovered module in
+        // registry order.
+        let mut entries: Vec<(TabContentKind, String)> = vec![
+            (TabContentKind::Shell, "Shell".to_string()),
+            (TabContentKind::Welcome, "Welcome".to_string()),
+        ];
+        for m in self.modules.list() {
+            entries.push((TabContentKind::Module(m.id.clone()), m.name.clone()));
+        }
+
+        let mut items: Vec<MenuItem> = entries
+            .into_iter()
+            .map(|(kind, name)| {
+                let label = if kind == current {
+                    format!("• {name}")
+                } else {
+                    format!("  {name}")
+                };
+                MenuItem {
+                    label_buf: make_modal_buffer(&mut self.font_system, &label),
+                    action: MenuAction::SetTabKind { pane: pid, kind },
+                    enabled: true,
+                }
+            })
+            .collect();
+        // ACP-speaking agent presets. Greyed out when the binary
+        // isn't on PATH so the user sees the menu shape without
+        // hitting a confusing "no binary" error mid-click.
+        for preset in crate::acp::presets() {
+            let kind = TabContentKind::Agent(preset.display_name.to_string());
+            let is_current = kind == current;
+            let installed = crate::acp::resolve_preset(preset).is_some();
+            let prefix = if is_current { "• " } else { "  " };
+            let suffix = if installed { "" } else { "  (not on PATH)" };
+            let label = format!("{prefix}Agent: {}{}", preset.display_name, suffix);
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, &label),
+                action: MenuAction::SetTabKind { pane: pid, kind },
+                enabled: installed,
+            });
+        }
+        // Trailing "Open modules folder…" — reveals the install
+        // directory in Finder so the user can drop a new module in
+        // without touching the CLI. fs-watch picks up the drop and
+        // refreshes this dropdown automatically.
+        items.push(MenuItem {
+            label_buf: make_modal_buffer(
+                &mut self.font_system,
+                "  Open modules folder…",
+            ),
+            action: MenuAction::OpenModulesFolder,
+            enabled: crate::modules::modules_dir().is_some(),
+        });
+        let h = items.len() as f32 * MENU_ITEM_H;
+        let mx = prect.x.max(0.0);
+        let my = (prect.y + self.tab_bar_height)
+            .min(self.surface_config.height as f32 - h - 4.0)
+            .max(0.0);
+        self.context_menu = Some(ContextMenu {
+            x: mx,
+            y: my,
+            items,
+            hovered: None,
+        });
+        self.window.request_redraw();
+    }
+
+    pub fn has_context_menu(&self) -> bool {
+        self.context_menu.is_some()
+    }
+
+    pub fn dismiss_context_menu(&mut self) {
+        self.context_menu = None;
+        self.window.request_redraw();
+    }
+
+    /// Item index under a pixel position, or None if outside the menu.
+    pub(super) fn context_menu_at(&self, x: f32, y: f32) -> Option<usize> {
+        let menu = self.context_menu.as_ref()?;
+        if x < menu.x || x >= menu.x + MENU_WIDTH || y < menu.y {
+            return None;
+        }
+        let idx = ((y - menu.y) / MENU_ITEM_H) as usize;
+        (idx < menu.items.len()).then_some(idx)
+    }
+
+    /// Resolve a click while the menu is up: run the hit item's action (if
+    /// enabled), then dismiss. A click anywhere just dismisses.
+    pub(super) fn context_menu_click(&mut self, x: f32, y: f32) {
+        let hit = self.context_menu_at(x, y);
+        let Some(menu) = self.context_menu.take() else { return };
+        self.window.request_redraw();
+        let Some(idx) = hit else { return };
+        if !menu.items[idx].enabled {
+            return;
+        }
+        match &menu.items[idx].action {
+            MenuAction::Copy => self.copy_selection(),
+            MenuAction::Paste => self.paste(),
+            MenuAction::OpenLink(uri) => open_uri(uri),
+            MenuAction::SelectAll => {
+                let ((sl, sc), (el, ec)) =
+                    self.active_tab_mut().live_term.whole_buffer();
+                self.active_tab_mut().selection = Some(Selection {
+                    anchor_line: sl,
+                    anchor_col: sc,
+                    head_line: el,
+                    head_col: ec,
+                });
+                self.copy_selection();
+            }
+            MenuAction::SetTabKind { pane, kind } => {
+                let pane = *pane;
+                let kind = kind.clone();
+                self.set_tab_kind(pane, kind);
+            }
+            MenuAction::CycleTabColor => {
+                let tab = self.active_tab_mut();
+                tab.color_idx = next_color_idx(tab.color_idx);
+                self.window.request_redraw();
+            }
+            MenuAction::CyclePaneBg => {
+                let pane = self.active_pane_mut();
+                pane.bg_idx = next_color_idx(pane.bg_idx);
+                self.window.request_redraw();
+            }
+            MenuAction::CyclePaneScale => {
+                let pid = self.active_pane;
+                let current = self
+                    .root_ref()
+                    .find(pid)
+                    .map(|p| p.font_scale)
+                    .unwrap_or(1.0);
+                let next = next_pane_scale(current);
+                self.apply_pane_scale(pid, next);
+            }
+            MenuAction::OpenModulesFolder => {
+                if let Some(dir) = crate::modules::modules_dir() {
+                    // Ensure it exists so `open` doesn't bounce
+                    // (a fresh install may not have created it yet).
+                    let _ = std::fs::create_dir_all(&dir);
+                    // open_uri only accepts http(s)/file://mailto —
+                    // wrap the absolute path in file:// so the path
+                    // takes the macOS `open` route rather than being
+                    // silently dropped by the scheme allowlist.
+                    open_uri(&format!("file://{}", dir.to_string_lossy()));
+                }
+            }
+        }
+    }
+
+    /// Build the rect instances for the context menu (background, border,
+    /// hovered-item highlight).
+    pub(super) fn build_menu_rects(&self) -> Vec<RectInstance> {
+        let Some(menu) = self.context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let h = menu.items.len() as f32 * MENU_ITEM_H;
+        let border = 1.0;
+        let mut rects = vec![
+            RectInstance {
+                rect: [
+                    menu.x - border,
+                    menu.y - border,
+                    MENU_WIDTH + 2.0 * border,
+                    h + 2.0 * border,
+                ],
+                color: MENU_BORDER,
+            },
+            RectInstance {
+                rect: [menu.x, menu.y, MENU_WIDTH, h],
+                color: MENU_BG,
+            },
+        ];
+        if let Some(hov) = menu.hovered {
+            if menu.items[hov].enabled {
+                rects.push(RectInstance {
+                    rect: [
+                        menu.x,
+                        menu.y + hov as f32 * MENU_ITEM_H,
+                        MENU_WIDTH,
+                        MENU_ITEM_H,
+                    ],
+                    color: MENU_HOVER_BG,
+                });
+            }
+        }
+        rects
+    }
+
+    // ── Find ──────────────────────────────────────────────────────────────
+
+    pub fn has_find(&self) -> bool {
+        self.find.is_some()
+    }
+
+    pub fn open_find(&mut self) {
+        let bar_buf = make_modal_buffer(&mut self.font_system, "Find:");
+        self.find = Some(FindState {
+            query: String::new(),
+            bar_buf,
+            matches: Vec::new(),
+            current: 0,
+        });
+        self.window.request_redraw();
+    }
+
+    pub fn close_find(&mut self) {
+        self.find = None;
+        self.window.request_redraw();
+    }
+
+    pub fn find_input(&mut self, ch: char) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.push(ch);
+        }
+        self.rerun_search();
+    }
+
+    pub fn find_backspace(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            find.query.pop();
+        }
+        self.rerun_search();
+    }
+
+    pub fn find_next(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            if !find.matches.is_empty() {
+                find.current = (find.current + 1) % find.matches.len();
+            }
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    pub fn find_prev(&mut self) {
+        if let Some(find) = self.find.as_mut() {
+            if !find.matches.is_empty() {
+                find.current = if find.current == 0 {
+                    find.matches.len() - 1
+                } else {
+                    find.current - 1
+                };
+            }
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    /// Re-run the search for the current query and reset to the first match.
+    pub(super) fn rerun_search(&mut self) {
+        let query = match self.find.as_ref() {
+            Some(f) => f.query.clone(),
+            None => return,
+        };
+        let matches = self.active_tab_mut().live_term.search(&query);
+        if let Some(find) = self.find.as_mut() {
+            find.matches = matches;
+            find.current = 0;
+        }
+        self.rebuild_find_bar();
+        self.scroll_to_current_match();
+        self.window.request_redraw();
+    }
+
+    pub(super) fn rebuild_find_bar(&mut self) {
+        let text = match self.find.as_ref() {
+            Some(f) if f.query.is_empty() => "Find:".to_string(),
+            Some(f) if f.matches.is_empty() => {
+                format!("Find: {}   no matches", f.query)
+            }
+            Some(f) => {
+                format!("Find: {}   {}/{}", f.query, f.current + 1, f.matches.len())
+            }
+            None => return,
+        };
+        let buf = make_modal_buffer(&mut self.font_system, &text);
+        if let Some(find) = self.find.as_mut() {
+            find.bar_buf = buf;
+        }
+    }
+
+    pub(super) fn scroll_to_current_match(&mut self) {
+        let target = self
+            .find
+            .as_ref()
+            .and_then(|f| f.matches.get(f.current).copied());
+        if let Some((line, _, _)) = target {
+            let rows = self.grid_rows;
+            self.active_tab_mut()
+                .live_term
+                .scroll_to_line(line, rows);
+        }
+    }
+
+    pub(super) fn open_modal(
+        &mut self,
+        action: ModalAction,
+        title: String,
+        body: String,
+        cancel: &str,
+        confirm: &str,
+    ) {
+        let title_buf = make_modal_buffer(&mut self.font_system, &title);
+        let body_buf = make_modal_buffer(&mut self.font_system, &body);
+        let cancel_buf = make_modal_buffer(&mut self.font_system, cancel);
+        let confirm_buf = make_modal_buffer(&mut self.font_system, confirm);
+        self.modal = Some(Modal {
+            action,
+            title_buf,
+            body_buf,
+            cancel_buf,
+            confirm_buf,
+            cancel_rect: (0.0, 0.0, 0.0, 0.0),
+            confirm_rect: (0.0, 0.0, 0.0, 0.0),
+        });
+        self.window.request_redraw();
+    }
+
+}
