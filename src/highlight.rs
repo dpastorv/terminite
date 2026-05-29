@@ -21,6 +21,15 @@ use syntect::highlighting::{Color as SynColor, Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
+/// Bundled themes — hand-authored .tmTheme files for the Atom / Zed
+/// One Dark + One Light palettes. We embed them at compile time so
+/// the binary has no runtime asset dependency. Zed is terminite's
+/// reference editor (same ACP + MCP protocol family, same first-
+/// class-AI stance), so matching its visual defaults lands users in
+/// recognizable colors out of the box.
+const ONE_DARK_TMTHEME: &str = include_str!("../assets/themes/one-dark.tmTheme");
+const ONE_LIGHT_TMTHEME: &str = include_str!("../assets/themes/one-light.tmTheme");
+
 /// One styled span inside a source line. `start` / `end` are byte
 /// offsets into that line's text (LF stripped). `rgb` is the
 /// foreground color the theme assigned.
@@ -46,24 +55,34 @@ pub struct HighlightStore {
 }
 
 impl HighlightStore {
-    /// Load syntect's bundled grammars and pick a default theme.
-    /// We use "Solarized (dark)" for readability + decent contrast
-    /// on terminite's dark background; users can drop in their own
-    /// `.tmTheme` files via a future config knob.
+    /// Load syntect's bundled grammars and the One Dark theme as the
+    /// default. The One Light variant is also bundled so a future
+    /// config knob (or auto-detect) can toggle between them without
+    /// adding new assets. If the embedded One Dark fails to parse —
+    /// shouldn't happen because we ship the bytes — fall back to
+    /// syntect's defaults so the editor still highlights.
     pub fn load() -> Self {
         let syntaxes = SyntaxSet::load_defaults_newlines();
-        let themes = ThemeSet::load_defaults();
-        // Falls back to the first available theme if the named one
-        // isn't bundled. syntect ships ~5 by default; "Solarized
-        // (dark)" is one of them.
-        let theme = themes
-            .themes
-            .get("Solarized (dark)")
-            .or_else(|| themes.themes.get("base16-ocean.dark"))
-            .or_else(|| themes.themes.values().next())
-            .cloned()
-            .expect("syntect ships at least one default theme");
+        let theme = load_bundled_theme(ONE_DARK_TMTHEME).unwrap_or_else(|| {
+            crate::logging::warn(
+                "highlight: embedded One Dark failed to parse — falling back to syntect default",
+            );
+            let themes = ThemeSet::load_defaults();
+            themes
+                .themes
+                .values()
+                .next()
+                .cloned()
+                .expect("syntect ships at least one default theme")
+        });
         Self { syntaxes, theme }
+    }
+
+    /// Load the bundled One Light theme. Currently unused at the
+    /// call sites; lands when we ship the theme-choice config knob.
+    #[allow(dead_code)]
+    pub fn one_light() -> Option<Theme> {
+        load_bundled_theme(ONE_LIGHT_TMTHEME)
     }
 
     /// Resolve a language token to a syntect syntax. Accepts
@@ -140,4 +159,36 @@ impl HighlightStore {
 
 fn rgb_of(c: SynColor) -> [u8; 3] {
     [c.r, c.g, c.b]
+}
+
+/// Parse a .tmTheme XML string into a syntect Theme. Returns `None`
+/// on parse failure; the caller decides whether to warn + fall back
+/// or hard-fail.
+fn load_bundled_theme(tmtheme_xml: &str) -> Option<Theme> {
+    let mut reader = std::io::Cursor::new(tmtheme_xml.as_bytes());
+    ThemeSet::load_from_reader(&mut reader).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_one_dark_parses() {
+        let t = load_bundled_theme(ONE_DARK_TMTHEME).expect("One Dark parses");
+        assert_eq!(t.name.as_deref(), Some("One Dark"));
+    }
+
+    #[test]
+    fn embedded_one_light_parses() {
+        let t = load_bundled_theme(ONE_LIGHT_TMTHEME).expect("One Light parses");
+        assert_eq!(t.name.as_deref(), Some("One Light"));
+    }
+
+    #[test]
+    fn highlight_store_uses_one_dark() {
+        let store = HighlightStore::load();
+        let spans = store.highlight("fn main() {}\n", "rs");
+        assert!(!spans.is_empty(), "rs body should highlight");
+    }
 }

@@ -72,6 +72,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "stats" => Some(cmd_stats()),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
+        "mcp" => Some(crate::mcp::run()),
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -113,6 +114,10 @@ USAGE
                                      `eval \"$(terminite shell-init)\"`
                                      in your rc, or pass --install to
                                      append it idempotently for you.
+  terminite mcp                      run the Model Context Protocol
+                                     server on stdio. Add to your AI
+                                     client's MCP config so it
+                                     auto-discovers terminite's tools.
   terminite help                     this message
 
 ENV

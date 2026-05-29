@@ -16,6 +16,7 @@ mod highlight;
 mod images;
 mod layout;
 mod logging;
+mod mcp;
 mod modules;
 mod modules_watch;
 mod palette;

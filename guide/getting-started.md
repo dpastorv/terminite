@@ -144,6 +144,97 @@ For granular block coordinates while you collaborate with an AI:
 A later phase will likely teach terminite to mark the AI's *turns* as
 their own kind of block. For now, the pane split is the workaround.
 
+## AI partner onboarding (MCP)
+
+terminite ships an MCP (Model Context Protocol) server so any MCP-
+speaking AI client — Claude Desktop, Claude Code with MCP enabled,
+Cursor, Windsurf, etc. — can auto-discover the shared-vocabulary
+verbs without per-project config files. The tool descriptions in
+the AI's palette teach the partnership conventions; no `AGENTS.md`
+or primer file needed. See [`lounge-thesis.md`](lounge-thesis.md)
+for the design rationale.
+
+Add terminite to your AI client's MCP config (one-time, per machine):
+
+### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or `%APPDATA%/Claude/claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "terminite": {
+      "command": "terminite",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The `terminite_*` tools should appear in the
+tool palette on the next conversation.
+
+### Claude Code (CLI)
+
+```sh
+claude mcp add terminite terminite mcp
+```
+
+Or edit `~/.claude.json` directly with the same `mcpServers` block as
+above. New sessions pick up the config automatically.
+
+### Cursor
+
+Edit `~/.cursor/mcp.json` (or `.cursor/mcp.json` in a specific
+project):
+
+```json
+{
+  "mcpServers": {
+    "terminite": {
+      "command": "terminite",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### What the AI sees
+
+Once installed, the AI's tool palette gains 11 `terminite_*` tools:
+
+| Tool                       | What it does |
+|----------------------------|--------------|
+| `terminite_tabs_list`      | Orient — which tabs exist. |
+| `terminite_blocks_list`    | Recent blocks in a tab (B1, B2…). |
+| `terminite_block_get`      | Read one block's command + output. |
+| `terminite_cursor_move`    | Place the AI cursor on a block. |
+| `terminite_cursor_clear`   | Release the AI cursor. |
+| `terminite_tag_add`        | Attach a short label to a block. |
+| `terminite_tag_remove`     | Remove a tag. |
+| `terminite_block_export`   | Export a tab as markdown. |
+| `terminite_modules_list`   | List installed modules. |
+| `terminite_modules_reload` | Re-discover modules from disk. |
+| `terminite_stats`          | Debug snapshot — frame times, RSS, etc. |
+
+Each tool's description teaches *when* and *why* to use it — the
+descriptions ARE the partnership onboarding. A fresh AI session sees
+the tools, reads the descriptions, knows how to participate. No
+primer files in your project. No vendor-specific config gymnastics.
+
+### How it works under the hood
+
+`terminite mcp` is a thin bridge — it speaks Model Context Protocol
+over stdio to the AI client, and forwards each tool call as a proto-
+socket request to the running terminite window. If terminite isn't
+running, tool calls return a clean error (`is terminite running?`)
+the AI can act on without crashing the session.
+
+The MCP server is stateless — each tool call opens a fresh socket
+connection. Cheap; the socket is local. No state to manage between
+calls, no per-session lifecycle on the MCP side.
+
 ## The CLI
 
 The same binary doubles as a CLI client for the running terminite
