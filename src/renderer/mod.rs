@@ -36,6 +36,7 @@ mod overlays;
 mod panes;
 mod proto;
 mod render;
+mod render_pane;
 mod tabs;
 
 // Supporting types live in their topical submodules; re-export them here so
