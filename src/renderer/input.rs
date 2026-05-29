@@ -420,8 +420,18 @@ impl Renderer {
                     }
                 }
                 Some(GestureOutcome::Remove) => {
-                    self.focus_pane(g.pid);
-                    self.request_close_active_pane();
+                    // Blender join: the pane the handle is dragged ONTO is the
+                    // one consumed; the source pane (g.pid) survives and grows.
+                    // Do nothing if the cursor isn't over a different pane —
+                    // there's no neighbour to join into.
+                    if let Some((target, _)) =
+                        self.pane_at(self.mouse_pos.0, self.mouse_pos.1)
+                    {
+                        if target != g.pid {
+                            self.focus_pane(target);
+                            self.request_close_active_pane();
+                        }
+                    }
                 }
                 None => {}
             }

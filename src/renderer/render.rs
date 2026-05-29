@@ -100,10 +100,25 @@ impl Renderer {
                         });
                     }
                     Some(GestureOutcome::Remove) => {
-                        above.push(RectInstance {
-                            rect: [r.x, r.y, r.w, r.h],
-                            color: REMOVE_PREVIEW_COLOR,
-                        });
+                        // Wash the pane the cursor is over — the one that will
+                        // be consumed — not the source the handle came from.
+                        let (mx, my) = self.mouse_pos;
+                        if let Some((_, tr)) = layout
+                            .iter()
+                            .find(|(id, rr)| {
+                                *id != g.pid
+                                    && mx >= rr.x
+                                    && mx < rr.x + rr.w
+                                    && my >= rr.y
+                                    && my < rr.y + rr.h
+                            })
+                            .copied()
+                        {
+                            above.push(RectInstance {
+                                rect: [tr.x, tr.y, tr.w, tr.h],
+                                color: REMOVE_PREVIEW_COLOR,
+                            });
+                        }
                     }
                     None => {}
                 }
