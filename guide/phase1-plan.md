@@ -1,5 +1,10 @@
 # Phase 1 Completion Plan
 
+> **Status: SHIPPED 2026-05-2x.** This plan is preserved as the project
+> record. For the *current* state of every floor item, see
+> [roadmap.md](roadmap.md). For the *direction* terminite is reaching
+> toward, see [lounge-thesis.md](lounge-thesis.md).
+
 Everything between today (post-Bundle 1) and Phase 2. Written so we can
 align on the *shape* before any keystroke of code. Stakes are now
 real-usage — Daniel will do client work in this terminal once it crosses

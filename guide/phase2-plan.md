@@ -1,5 +1,11 @@
 # Phase 2 Plan — Be the pair's terminal
 
+> **Status: SHIPPED 2026-05-25.** This plan is preserved as the project
+> record. The blocks model, proto socket, modules surface, and shell
+> integration last-mile all landed. For the *current* state, see
+> [roadmap.md](roadmap.md). The thesis evolution that came out of
+> Phase 2 dogfooding lives in [lounge-thesis.md](lounge-thesis.md).
+
 The point of the project. Everything before this was the floor; this is
 the part terminite exists *for*. Written so we can align on the shape
 before code, and so the design survives context resets.

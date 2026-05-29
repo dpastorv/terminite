@@ -1,6 +1,13 @@
 # Phase 3 Plan — Working Title
 
-> Status: in progress. Owner-led.
+> **Status: SHIPPED 2026-05-27.** The personal-usable thread closed with
+> syntect highlighting, layouts persistence, fs-watch + open modules
+> folder, config schema + config pane, shell-init verb, macOS .app
+> bundle. The partnership-thread realignment that came out of Phase 3
+> dogfooding produced [lounge-thesis.md](lounge-thesis.md), which is
+> the destination for the next phase. For *current state*, see
+> [roadmap.md](roadmap.md). This plan is preserved as the project
+> record.
 
 Phase 1 was *be a terminal*. Phase 2 was *be the pair's terminal* — and,
 in its closing bundle, *be a foundation other things can stand on*.
