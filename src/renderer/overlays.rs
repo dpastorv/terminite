@@ -465,3 +465,94 @@ impl Renderer {
     }
 
 }
+
+// ── moved from mod.rs ───────────────────────────────
+
+/// What the user is being asked to confirm. Generalized so we can reuse the
+/// same modal for future yes/no decisions.
+#[derive(Debug)]
+pub(super) enum ModalAction {
+    CloseTab,
+    ClosePane,
+}
+
+/// An action invoked from the right-click context menu.
+pub(super) enum MenuAction {
+    Copy,
+    Paste,
+    OpenLink(String),
+    SelectAll,
+    /// Switch the active tab of the menu's pane to a different content
+    /// kind. Bundle 6 step 1 — the dropdown surface.
+    SetTabKind {
+        pane: PaneId,
+        kind: TabContentKind,
+    },
+    /// Advance the active tab's color band one step through the palette.
+    CycleTabColor,
+    /// Advance the active pane's background tint one step.
+    CyclePaneBg,
+    /// Cycle the active pane's font scale (100% / 80% / 65% / 125% / 150%).
+    /// Triggers a per-pane buffer-metrics rebuild + grid resize.
+    CyclePaneScale,
+    /// Reveal `~/.terminite/modules/` in Finder so the user can
+    /// drop a new module in. fs-watch picks it up automatically;
+    /// no CLI dance needed.
+    OpenModulesFolder,
+}
+
+/// One row in the context menu.
+pub(super) struct MenuItem {
+    pub(super) label_buf: Buffer,
+    pub(super) action: MenuAction,
+    pub(super) enabled: bool,
+}
+
+/// Right-click context menu — a small overlay anchored at the cursor.
+pub(super) struct ContextMenu {
+    pub(super) x: f32,
+    pub(super) y: f32,
+    pub(super) items: Vec<MenuItem>,
+    /// Index of the item under the cursor, for hover highlight.
+    pub(super) hovered: Option<usize>,
+}
+
+pub(super) const MENU_WIDTH: f32 = 320.0;
+pub(super) const MENU_ITEM_H: f32 = 40.0;
+pub(super) const MENU_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
+pub(super) const MENU_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+pub(super) const MENU_HOVER_BG: [f32; 4] = [0.22, 0.30, 0.46, 1.0];
+
+// Find bar — a floating box at the top-right of the content area.
+pub(super) const FIND_BAR_W: f32 = 420.0;
+pub(super) const FIND_BAR_H: f32 = 48.0;
+pub(super) const FIND_BAR_MARGIN: f32 = 16.0;
+pub(super) const FIND_BAR_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
+pub(super) const FIND_BAR_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+
+/// In-progress incremental search over the active tab's scrollback.
+pub(super) struct FindState {
+    pub(super) query: String,
+    /// Text buffer for the find bar (`⌕ query    N/M`), rebuilt on change.
+    pub(super) bar_buf: Buffer,
+    /// Absolute `(line, col_start, col_end)` matches, top-to-bottom.
+    pub(super) matches: Vec<(i32, usize, usize)>,
+    /// Index of the current (accented) match.
+    pub(super) current: usize,
+}
+
+/// In-window modal dialog. Built when the user attempts to do something
+/// destructive while a non-trivial process is running.
+pub(super) struct Modal {
+    pub(super) action: ModalAction,
+    pub(super) title_buf: Buffer,
+    pub(super) body_buf: Buffer,
+    pub(super) cancel_buf: Buffer,
+    pub(super) confirm_buf: Buffer,
+    /// Hit boxes computed at layout time (origin x, y, w, h). Live for the
+    /// frame; updated each render.
+    pub(super) cancel_rect: (f32, f32, f32, f32),
+    pub(super) confirm_rect: (f32, f32, f32, f32),
+}
+
+
