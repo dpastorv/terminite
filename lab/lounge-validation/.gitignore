@@ -1,0 +1,2 @@
+# Per-run artifacts — logs, sightings, summaries. Reproducible via ./run.sh.
+runs/

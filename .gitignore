@@ -17,6 +17,9 @@
 __pycache__/
 *.pyc
 
+# Local CLI tool artifacts (symlinks into ~/.gemini etc.)
+.antigravitycli/
+
 
 # Added by cargo
 #
