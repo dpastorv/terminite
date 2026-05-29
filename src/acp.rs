@@ -287,6 +287,13 @@ impl AcpSession {
     }
 
     /// Called by the main thread after `Initialized` arrives.
+    ///
+    /// We inject terminite's own MCP server into every session so
+    /// the hosted agent sees the room's vocabulary (tabs_list,
+    /// blocks_list, cursor_move, tag_add, …) as native tools. This
+    /// is the room handing the actor a map — first step toward the
+    /// lounge thesis. Without it, each ACP pane is a solo session
+    /// in a folder with no awareness of who else is here.
     pub fn send_new_session(&mut self, cwd: &str) {
         let id = self.next_id();
         let req = json!({
@@ -295,7 +302,8 @@ impl AcpSession {
             "method": "session/new",
             "params": {
                 "cwd": cwd,
-                "mcpServers": [],
+                "mcpServers": terminite_mcp_servers_array(),
+                "permissions": { "defaultMode": "default" },
             },
         });
         let _ = self.input_tx.try_send(req.to_string());
@@ -351,11 +359,22 @@ impl AcpSession {
 
     /// Reply to a permission request. The `option_id` comes from the
     /// `PermissionPrompt.options` array the UI rendered.
+    ///
+    /// Wire shape per ACP spec: `result.outcome` is itself an object
+    /// with a `outcome` discriminator (`"selected"` | `"cancelled"`)
+    /// plus the chosen option's id. Sending a flat `{optionId}` looks
+    /// well-formed but the agent silently treats it as a no-op and the
+    /// turn hangs.
     pub fn respond_permission(&mut self, request_id: Value, option_id: &str) {
         let resp = json!({
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": { "optionId": option_id },
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": option_id,
+                },
+            },
         });
         let _ = self.input_tx.try_send(resp.to_string());
         self.pending_permission = None;
@@ -401,6 +420,28 @@ impl Drop for AcpSession {
         let _ = self.child.wait();
         crate::logging::info(&format!("acp: session torn down ({})", self.binary));
     }
+}
+
+/// Build the `mcpServers` array for `session/new`. We inject one
+/// entry: terminite's own MCP server (`terminite mcp`), spawned as a
+/// stdio subprocess by the agent. The agent then sees `tabs_list`,
+/// `blocks_list`, `cursor_move`, `tag_add`, … as native tools — the
+/// room's vocabulary, available to whoever enters.
+///
+/// Resolution uses `std::env::current_exe()` so it tracks whichever
+/// terminite binary is currently running (debug, installed, .app
+/// bundle). If we can't resolve the path (rare), we fall back to an
+/// empty array — agent still works, just without room awareness.
+fn terminite_mcp_servers_array() -> Value {
+    let Ok(path) = std::env::current_exe() else {
+        return json!([]);
+    };
+    json!([{
+        "name": "terminite",
+        "command": path.to_string_lossy(),
+        "args": ["mcp"],
+        "env": [],
+    }])
 }
 
 // ── Threads ─────────────────────────────────────────────────────────────
@@ -453,16 +494,33 @@ fn reader_loop(
         if trimmed.is_empty() {
             continue;
         }
+        // Cheap structural gate before invoking serde_json — the
+        // ACP wire is strict JSON object per line. During npx-driven
+        // first-run installs the agent's stdout is *flooded* with
+        // human-readable progress lines (npm warnings, download
+        // progress, …); parsing each one + logging the failure
+        // saturated CPU in the reader + log mutex and starved the
+        // main thread. Drop anything that doesn't start with `{`
+        // without allocating.
+        if !trimmed.starts_with('{') {
+            continue;
+        }
         let msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
-            Err(e) => {
-                crate::logging::warn(&format!(
-                    "acp tab {}: parse error: {e}",
+            Err(_) => continue, // silently drop malformed frames
+        };
+        // Diagnostic: log inbound methods (skip session/update — high
+        // volume during streaming). Helps us see whether the agent is
+        // sending us session/request_permission, fs/read_text_file,
+        // etc. when something looks broken on screen.
+        if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+            if method != "session/update" {
+                crate::logging::info(&format!(
+                    "acp tab {}: rx method={method}",
                     tab_id.0
                 ));
-                continue;
             }
-        };
+        }
         for event in classify_message(&msg) {
             let _ = proxy.send_event(UserEvent::AcpEvent {
                 tab_id,
@@ -651,56 +709,56 @@ fn extract_content_text(v: Option<&Value>) -> Option<String> {
 
 // ── Available agent presets ─────────────────────────────────────────────
 
-/// A baked-in list of common ACP-speaking agents. Daniel can install
-/// any of them via their own install paths; the binary name + flags
-/// here are what the dropdown offers as quick presets. Custom paths
-/// live in `~/.config/terminite/config.toml` later (deferred).
+/// A baked-in list of common ACP-speaking agents. Each preset names
+/// the binary terminite spawns + the args it passes. Most modern AI
+/// agents don't speak ACP natively yet — they ship as separate
+/// adapter packages that Zed (and now terminite) drive over stdio.
+///
+/// We invoke each adapter via `npx` so:
+///   - Users who haven't installed the adapter still get a one-time
+///     auto-download (cached afterward).
+///   - Users who have `npm install -g`'d the adapter get the cached
+///     binary instantly.
+///   - There's no per-OS binary path to maintain.
+///
+/// Trade-off: requires `npx` (i.e. Node/npm) on PATH. Documented in
+/// getting-started.md under the AI partner section.
 pub struct AgentPreset {
     pub display_name: &'static str,
-    pub binary_candidates: &'static [&'static str],
+    pub binary: &'static str,
     pub default_args: &'static [&'static str],
 }
 
 pub fn presets() -> &'static [AgentPreset] {
     &[
         AgentPreset {
-            display_name: "OpenClaw",
-            binary_candidates: &["openclaw", "acpx"],
-            default_args: &["acp"],
-        },
-        AgentPreset {
-            display_name: "Hermes",
-            binary_candidates: &["hermes", "hermes-agent"],
-            default_args: &["acp"],
-        },
-        AgentPreset {
             display_name: "Claude Code",
-            binary_candidates: &["claude"],
-            default_args: &["--acp"],
+            binary: "npx",
+            default_args: &["-y", "@zed-industries/claude-agent-acp"],
         },
         AgentPreset {
             display_name: "Codex",
-            binary_candidates: &["codex"],
-            default_args: &["acp"],
+            binary: "npx",
+            default_args: &["-y", "@zed-industries/codex-acp"],
         },
         AgentPreset {
             display_name: "Gemini",
-            binary_candidates: &["gemini"],
-            default_args: &["acp"],
+            binary: "npx",
+            default_args: &["-y", "@google/gemini-cli", "--experimental-acp"],
         },
     ]
 }
 
-/// Find the first binary in a preset's candidate list that's on PATH.
-/// Used by the dropdown to gray out presets whose binary isn't
-/// installed.
+/// Check whether the preset's launcher binary is on PATH. Used by
+/// the dropdown to gray out presets whose adapter can't be reached.
+/// For npx-driven presets this just confirms Node is installed; the
+/// adapter package itself is fetched on first run.
 pub fn resolve_preset(preset: &AgentPreset) -> Option<String> {
-    for cand in preset.binary_candidates {
-        if which(cand).is_some() {
-            return Some(cand.to_string());
-        }
+    if which(preset.binary).is_some() {
+        Some(preset.binary.to_string())
+    } else {
+        None
     }
-    None
 }
 
 fn which(binary: &str) -> Option<std::path::PathBuf> {

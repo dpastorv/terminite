@@ -3233,11 +3233,13 @@ impl Renderer {
         // Data-module panes have no PTY — wheel events scroll the
         // rendered body instead of being forwarded as arrow keys to
         // a shell that isn't there. TTY modules have their own PTY
-        // and fall through to the regular path below.
+        // and fall through to the regular path below. ACP Agent
+        // panes are non-TTY too and reuse the same module_scroll_y.
         {
             let tab = self.pane_tab_mut(pid);
-            let is_data_module = matches!(tab.kind, TabContentKind::Module(_))
-                && tab.module_pty.is_none();
+            let is_data_module = (matches!(tab.kind, TabContentKind::Module(_))
+                && tab.module_pty.is_none())
+                || matches!(tab.kind, TabContentKind::Agent(_));
             if is_data_module {
                 let pixels = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 3.0 * line_height,
@@ -3976,13 +3978,18 @@ impl Renderer {
     }
 
     fn write_to_agent(&mut self, bytes: &[u8]) {
-        let Some(session) = self.active_tab_mut().acp_session.as_mut() else {
+        let s = std::str::from_utf8(bytes).unwrap_or("").to_string();
+        let tab = self.active_tab_mut();
+        let Some(session) = tab.acp_session.as_mut() else {
             return;
         };
-        // Convert the byte input — likely one keystroke — into a
-        // single decision: extend draft, send draft, cancel, or
-        // resolve a pending permission prompt.
-        let s = std::str::from_utf8(bytes).unwrap_or("");
+        // Any keystroke that mutates session state needs the content
+        // buffer rebuilt so the typed character actually shows. The
+        // buffer is otherwise only invalidated on inbound AcpEvents,
+        // which made typing in an agent pane look like nothing was
+        // happening (or worse, gated on the agent's response stream).
+        let mut dirty = false;
+        let s = s.as_str();
         // Permission keys first — when a prompt is pending, the
         // keyboard is dedicated to picking an option.
         if let Some(prompt) = session.pending_permission.clone() {
@@ -3998,8 +4005,10 @@ impl Renderer {
                     let opt_id = opt.option_id.clone();
                     let req_id = prompt.request_id.clone();
                     session.respond_permission(req_id, &opt_id);
+                    session.pending_permission = None;
+                    tab.content_buffer = None;
                     self.window.request_redraw();
-                    return;
+                    return; // consumed the keystroke; don't also draft it
                 }
             }
             // Not a permission key — fall through to draft editing.
@@ -4008,29 +4017,28 @@ impl Renderer {
         if s == "\x1b" {
             session.draft.clear();
             session.cancel();
-            self.window.request_redraw();
-            return;
-        }
-        // Enter (CR) → send prompt.
-        if s == "\r" || s == "\n" {
+            dirty = true;
+        } else if s == "\r" || s == "\n" {
+            // Enter (CR) → send prompt.
             session.send_prompt();
-            self.window.request_redraw();
-            return;
-        }
-        // Backspace.
-        if s == "\x7f" || s == "\u{8}" {
-            session.draft.pop();
-            self.window.request_redraw();
-            return;
-        }
-        // Printable text + tab.
-        if s.chars().all(|c| !c.is_control() || c == '\t') && !s.is_empty() {
+            dirty = true;
+        } else if s == "\x7f" || s == "\u{8}" {
+            // Backspace.
+            if !session.draft.is_empty() {
+                session.draft.pop();
+                dirty = true;
+            }
+        } else if s.chars().all(|c| !c.is_control() || c == '\t') && !s.is_empty() {
+            // Printable text + tab.
             session.draft.push_str(s);
-            self.window.request_redraw();
+            dirty = true;
         }
         // Anything else (control sequences for arrows / function keys)
-        // ignored for v1; the agent doesn't have a cursor in its
-        // composer yet, so they have nowhere meaningful to go.
+        // ignored for v1.
+        if dirty {
+            tab.content_buffer = None;
+            self.window.request_redraw();
+        }
     }
 
     /// Switch a pane's active tab to a different content kind. Spawns
@@ -4362,11 +4370,23 @@ impl Renderer {
                 }
             }
             AcpEvent::PermissionRequest { request_id, tool_call_title, options } => {
+                let kinds: Vec<&str> = options.iter().map(|o| o.kind.as_str()).collect();
+                crate::logging::info(&format!(
+                    "acp tab {}: permission requested ({}) options=[{}]",
+                    tab_id.0,
+                    tool_call_title,
+                    kinds.join(", "),
+                ));
                 session.pending_permission = Some(crate::acp::PermissionPrompt {
                     request_id,
                     title: tool_call_title,
                     options,
                 });
+                // Snap the pane to the bottom so the prompt is visible
+                // — render_acp_body appends the permission block at the
+                // end, and without this it lands below the viewport in
+                // any conversation longer than a screen.
+                tab.module_scroll_y = f32::MAX;
             }
             AcpEvent::FsReadRequest { request_id, path, line, limit } => {
                 let result = read_text_for_agent(&path, line, limit);
@@ -5595,11 +5615,12 @@ impl Renderer {
                         .as_ref()
                         .unwrap_or(&tab_ref.text_buffer),
                 };
-                // Data modules scroll their body via `module_scroll_y`.
-                // Bounds clip the over-flow so scrolled-out content
-                // doesn't leak past the pane.
-                let is_data_module = matches!(tab_ref.kind, TabContentKind::Module(_))
-                    && tab_ref.module_pty.is_none();
+                // Data modules + Agent panes scroll their body via
+                // `module_scroll_y`. Bounds clip overflow so
+                // scrolled-out content doesn't leak past the pane.
+                let is_data_module = (matches!(tab_ref.kind, TabContentKind::Module(_))
+                    && tab_ref.module_pty.is_none())
+                    || matches!(tab_ref.kind, TabContentKind::Agent(_));
                 let scroll_y = if is_data_module { tab_ref.module_scroll_y } else { 0.0 };
                 // When a data-module pane is showing an image (still or
                 // animated), suppress the text body — otherwise the
