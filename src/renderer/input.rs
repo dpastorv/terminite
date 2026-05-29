@@ -705,3 +705,46 @@ impl Renderer {
         }
     }
 }
+
+// ── moved from mod.rs ───────────────────────────────
+
+impl Renderer {
+    pub fn ime_preedit(&mut self, text: String) {
+        self.preedit = text;
+        self.window.request_redraw();
+    }
+
+    pub fn ime_commit(&mut self, text: String) {
+        self.preedit.clear();
+        if !text.is_empty() {
+            self.active_tab_mut().active_term().write(text.into_bytes());
+        }
+        self.window.request_redraw();
+    }
+
+    /// 1-indexed (col, row) inside the visible viewport, for mouse-reporting
+    /// protocols. Returns `None` if the pointer is outside the text area.
+    pub(super) fn cell_at_1indexed(&self, x: f32, y: f32) -> Option<(u32, u32)> {
+        let metrics = self.active_pane_metrics();
+        let pad = self.pad;
+        let line_height = metrics.line_height;
+        let apr = self.active_pane_rect();
+        let left = apr.x + pad.left;
+        let top = apr.y + self.tab_bar_height + pad.top;
+        if x < left {
+            return None;
+        }
+        // pixel_offset correction so the reported cell is the one the user
+        // visually clicked on, not the natural-grid cell.
+        let row_f = (y - top - self.active_tab_ref().pixel_offset) / line_height;
+        if row_f < 0.0 {
+            return None;
+        }
+        let col = ((x - left) / metrics.cell_advance) as u32 + 1;
+        let row = row_f as u32 + 1;
+        if col as usize > self.grid_cols || row as usize > self.grid_rows {
+            return None;
+        }
+        Some((col, row))
+    }
+}

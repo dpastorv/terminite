@@ -1519,3 +1519,131 @@ impl Renderer {
         }
     }
 }
+
+// ── moved from mod.rs ───────────────────────────────
+
+impl Renderer {
+    /// Emit one pane's tab-bar rects into `out`, and return a label slot per
+    /// tab for the text pass. `rect` is the pane's full rect; the bar fills
+    /// its top `self.tab_bar_height`. `is_active_pane` gates the gold underline so
+    /// exactly one tab bar in the window marks where keystrokes go.
+    pub(super) fn build_pane_tab_bar(
+        &self,
+        pid: PaneId,
+        rect: PaneRect,
+        is_active_pane: bool,
+        out: &mut Vec<RectInstance>,
+    ) -> Vec<TabLabelSlot> {
+        let pane = self.root_ref().find(pid).expect("pane present");
+        let title_widths: Vec<f32> = pane
+            .tabs
+            .iter()
+            .map(|t| measure_title_width(&t.title_buffer))
+            .collect();
+        let ksw = kind_selector_w(self.config.tab_font_size);
+        let layout = pane_tab_layout(
+            rect,
+            &title_widths,
+            pane.active_tab,
+            self.tab_min_width,
+            self.tab_max_width,
+            ksw,
+        );
+        let bar_top = rect.y;
+        // Bar background across the pane's width.
+        out.push(RectInstance {
+            rect: [rect.x, bar_top, rect.w, self.tab_bar_height],
+            color: TAB_INACTIVE_BG,
+        });
+        // Kind selector — the leftmost element in the bar (Blender area
+        // header model). Same bg as inactive tabs, with a separator on
+        // its right edge. Click → opens a popover with available
+        // kinds. The label text is emitted in render's phase 2.
+        out.push(RectInstance {
+            rect: [
+                rect.x + ksw - 1.0,
+                bar_top + 6.0,
+                1.0,
+                self.tab_bar_height - 12.0,
+            ],
+            color: TAB_SEPARATOR,
+        });
+        let text_top = bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
+        let mut slots = Vec::with_capacity(layout.len());
+        for (i, (x, w, is_active)) in layout.iter().enumerate() {
+            let (x, w, is_active) = (*x, *w, *is_active);
+            out.push(RectInstance {
+                rect: [x, bar_top, w, self.tab_bar_height],
+                color: if is_active { TAB_ACTIVE_BG } else { TAB_INACTIVE_BG },
+            });
+            out.push(RectInstance {
+                rect: [x + w - 1.0, bar_top + 6.0, 1.0, self.tab_bar_height - 12.0],
+                color: TAB_SEPARATOR,
+            });
+            if is_active {
+                // Gold underline only in the focused pane; a dim seam marks
+                // the active tab of an unfocused pane.
+                out.push(RectInstance {
+                    rect: [x + 6.0, bar_top + self.tab_bar_height - 3.0, w - 12.0, 3.0],
+                    color: if is_active_pane {
+                        TAB_ACTIVE_UNDERLINE
+                    } else {
+                        TAB_SEPARATOR
+                    },
+                });
+            }
+            // Per-tab color band — a thin strip at the top of the tab
+            // slot, so it sits above the active-tab underline at the
+            // bottom and doesn't fight it. Drawn only when the tab
+            // has a non-`none` color picked.
+            let tab = &pane.tabs[i];
+            if tab.color_idx != 0 {
+                out.push(RectInstance {
+                    rect: [x + 6.0, bar_top + 2.0, w - 12.0, 3.0],
+                    color: palette_color(tab.color_idx),
+                });
+            }
+            let label_left = x + TAB_LABEL_INSET;
+            let label_right = (x + w - TAB_CLOSE_WIDTH).max(label_left);
+            let close_left = x + w - TAB_CLOSE_WIDTH + 8.0;
+            slots.push(TabLabelSlot {
+                index: i,
+                is_active,
+                label_left,
+                label_bounds: TextBounds {
+                    left: label_left as i32,
+                    top: bar_top as i32,
+                    right: label_right as i32,
+                    bottom: (bar_top + self.tab_bar_height) as i32,
+                },
+                close_left,
+                close_bounds: TextBounds {
+                    left: close_left as i32,
+                    top: bar_top as i32,
+                    right: (x + w) as i32,
+                    bottom: (bar_top + self.tab_bar_height) as i32,
+                },
+                text_top,
+            });
+        }
+        // Bottom border between the bar and the content.
+        out.push(RectInstance {
+            rect: [rect.x, bar_top + self.tab_bar_height, rect.w, 1.0],
+            color: TAB_SEPARATOR,
+        });
+        // Corner split handle — a "peel" triangle; drag it to split (or,
+        // dragged back out, to remove) this pane.
+        let grip_active = self.split_gesture.as_ref().map(|g| g.pid) == Some(pid);
+        push_split_grip(
+            out,
+            rect,
+            if grip_active {
+                TAB_ACTIVE_UNDERLINE
+            } else {
+                SPLIT_HANDLE_COLOR
+            },
+        );
+        slots
+    }
+
+}

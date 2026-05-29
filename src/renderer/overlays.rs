@@ -556,3 +556,61 @@ pub(super) struct Modal {
 }
 
 
+
+// ── moved from mod.rs ───────────────────────────────
+
+impl Renderer {
+    /// Compute the modal's card + button rectangles for the current surface
+    /// size. Also updates the cached hit-boxes on the open modal so mouse
+    /// clicks resolve to the correct button.
+    pub(super) fn build_modal_rects(&mut self) -> Vec<RectInstance> {
+        let modal = match self.modal.as_mut() {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let card_x = (surface_w - MODAL_CARD_W) * 0.5;
+        let card_y = (surface_h - MODAL_CARD_H) * 0.5;
+        let btn_y = card_y + MODAL_CARD_H - MODAL_BTN_H - 18.0;
+        let gap = 16.0;
+        let confirm_x = card_x + MODAL_CARD_W - MODAL_BTN_W - 18.0;
+        let cancel_x = confirm_x - MODAL_BTN_W - gap;
+        modal.cancel_rect = (cancel_x, btn_y, MODAL_BTN_W, MODAL_BTN_H);
+        modal.confirm_rect = (confirm_x, btn_y, MODAL_BTN_W, MODAL_BTN_H);
+
+        let border = 1.5;
+        vec![
+            // Dim full-surface overlay.
+            RectInstance {
+                rect: [0.0, 0.0, surface_w, surface_h],
+                color: MODAL_BG_DIM,
+            },
+            // Card border (drawn slightly larger; card bg covers the interior).
+            RectInstance {
+                rect: [
+                    card_x - border,
+                    card_y - border,
+                    MODAL_CARD_W + 2.0 * border,
+                    MODAL_CARD_H + 2.0 * border,
+                ],
+                color: MODAL_CARD_BORDER,
+            },
+            RectInstance {
+                rect: [card_x, card_y, MODAL_CARD_W, MODAL_CARD_H],
+                color: MODAL_CARD_BG,
+            },
+            // Cancel button.
+            RectInstance {
+                rect: [cancel_x, btn_y, MODAL_BTN_W, MODAL_BTN_H],
+                color: MODAL_BTN_BG,
+            },
+            // Confirm button (warm red — destructive emphasis).
+            RectInstance {
+                rect: [confirm_x, btn_y, MODAL_BTN_W, MODAL_BTN_H],
+                color: MODAL_BTN_CONFIRM_BG,
+            },
+        ]
+    }
+
+}

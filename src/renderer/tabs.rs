@@ -286,3 +286,141 @@ impl Tab {
 }
 
 
+
+// ── moved from mod.rs ───────────────────────────────
+
+impl Renderer {
+    pub fn new_tab(&mut self) {
+        // Inherit the active tab's shell cwd into the new shell.
+        // Inherit the active tab's shell cwd into the new shell.
+        let cwd = self.active_tab_ref().live_term.current_dir();
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        // The new tab joins the active pane, sized to that pane's rect.
+        let rect = self.active_pane_rect();
+        let (cols, rows) = pane_grid(rect, self.cell_advance, self.line_height, self.pad, self.tab_bar_height);
+        let live_term = LiveTerm::new(
+            cols,
+            rows,
+            self.cell_advance,
+            self.line_height,
+            self.proxy.clone(),
+            id,
+            cwd,
+            self.config.scrollback,
+        );
+        let title = "terminite".to_string();
+        let title_buf = make_title_buffer(
+            &mut self.font_system,
+            &title,
+            self.tab_font_size,
+            self.tab_line_h,
+            self.tab_max_width,
+        );
+        let text_buf = make_content_buffer(
+            &mut self.font_system,
+            self.cell_advance,
+            self.line_height,
+            self.font_size,
+            &self.font_family,
+            rect.w,
+            rect.h,
+        );
+        let tab = Tab::new(id, title, title_buf, live_term, text_buf, cols, rows);
+        let pane = self.active_pane_mut();
+        pane.tabs.push(tab);
+        pane.active_tab = pane.tabs.len() - 1;
+        self.sync_active_grid();
+        self.window.set_title(&self.active_tab_ref().title);
+        self.window.request_redraw();
+        self.persist_layout();
+    }
+
+    /// Request closing the active tab. If a non-shell process is in the
+    /// foreground, opens an in-window modal — the caller observes `false`
+    /// (didn't close) and the actual close happens when the user confirms.
+    /// Otherwise closes immediately. Returns true if the window should
+    /// exit (no tabs remain).
+    pub fn close_active_tab(&mut self) -> bool {
+        if self.modal.is_some() {
+            return false;
+        }
+        let live = &self.active_tab_mut().live_term;
+        if live.has_active_process() {
+            let proc_name = live
+                .foreground_pid()
+                .and_then(proc_name_of)
+                .unwrap_or_else(|| "A process".to_string());
+            let title = "Close tab?".to_string();
+            let body = format!("{proc_name} is running in this tab.");
+            self.open_modal(ModalAction::CloseTab, title, body, "Cancel", "Close");
+            return false;
+        }
+        self.do_close_active_tab()
+    }
+
+    /// Close the active tab. If it was the pane's last tab the pane closes
+    /// too; if that was the window's last pane, returns true (window exits).
+    pub(super) fn do_close_active_tab(&mut self) -> bool {
+        let pane = self.active_pane_mut();
+        if pane.tabs.len() > 1 {
+            let idx = pane.active_tab;
+            pane.tabs.remove(idx);
+            if pane.active_tab >= pane.tabs.len() {
+                pane.active_tab = pane.tabs.len() - 1;
+            }
+            self.sync_active_grid();
+            self.window.set_title(&self.active_tab_ref().title);
+            self.window.request_redraw();
+            self.persist_layout();
+            return false;
+        }
+        // Last tab in this pane — close the pane itself.
+        // close_active_pane already persists on its own.
+        self.close_active_pane()
+    }
+
+    /// Switch the active pane to one of its tabs by index.
+    pub fn switch_to_tab(&mut self, idx: usize) {
+        let pane = self.active_pane_mut();
+        if idx >= pane.tabs.len() || idx == pane.active_tab {
+            return;
+        }
+        // Drop the prior tab's selection + drag state — same reason
+        // we clear them on a pane switch. Otherwise a stale highlight
+        // (and worse, a silent "your Cmd+C did nothing, clipboard
+        // kept tab N's text") survives the switch.
+        {
+            let prior = pane.active_tab_mut();
+            prior.selection = None;
+            prior.dragging = false;
+        }
+        pane.active_tab = idx;
+        self.sync_active_grid();
+        self.window.set_title(&self.active_tab_ref().title);
+        self.window.request_redraw();
+    }
+
+    pub fn next_tab(&mut self) {
+        let pane = self.active_pane_ref();
+        if pane.tabs.len() <= 1 {
+            return;
+        }
+        let idx = (pane.active_tab + 1) % pane.tabs.len();
+        self.switch_to_tab(idx);
+    }
+
+    pub fn prev_tab(&mut self) {
+        let pane = self.active_pane_ref();
+        if pane.tabs.len() <= 1 {
+            return;
+        }
+        let idx = if pane.active_tab == 0 {
+            pane.tabs.len() - 1
+        } else {
+            pane.active_tab - 1
+        };
+        self.switch_to_tab(idx);
+    }
+
+}
