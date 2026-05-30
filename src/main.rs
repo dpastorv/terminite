@@ -10,6 +10,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 mod acp;
+mod activities;
 mod blocks;
 mod config;
 mod config_io;
