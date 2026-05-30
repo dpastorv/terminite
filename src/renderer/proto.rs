@@ -43,11 +43,69 @@ impl Renderer {
                     modules: self.modules.list().to_vec(),
                 }
             }
+            "activities_list" => self.proto_activities_list(&req.params),
+            "activity_emit" => self.proto_activity_emit(&req.params),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
         };
         let _ = out.try_send(crate::proto::OutMessage { id: req.id, payload });
+    }
+
+    /// Read the room's activity stream, with optional `actor` / `to` /
+    /// `kind` filters. `to: <slug>` returns only messages directed at that
+    /// slug (broadcasts excluded) — an agent's inbox.
+    pub(super) fn proto_activities_list(
+        &self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str());
+        let to = params.get("to").and_then(|v| v.as_str());
+        let kind = params.get("kind").and_then(|v| v.as_str());
+        let activities = self
+            .activities
+            .list(actor, to, kind)
+            .into_iter()
+            .map(activity_to_info)
+            .collect();
+        crate::proto::OutPayload::Activities { activities }
+    }
+
+    /// Record an agent message. `actor` is host-supplied (the MCP server's
+    /// `TERMINITE_ACTOR`), never self-declared. Lounge OFF here: this only
+    /// records — routing/delivery is the router step. Only `agent_message`
+    /// is accepted, which keeps the decision-kind question closed.
+    pub(super) fn proto_activity_emit(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        if actor.is_empty() {
+            return crate::proto::OutPayload::Error {
+                message: "activity_emit: missing actor — only a hosted agent with a room slug can emit".into(),
+            };
+        }
+        let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "agent_message" {
+            return crate::proto::OutPayload::Error {
+                message: format!("activity_emit: unsupported kind {kind:?} (only agent_message)"),
+            };
+        }
+        let text = params
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if text.trim().is_empty() {
+            return crate::proto::OutPayload::Error {
+                message: "activity_emit: empty text".into(),
+            };
+        }
+        let to = params.get("to").and_then(|v| v.as_str()).map(String::from);
+        let agent_name = agent_name_from_slug(actor);
+        self.activities
+            .emit_message(actor.to_string(), agent_name, to, text);
+        crate::proto::OutPayload::Ok
     }
 
     pub(super) fn proto_list_tabs(&self) -> crate::proto::OutPayload {
@@ -387,6 +445,35 @@ pub(super) fn block_output_text(tab: &Tab, block: &crate::blocks::Block) -> Opti
         tab.live_term
             .extract_text((start_line, 0), (end_line, max_col)),
     )
+}
+
+/// Project an `Activity` onto the proto wire shape.
+fn activity_to_info(a: &crate::activities::Activity) -> crate::proto::ActivityInfo {
+    use crate::activities::ActivityKind;
+    let (to, text) = match &a.kind {
+        ActivityKind::AgentMessage { to, text } => (to.clone(), Some(text.clone())),
+        ActivityKind::ToolCall { .. } => (None, None),
+    };
+    crate::proto::ActivityInfo {
+        id: a.id,
+        actor: a.actor.clone(),
+        agent_name: a.agent_name.clone(),
+        kind: a.kind_str().to_string(),
+        status: format!("{:?}", a.status).to_lowercase(),
+        title: a.title.clone(),
+        to,
+        text,
+    }
+}
+
+/// Cosmetic display name from a slug: `codex-1` → `Codex`.
+fn agent_name_from_slug(slug: &str) -> String {
+    let base = slug.split('-').next().unwrap_or(slug);
+    let mut chars = base.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => slug.to_string(),
+    }
 }
 
 

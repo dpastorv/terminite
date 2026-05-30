@@ -156,6 +156,10 @@ pub struct PermissionOption {
 pub struct AcpSession {
     pub binary: String,
     pub session_id: Option<String>,
+    /// This agent's room slug (`codex-1`), assigned by the host at
+    /// `Initialized` and injected into the agent's MCP server env so its
+    /// `activity_emit` calls are host-attributed, not self-declared.
+    pub slug: Option<String>,
     pub turns: Vec<Turn>,
     /// True between the moment we send `session/prompt` and the
     /// moment the agent stops streaming (no message-chunk in the
@@ -248,6 +252,7 @@ impl AcpSession {
         let mut session = AcpSession {
             binary: binary.to_string(),
             session_id: None,
+            slug: None,
             turns: Vec::new(),
             awaiting_response: false,
             draft: String::new(),
@@ -306,7 +311,7 @@ impl AcpSession {
             "method": "session/new",
             "params": {
                 "cwd": cwd,
-                "mcpServers": terminite_mcp_servers_array(),
+                "mcpServers": terminite_mcp_servers_array(self.slug.as_deref()),
                 "permissions": { "defaultMode": "default" },
             },
         });
@@ -436,15 +441,23 @@ impl Drop for AcpSession {
 /// terminite binary is currently running (debug, installed, .app
 /// bundle). If we can't resolve the path (rare), we fall back to an
 /// empty array — agent still works, just without room awareness.
-fn terminite_mcp_servers_array() -> Value {
+fn terminite_mcp_servers_array(slug: Option<&str>) -> Value {
     let Ok(path) = std::env::current_exe() else {
         return json!([]);
+    };
+    // Inject this agent's room slug into the MCP server's env. The agent
+    // spawns the server with exactly this env (it can't override what we
+    // specified), so `activity_emit` is attributed to whoever the host said
+    // this actor is — host-attributed identity, the E1 property.
+    let env = match slug {
+        Some(s) => json!([{ "name": "TERMINITE_ACTOR", "value": s }]),
+        None => json!([]),
     };
     json!([{
         "name": "terminite",
         "command": path.to_string_lossy(),
         "args": ["mcp"],
-        "env": [],
+        "env": env,
     }])
 }
 

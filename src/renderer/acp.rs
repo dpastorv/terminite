@@ -3,12 +3,33 @@
 use super::*;
 
 impl Renderer {
+    /// Assign the next room slug for an agent: its name's first word,
+    /// lowercased, plus a per-name counter — `codex-1`, `codex-2`,
+    /// `gemini-1`. Host-assigned, stable for the session's life.
+    fn next_actor_slug(&mut self, agent_name: &str) -> String {
+        let base = agent_name
+            .split_whitespace()
+            .next()
+            .unwrap_or("agent")
+            .to_lowercase();
+        let n = self.slug_counters.entry(base.clone()).or_insert(0);
+        *n += 1;
+        format!("{base}-{n}")
+    }
+
     /// Route one ACP event from a hosted agent in `tab_id` into that
     /// tab's session state, then ask for a redraw. The reader thread
     /// dispatches one event per inbound JSON-RPC frame; here we
     /// mutate `Turn`s and respond to fs callbacks.
     pub fn handle_acp_event(&mut self, tab_id: TabId, event: crate::acp::AcpEvent) {
         use crate::acp::AcpEvent;
+        // Assign this agent's room identity up front — it needs `&mut self`
+        // for the counter, which we can't reach once the tab tree is
+        // borrowed below. The slug is what the agent is known by in the room.
+        let assigned_slug = match &event {
+            AcpEvent::Initialized { agent_name, .. } => Some(self.next_actor_slug(agent_name)),
+            _ => None,
+        };
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root
             .as_mut()
@@ -22,13 +43,15 @@ impl Renderer {
         };
         match event {
             AcpEvent::Initialized { agent_name, agent_version } => {
+                session.slug = assigned_slug;
                 crate::logging::info(&format!(
-                    "acp tab {}: initialized ({agent_name}{})",
+                    "acp tab {}: initialized ({agent_name}{}) as {}",
                     tab_id.0,
                     agent_version
                         .as_deref()
                         .map(|v| format!(" v{v}"))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    session.slug.as_deref().unwrap_or("?"),
                 ));
                 // Open a session in the project root by default.
                 let cwd = std::env::current_dir()

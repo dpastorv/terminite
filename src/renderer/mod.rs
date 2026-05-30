@@ -404,6 +404,15 @@ pub struct Renderer {
     /// (channel full or disconnected) clears the slot.
     proto_subscriber: Option<std::sync::mpsc::SyncSender<crate::proto::OutMessage>>,
 
+    /// The room's activity stream — workspace-global (not per-tab),
+    /// because cross-pane visibility is the whole point. The lounge's
+    /// substrate; see `guide/lounge-experiment.md`.
+    activities: crate::activities::ActivityStore,
+    /// Per-agent-name counters for assigning session slugs (`codex-1`,
+    /// `codex-2`, `gemini-1`). Each hosted agent gets a stable id at
+    /// session open; that id is what it's known by in the room.
+    slug_counters: std::collections::HashMap<String, u32>,
+
     /// Recent frame timings in milliseconds — rolling window for the
     /// stats verb. Capped at `FRAME_TIMER_CAP` samples.
     frame_samples: std::collections::VecDeque<f32>,
@@ -656,6 +665,8 @@ impl Renderer {
             config,
             proxy,
             proto_subscriber: None,
+            activities: crate::activities::ActivityStore::new(),
+            slug_counters: std::collections::HashMap::new(),
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,

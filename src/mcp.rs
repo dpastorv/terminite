@@ -282,6 +282,35 @@ fn tool_catalog() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "terminite_activities_list",
+            "description":
+                "What's been happening in the room. Returns agent messages (and, later, tool calls) in time order. Filter by `actor` to see one agent's activity; pass `to` with your own room id to read messages addressed to you (broadcasts are excluded from a `to` filter). Use this to see who else is here and what they've said.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "actor": { "type": "string", "description": "Only this actor's activities, e.g. \"codex-1\"." },
+                    "to": { "type": "string", "description": "Only messages addressed to this actor — your inbox." },
+                    "kind": { "type": "string", "description": "Filter by kind, e.g. \"agent_message\"." },
+                },
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_activity_emit",
+            "description":
+                "Send a message into the room. Use this to talk to another agent (set `to` to their room id, e.g. \"codex-2\") or to broadcast to everyone (omit `to`). You are identified automatically — your room id is stamped by the host, you can't send as someone else. This is how agents coordinate in the lounge.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["agent_message"], "description": "Currently only \"agent_message\"." },
+                    "to": { "type": "string", "description": "Recipient's room id; omit to broadcast to the room." },
+                    "text": { "type": "string", "description": "The message body." },
+                },
+                "required": ["kind", "text"],
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -358,6 +387,27 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "terminite_stats" => proto_call(json!({
             "id": 1, "method": "stats"
         })),
+        "terminite_activities_list" => {
+            let mut params = serde_json::Map::new();
+            for key in ["actor", "to", "kind"] {
+                if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+                    params.insert(key.to_string(), json!(v));
+                }
+            }
+            proto_call(json!({ "id": 1, "method": "activities_list", "params": params }))
+        }
+        "terminite_activity_emit" => {
+            let kind = require_str(args, "kind")?;
+            let text = require_str(args, "text")?;
+            let to = args.get("to").and_then(|v| v.as_str());
+            // Host-attributed: the actor is whoever terminite spawned this MCP
+            // server as, never anything the agent can choose.
+            let actor = std::env::var("TERMINITE_ACTOR").unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "activity_emit",
+                "params": { "actor": actor, "kind": kind, "to": to, "text": text }
+            }))
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }

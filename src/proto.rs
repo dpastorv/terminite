@@ -100,6 +100,11 @@ pub enum OutPayload {
     Modules {
         modules: Vec<crate::modules::ModuleManifest>,
     },
+    /// The room's activity stream — agent tool calls and messages, in
+    /// time order. The lounge's read surface.
+    Activities {
+        activities: Vec<ActivityInfo>,
+    },
     Error {
         message: String,
     },
@@ -154,6 +159,22 @@ pub enum EventPayload {
 pub struct TabInfo {
     pub tab_id: u64,
     pub title: String,
+}
+
+/// One activity on the wire. `actor` + `id` are the visible coordinate
+/// (`codex-1.act-7`). `to`/`text` are present only for messages.
+#[derive(Serialize, Debug)]
+pub struct ActivityInfo {
+    pub id: u64,
+    pub actor: String,
+    pub agent_name: String,
+    pub kind: String,
+    pub status: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

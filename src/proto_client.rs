@@ -70,6 +70,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "cursor-clear" => Some(cmd_cursor_clear(args.get(1).and_then(|s| s.parse().ok()))),
         "export" => Some(cmd_export(&args[1..])),
         "stats" => Some(cmd_stats()),
+        "activities" => Some(cmd_activities(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
         "mcp" => Some(crate::mcp::run()),
@@ -135,6 +136,26 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
     let tab_id = tab_id.unwrap_or(0);
     one_shot(&format!(
         r#"{{"id":1,"method":"list_blocks","params":{{"tab_id":{tab_id}}}}}"#
+    ))
+}
+
+fn cmd_activities(args: &[String]) -> ExitCode {
+    // terminite activities            → the whole room, time order
+    // terminite activities <actor>    → one actor's activity
+    // terminite activities to <slug>  → messages addressed to <slug> (inbox)
+    let params = match args.first().map(|s| s.as_str()) {
+        Some("to") => match args.get(1) {
+            Some(slug) => format!(r#"{{"to":"{slug}"}}"#),
+            None => {
+                eprintln!("usage: terminite activities to <slug>");
+                return ExitCode::from(2);
+            }
+        },
+        Some(actor) => format!(r#"{{"actor":"{actor}"}}"#),
+        None => "{}".to_string(),
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"activities_list","params":{params}}}"#
     ))
 }
 

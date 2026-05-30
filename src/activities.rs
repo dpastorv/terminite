@@ -12,9 +12,10 @@
 //! (see `guide/lounge-experiment.md`); it knows nothing about routing — it
 //! just records and queries.
 
-// The store is defined ahead of its consumer. Step 2 of the lounge
-// experiment wires it onto `Renderer` and uses it; this allow is removed
-// then (its removal compiling clean proves the wiring landed).
+// The message path (emit_message / list / get) is wired and live. The
+// ToolCall "see" half (ToolCall kind + update_status) is built but not yet
+// emitted — automatic ACP tool-call emission is a fast-follow. This allow
+// covers only that not-yet-exercised path; remove it when the see-half lands.
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
