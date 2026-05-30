@@ -73,7 +73,16 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "activities" => Some(cmd_activities(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
-        "mcp" => Some(crate::mcp::run()),
+        "mcp" => {
+            // The host spawns us as `terminite mcp --actor <slug>` so emits
+            // are attributed to this agent.
+            let actor = args
+                .iter()
+                .position(|a| a == "--actor")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
+            Some(crate::mcp::run(actor))
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)

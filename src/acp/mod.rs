@@ -445,19 +445,20 @@ fn terminite_mcp_servers_array(slug: Option<&str>) -> Value {
     let Ok(path) = std::env::current_exe() else {
         return json!([]);
     };
-    // Inject this agent's room slug into the MCP server's env. The agent
-    // spawns the server with exactly this env (it can't override what we
-    // specified), so `activity_emit` is attributed to whoever the host said
-    // this actor is — host-attributed identity, the E1 property.
-    let env = match slug {
-        Some(s) => json!([{ "name": "TERMINITE_ACTOR", "value": s }]),
-        None => json!([]),
+    // Pass the agent's room slug as a command arg to its MCP server, so its
+    // `activity_emit` calls are host-attributed (the agent spawns the command
+    // exactly as specified — it can't claim another identity). We use `args`
+    // rather than `env` because the env array shape is adapter-fragile (it
+    // broke session/new); `args` is the field that already works.
+    let args = match slug {
+        Some(s) => json!(["mcp", "--actor", s]),
+        None => json!(["mcp"]),
     };
     json!([{
         "name": "terminite",
         "command": path.to_string_lossy(),
-        "args": ["mcp"],
-        "env": env,
+        "args": args,
+        "env": [],
     }])
 }
 

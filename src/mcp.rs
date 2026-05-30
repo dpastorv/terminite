@@ -45,10 +45,18 @@ const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const SERVER_NAME: &str = "terminite";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// This server's room actor slug, passed via `terminite mcp --actor <slug>`
+/// when the host spawns it for an ACP session. Host-assigned; the agent
+/// can't override it. `None` when run standalone (CLI emit is rejected).
+static ACTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// Run the MCP server loop until stdin closes. Blocking; intended
 /// to be invoked as `terminite mcp` and driven by an AI client's
-/// MCP runtime.
-pub fn run() -> ExitCode {
+/// MCP runtime. `actor` is the host-assigned room slug, if any.
+pub fn run(actor: Option<String>) -> ExitCode {
+    if let Some(a) = actor {
+        let _ = ACTOR.set(a);
+    }
     let stdin = io::stdin();
     let mut reader = BufReader::with_capacity(MAX_LINE_BYTES, stdin.lock());
     let stdout = io::stdout();
@@ -401,8 +409,8 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let text = require_str(args, "text")?;
             let to = args.get("to").and_then(|v| v.as_str());
             // Host-attributed: the actor is whoever terminite spawned this MCP
-            // server as, never anything the agent can choose.
-            let actor = std::env::var("TERMINITE_ACTOR").unwrap_or_default();
+            // server as (via --actor), never anything the agent can choose.
+            let actor = ACTOR.get().cloned().unwrap_or_default();
             proto_call(json!({
                 "id": 1, "method": "activity_emit",
                 "params": { "actor": actor, "kind": kind, "to": to, "text": text }
