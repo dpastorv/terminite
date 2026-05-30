@@ -3,6 +3,20 @@
 use super::*;
 
 impl Renderer {
+    /// The preset display name of the agent tab (`Codex`, `Gemini`, …),
+    /// or `"agent"` if the tab isn't an agent (shouldn't happen here).
+    fn agent_preset_name(&self, tab_id: TabId) -> String {
+        let mut tabs: Vec<&Tab> = Vec::new();
+        self.root.as_ref().expect("pane tree present").all_tabs(&mut tabs);
+        tabs.into_iter()
+            .find(|t| t.id == tab_id)
+            .and_then(|t| match &t.kind {
+                TabContentKind::Agent(name) => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "agent".to_string())
+    }
+
     /// Assign the next room slug for an agent: its name's first word,
     /// lowercased, plus a per-name counter — `codex-1`, `codex-2`,
     /// `gemini-1`. Host-assigned, stable for the session's life.
@@ -24,11 +38,17 @@ impl Renderer {
     pub fn handle_acp_event(&mut self, tab_id: TabId, event: crate::acp::AcpEvent) {
         use crate::acp::AcpEvent;
         // Assign this agent's room identity up front — it needs `&mut self`
-        // for the counter, which we can't reach once the tab tree is
-        // borrowed below. The slug is what the agent is known by in the room.
-        let assigned_slug = match &event {
-            AcpEvent::Initialized { agent_name, .. } => Some(self.next_actor_slug(agent_name)),
-            _ => None,
+        // for the counter, which we can't reach once the tab tree is borrowed
+        // below. Derive the slug from the *preset* name (the "Codex" the human
+        // picked from the dropdown) — NOT the adapter's agentInfo.name, which
+        // is "@zed-industries/codex-acp" and yields an ugly `codex-acp-1` that
+        // no one — human or agent — would guess. `codex-1` is what everyone
+        // already says, so directed messages actually resolve.
+        let assigned_slug = if matches!(event, AcpEvent::Initialized { .. }) {
+            let preset_name = self.agent_preset_name(tab_id);
+            Some(self.next_actor_slug(&preset_name))
+        } else {
+            None
         };
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root
