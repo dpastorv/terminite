@@ -312,7 +312,13 @@ impl AcpSession {
             "params": {
                 "cwd": cwd,
                 "mcpServers": terminite_mcp_servers_array(self.slug.as_deref()),
-                "permissions": { "defaultMode": "default" },
+                // No `permissions` field. The Stage-1 work sent
+                // `permissions: { defaultMode: "default" }`; codex-acp maps
+                // that through a path that yields `auto` and an internal
+                // validator rejects it — `Invalid permissions.defaultMode:
+                // auto` — failing session/new. Verified by driving codex-acp
+                // standalone: omit the field and session/new succeeds, the
+                // adapter defaulting to its own `auto` mode. So we omit it.
             },
         });
         let _ = self.input_tx.try_send(req.to_string());
