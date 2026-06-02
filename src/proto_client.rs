@@ -72,6 +72,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "stats" => Some(cmd_stats()),
         "activities" => Some(cmd_activities(&args[1..])),
         "room-who" => Some(cmd_room_who()),
+        "install" => Some(cmd_install(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
         "mcp" => {
@@ -121,6 +122,11 @@ USAGE
   terminite activities [actor]       the room's activity stream, in time
                                      order (all actors, or just <actor>;
                                      `to <slug>` reads <slug>'s inbox)
+  terminite install claude-terminite [--profile <name|dir>]
+                                     make plain `claude` terminite-aware —
+                                     writes the room skill + MCP server into
+                                     the profile (default ~/.claude). Reverse:
+                                     `claude mcp remove lounge`
   terminite module list              registered modules (extension surface)
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module
@@ -156,6 +162,122 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
 
 fn cmd_room_who() -> ExitCode {
     one_shot(r#"{"id":1,"method":"room_who"}"#)
+}
+
+/// The validated claude-terminite skill, embedded so the binary is
+/// self-contained — `terminite install` writes this to the target profile.
+const CLAUDE_SKILL: &str = include_str!("../faculty/claude-terminite/SKILL.md");
+
+/// `terminite install <faculty> [--profile <name|dir>]` — write a faculty
+/// into an AI CLI's profile so plain `claude` becomes terminite-aware. Opt-in
+/// (the user runs it) and reversible (`claude mcp remove lounge` + delete the
+/// skill dir). Today: claude-terminite.
+fn cmd_install(args: &[String]) -> ExitCode {
+    match args.first().map(|s| s.as_str()) {
+        Some("claude-terminite") | Some("claude") => install_claude_terminite(&args[1..]),
+        Some(other) => {
+            eprintln!("terminite install: unknown faculty `{other}` — try `claude-terminite`");
+            ExitCode::from(2)
+        }
+        None => {
+            eprintln!("usage: terminite install claude-terminite [--profile <name|dir>]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn install_claude_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // Profile dir: `--profile <name|dir>` → a bare name `bivoo` means
+    // `~/.claude-bivoo`; a path is used as-is. Else $CLAUDE_CONFIG_DIR, else
+    // ~/.claude.
+    let config_dir = match resolve_profile_dir(args) {
+        Some(d) => d,
+        None => {
+            eprintln!("terminite install: no HOME / CLAUDE_CONFIG_DIR to install into");
+            return ExitCode::from(1);
+        }
+    };
+
+    // 1. Place the skill (the context carrier).
+    let skill_dir = config_dir.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't create {}: {e}", skill_dir.display());
+        return ExitCode::from(1);
+    }
+    let skill_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_path, CLAUDE_SKILL) {
+        eprintln!("terminite install: can't write {}: {e}", skill_path.display());
+        return ExitCode::from(1);
+    }
+
+    // 2. Register the MCP server via claude's own CLI, so the config edit is
+    //    claude's (robust) not ours.
+    let manual = format!(
+        "claude mcp add --scope user lounge -- {} mcp --actor claude",
+        bin.display()
+    );
+    let mut cmd = std::process::Command::new("claude");
+    // Only override CLAUDE_CONFIG_DIR for an explicit `--profile`. For the
+    // default profile we must NOT set it: a plain `claude` reads its user MCP
+    // config from `~/.claude.json`, but forcing `CLAUDE_CONFIG_DIR=~/.claude`
+    // makes `claude mcp add` write to `~/.claude/.claude.json` instead — a
+    // file the default claude never reads, so the server would silently never
+    // load.
+    if args.iter().any(|a| a == "--profile") {
+        cmd.env("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+    let status = cmd
+        .args(["mcp", "add", "--scope", "user", "lounge", "--"])
+        .arg(&bin)
+        .args(["mcp", "--actor", "claude"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("installed claude-terminite into {}", config_dir.display());
+            println!("  skill: {}", skill_path.display());
+            println!("  mcp:   lounge → {} mcp --actor claude", bin.display());
+            println!("\nplain `claude` in a terminite pane now joins the room.");
+            println!("reverse with: claude mcp remove lounge   (and rm -r {})", skill_dir.display());
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: skill placed, but `claude mcp add` failed ({s}).");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: skill placed, but couldn't run `claude` ({e}) — is it on PATH?");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Resolve the target Claude profile dir from `--profile`, else
+/// `$CLAUDE_CONFIG_DIR`, else `~/.claude`. A bare `--profile bivoo` maps to
+/// `~/.claude-bivoo` (the convention); a value with a `/` is a literal path.
+fn resolve_profile_dir(args: &[String]) -> Option<PathBuf> {
+    if let Some(i) = args.iter().position(|a| a == "--profile") {
+        if let Some(val) = args.get(i + 1) {
+            if val.contains('/') {
+                return Some(PathBuf::from(val));
+            }
+            let home = std::env::var_os("HOME")?;
+            return Some(PathBuf::from(home).join(format!(".claude-{val}")));
+        }
+    }
+    if let Some(d) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".claude"))
 }
 
 fn cmd_activities(args: &[String]) -> ExitCode {

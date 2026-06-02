@@ -514,6 +514,7 @@ fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
         base: p.base.clone(),
         color: p.color.name.to_string(),
         rgb: [p.color.rgb.0, p.color.rgb.1, p.color.rgb.2],
+        pane: p.pane,
     }
 }
 

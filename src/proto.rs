@@ -196,6 +196,11 @@ pub struct ActorInfo {
     pub base: String,
     pub color: String,
     pub rgb: [u8; 3],
+    /// The pane the actor is in (`TERMINITE_PANE`), if it told us. `null`
+    /// means it connected from outside a terminite pane — or its env didn't
+    /// carry the var through, which is the thing to check if a tint is missing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
