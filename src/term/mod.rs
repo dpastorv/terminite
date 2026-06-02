@@ -334,6 +334,11 @@ impl LiveTerm {
                 .env
                 .insert("TERMINITE_SOCKET".to_string(), socket.to_string_lossy().into_owned());
         }
+        // Per-pane id, so an agent that joins the room can tell terminite
+        // which pane it's in — terminite tints that pane in the actor's color.
+        tty_options
+            .env
+            .insert("TERMINITE_PANE".to_string(), tab_id.0.to_string());
         if let Some(cwd) = cwd {
             tty_options.working_directory = Some(cwd);
         }

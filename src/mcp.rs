@@ -462,7 +462,12 @@ fn join_room(base: &str) -> Result<(UnixStream, String), String> {
     let mut stream = UnixStream::connect(&path).map_err(|e| {
         format!("can't connect to {} — is terminite running? ({e})", path.display())
     })?;
-    let mut line = json!({ "id": 1, "method": "room_join", "params": { "base": base } }).to_string();
+    // Tell terminite which pane we're in (if we're in one) so it can tint it.
+    let mut params = json!({ "base": base });
+    if let Some(pane) = std::env::var("TERMINITE_PANE").ok().and_then(|s| s.parse::<u64>().ok()) {
+        params["pane"] = json!(pane);
+    }
+    let mut line = json!({ "id": 1, "method": "room_join", "params": params }).to_string();
     line.push('\n');
     stream.write_all(line.as_bytes()).map_err(|e| format!("join write: {e}"))?;
     // Read the Joined response off a clone so the original stays open + held.

@@ -55,6 +55,10 @@ pub struct Presence {
     /// What the agent supplied — type[+profile], e.g. `claude-gut`.
     pub base: String,
     pub color: ActorColor,
+    /// The tab/pane the agent is running in (`TERMINITE_PANE`), if it told
+    /// us — lets terminite tint that pane in this actor's color. `None` when
+    /// the agent connected from outside a terminite pane.
+    pub pane: Option<u64>,
     /// Monotonic join order, for stable display.
     pub seq: u64,
 }
@@ -73,10 +77,11 @@ impl Roster {
         Self::default()
     }
 
-    /// A connection joined with `base`. Assigns the first free palette color
-    /// (recycled colors included), builds a unique slug, records presence, and
-    /// returns it so the caller can hand the slug + color back to the agent.
-    pub fn join(&mut self, conn_id: u64, base: &str) -> Presence {
+    /// A connection joined with `base` (and, if it's in a terminite pane, the
+    /// pane id). Assigns the first free palette color (recycled colors
+    /// included), builds a unique slug, records presence, and returns it so the
+    /// caller can hand the slug + color back to the agent.
+    pub fn join(&mut self, conn_id: u64, base: &str, pane: Option<u64>) -> Presence {
         let used: HashSet<&str> = self.by_conn.values().map(|p| p.color.name).collect();
         // First free color; if the palette is exhausted, reuse from the front
         // (slug stays unique via the suffix dedup below).
@@ -102,6 +107,7 @@ impl Roster {
             slug,
             base: base.to_string(),
             color,
+            pane,
             seq,
         };
         self.by_conn.insert(conn_id, presence.clone());
@@ -126,6 +132,15 @@ impl Roster {
         self.by_conn.get(&conn_id).map(|p| p.slug.as_str())
     }
 
+    /// The color of the actor present in `pane`, if any — the renderer's tint
+    /// lookup. First match wins (one agent per pane in practice).
+    pub fn color_for_pane(&self, pane: u64) -> Option<ActorColor> {
+        self.by_conn
+            .values()
+            .find(|p| p.pane == Some(pane))
+            .map(|p| p.color)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_conn.is_empty()
     }
@@ -138,8 +153,8 @@ mod tests {
     #[test]
     fn assigns_distinct_colors_per_connection() {
         let mut r = Roster::new();
-        let a = r.join(1, "claude");
-        let b = r.join(2, "claude");
+        let a = r.join(1, "claude", None);
+        let b = r.join(2, "claude", None);
         assert_ne!(a.color.name, b.color.name, "two claudes get different colors");
         assert_ne!(a.slug, b.slug);
         assert_eq!(a.slug, "claude-blue");
@@ -149,7 +164,7 @@ mod tests {
     #[test]
     fn base_carries_the_profile() {
         let mut r = Roster::new();
-        let p = r.join(1, "claude-gut");
+        let p = r.join(1, "claude-gut", None);
         assert_eq!(p.slug, "claude-gut-blue");
         assert_eq!(p.base, "claude-gut");
     }
@@ -157,19 +172,19 @@ mod tests {
     #[test]
     fn leaving_frees_the_color_for_reuse() {
         let mut r = Roster::new();
-        let a = r.join(1, "claude"); // blue
-        let _b = r.join(2, "codex"); // green
+        let a = r.join(1, "claude", None); // blue
+        let _b = r.join(2, "codex", None); // green
         assert_eq!(a.color.name, "blue");
         r.leave(1); // frees blue
-        let c = r.join(3, "kimi"); // should reclaim blue, the first free
+        let c = r.join(3, "kimi", None); // should reclaim blue, the first free
         assert_eq!(c.color.name, "blue");
     }
 
     #[test]
     fn present_is_join_ordered_and_excludes_the_departed() {
         let mut r = Roster::new();
-        r.join(1, "claude");
-        r.join(2, "codex");
+        r.join(1, "claude", None);
+        r.join(2, "codex", None);
         r.leave(1);
         let present = r.present();
         assert_eq!(present.len(), 1);
@@ -179,13 +194,25 @@ mod tests {
     }
 
     #[test]
+    fn color_for_pane_finds_the_actor_in_that_pane() {
+        let mut r = Roster::new();
+        let a = r.join(1, "claude", Some(3));
+        r.join(2, "codex", Some(5));
+        assert_eq!(r.color_for_pane(3).map(|c| c.name), Some(a.color.name));
+        assert_eq!(r.color_for_pane(5).map(|c| c.name), Some("green"));
+        assert!(r.color_for_pane(99).is_none(), "no actor in an empty pane");
+        r.leave(1);
+        assert!(r.color_for_pane(3).is_none(), "departed actor frees its pane");
+    }
+
+    #[test]
     fn slug_stays_unique_when_palette_exhausts() {
         let mut r = Roster::new();
         // Fill the whole palette with the same base, then one more.
         for conn in 0..ACTOR_PALETTE.len() as u64 {
-            r.join(conn, "claude");
+            r.join(conn, "claude", None);
         }
-        let extra = r.join(999, "claude");
+        let extra = r.join(999, "claude", None);
         let slugs: HashSet<String> = r.present().iter().map(|p| p.slug.clone()).collect();
         assert_eq!(slugs.len(), ACTOR_PALETTE.len() + 1, "every slug is unique");
         assert!(extra.slug.ends_with("-2"), "exhaustion suffixes for uniqueness: {}", extra.slug);

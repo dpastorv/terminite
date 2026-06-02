@@ -133,7 +133,8 @@ impl Renderer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("agent");
-        let presence = self.roster.join(conn_id, base);
+        let pane = params.get("pane").and_then(|v| v.as_u64());
+        let presence = self.roster.join(conn_id, base, pane);
         self.window.request_redraw();
         crate::proto::OutPayload::Joined {
             actor: presence_to_info(&presence),

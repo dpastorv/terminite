@@ -887,10 +887,26 @@ impl Renderer {
             // bottom and doesn't fight it. Drawn only when the tab
             // has a non-`none` color picked.
             let tab = &pane.tabs[i];
-            if tab.color_idx != 0 {
+            // A room actor present in this pane tints its tab in the host-
+            // assigned color (`claude-blue` → blue band), overriding any
+            // user-picked tab color. Falls back to the user's color band when
+            // no agent is here.
+            let band = self
+                .roster
+                .color_for_pane(tab.id.0)
+                .map(|c| {
+                    [
+                        c.rgb.0 as f32 / 255.0,
+                        c.rgb.1 as f32 / 255.0,
+                        c.rgb.2 as f32 / 255.0,
+                        1.0,
+                    ]
+                })
+                .or_else(|| (tab.color_idx != 0).then(|| palette_color(tab.color_idx)));
+            if let Some(color) = band {
                 out.push(RectInstance {
                     rect: [x + 6.0, bar_top + 2.0, w - 12.0, 3.0],
-                    color: palette_color(tab.color_idx),
+                    color,
                 });
             }
             let label_left = x + TAB_LABEL_INSET;
