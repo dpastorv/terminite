@@ -316,6 +316,24 @@ impl LiveTerm {
         tty_options
             .env
             .insert("COLORTERM".to_string(), "truecolor".to_string());
+        // Self-announce into every spawned PTY: any process inside a
+        // terminite pane can now detect it's in terminite (`TERMINITE` =
+        // version) and find the room socket (`TERMINITE_SOCKET`). This is
+        // the standard terminal self-identification pattern — cf.
+        // `TERM_PROGRAM`, `ITERM_SESSION_ID`, `INSIDE_EMACS`. The
+        // per-pane host-assigned room id (`TERMINITE_ACTOR`) layers on
+        // top of this for agent panes.
+        tty_options
+            .env
+            .insert("TERMINITE".to_string(), env!("CARGO_PKG_VERSION").to_string());
+        let socket = std::env::var_os("TERMINITE_SOCKET")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".terminite/socket")));
+        if let Some(socket) = socket {
+            tty_options
+                .env
+                .insert("TERMINITE_SOCKET".to_string(), socket.to_string_lossy().into_owned());
+        }
         if let Some(cwd) = cwd {
             tty_options.working_directory = Some(cwd);
         }
