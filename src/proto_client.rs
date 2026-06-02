@@ -71,6 +71,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "export" => Some(cmd_export(&args[1..])),
         "stats" => Some(cmd_stats()),
         "activities" => Some(cmd_activities(&args[1..])),
+        "room-who" => Some(cmd_room_who()),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
         "mcp" => {
@@ -115,6 +116,11 @@ USAGE
                                      [--since <id>] starts from block id
   terminite stats                    snapshot of internal state
                                      (frames, tabs, blocks, memory)
+  terminite room-who                 who is present in the room now
+                                     (attendance) — each actor + its color
+  terminite activities [actor]       the room's activity stream, in time
+                                     order (all actors, or just <actor>;
+                                     `to <slug>` reads <slug>'s inbox)
   terminite module list              registered modules (extension surface)
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module
@@ -146,6 +152,10 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
     one_shot(&format!(
         r#"{{"id":1,"method":"list_blocks","params":{{"tab_id":{tab_id}}}}}"#
     ))
+}
+
+fn cmd_room_who() -> ExitCode {
+    one_shot(r#"{"id":1,"method":"room_who"}"#)
 }
 
 fn cmd_activities(args: &[String]) -> ExitCode {

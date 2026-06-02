@@ -405,6 +405,10 @@ pub struct Renderer {
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
     activities: crate::activities::ActivityStore,
+    /// Who is *present* in the room right now (attendance), keyed by proto
+    /// connection id. Workspace-global like `activities`. Host-assigned
+    /// color per actor; presence ends when the connection drops.
+    roster: crate::presence::Roster,
 
     /// Recent frame timings in milliseconds — rolling window for the
     /// stats verb. Capped at `FRAME_TIMER_CAP` samples.
@@ -652,6 +656,7 @@ impl Renderer {
             proxy,
             proto_subscriber: None,
             activities: crate::activities::ActivityStore::new(),
+            roster: crate::presence::Roster::new(),
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,

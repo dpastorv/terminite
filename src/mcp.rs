@@ -54,9 +54,26 @@ static ACTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 /// to be invoked as `terminite mcp` and driven by an AI client's
 /// MCP runtime. `actor` is the host-assigned room slug, if any.
 pub fn run(actor: Option<String>) -> ExitCode {
-    if let Some(a) = actor {
-        let _ = ACTOR.set(a);
-    }
+    // Presence: hold one connection open for our whole lifetime. We join the
+    // room with our base name (type[+profile], e.g. `claude-gut`); terminite
+    // assigns a unique color and hands back the slug we go by (`claude-gut-
+    // blue`). The held connection *is* our attendance — when this process
+    // exits (stdin EOF), it closes and terminite drops us from the roster.
+    // `_presence` is bound for the whole function so the stream stays open.
+    let _presence: Option<UnixStream> = match actor.as_deref() {
+        Some(base) => match join_room(base) {
+            Ok((stream, slug)) => {
+                let _ = ACTOR.set(slug);
+                Some(stream)
+            }
+            Err(e) => {
+                eprintln!("terminite mcp: room join failed ({e}); using base name");
+                let _ = ACTOR.set(base.to_string());
+                None
+            }
+        },
+        None => None,
+    };
     let stdin = io::stdin();
     let mut reader = BufReader::with_capacity(MAX_LINE_BYTES, stdin.lock());
     let stdout = io::stdout();
@@ -319,6 +336,16 @@ fn tool_catalog() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "terminite_room_who",
+            "description":
+                "Who is present in the room right now — every agent (and the human) currently connected, each with its host-assigned color id, even if they haven't said anything yet. Use this to see who you're sharing the session with. This is *attendance*; `terminite_activities_list` is what's been *done*.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -395,6 +422,9 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
         "terminite_stats" => proto_call(json!({
             "id": 1, "method": "stats"
         })),
+        "terminite_room_who" => proto_call(json!({
+            "id": 1, "method": "room_who"
+        })),
         "terminite_activities_list" => {
             let mut params = serde_json::Map::new();
             for key in ["actor", "to", "kind"] {
@@ -421,6 +451,39 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
 }
 
 // ── Proto socket bridge ──────────────────────────────────────────────────
+
+/// Open a held presence connection and join the room. Returns the open stream
+/// — keep it alive; its lifetime is our attendance — and the host-assigned
+/// slug to go by. terminite sends nothing more on this connection; it just
+/// blocks reading it, and sees EOF (→ leave) when we exit.
+fn join_room(base: &str) -> Result<(UnixStream, String), String> {
+    let path = socket_path()
+        .ok_or_else(|| "no socket path — set $TERMINITE_SOCKET or $HOME".to_string())?;
+    let mut stream = UnixStream::connect(&path).map_err(|e| {
+        format!("can't connect to {} — is terminite running? ({e})", path.display())
+    })?;
+    let mut line = json!({ "id": 1, "method": "room_join", "params": { "base": base } }).to_string();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).map_err(|e| format!("join write: {e}"))?;
+    // Read the Joined response off a clone so the original stays open + held.
+    let clone = stream.try_clone().map_err(|e| format!("join clone: {e}"))?;
+    let mut reader = BufReader::new(clone);
+    let mut resp = String::new();
+    reader.read_line(&mut resp).map_err(|e| format!("join read: {e}"))?;
+    let parsed: Value = serde_json::from_str(resp.trim())
+        .map_err(|e| format!("invalid join response: {e}"))?;
+    if parsed.get("kind").and_then(|k| k.as_str()) == Some("error") {
+        let msg = parsed.get("message").and_then(|m| m.as_str()).unwrap_or("(no message)");
+        return Err(format!("terminite error: {msg}"));
+    }
+    let slug = parsed
+        .get("actor")
+        .and_then(|a| a.get("slug"))
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| "join response missing actor.slug".to_string())?
+        .to_string();
+    Ok((stream, slug))
+}
 
 fn proto_call(req: Value) -> Result<String, String> {
     let path = socket_path().ok_or_else(|| {

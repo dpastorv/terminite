@@ -9,14 +9,21 @@ impl Renderer {
         self.proto_subscriber = None;
     }
 
-    /// The module disconnected — clear the subscriber slot.
-    pub fn handle_proto_disconnect(&mut self) {
+    /// A proto connection closed — clear the subscriber slot and drop the
+    /// connection's room presence (if it had joined). `room_who` reflects the
+    /// departure immediately.
+    pub fn handle_proto_disconnect(&mut self, conn_id: u64) {
         self.proto_subscriber = None;
+        if self.roster.leave(conn_id).is_some() {
+            self.window.request_redraw();
+        }
     }
 
-    /// Handle one parsed request from the proto socket.
+    /// Handle one parsed request from the proto socket. `conn_id` identifies
+    /// the connection — used by `room_join` to bind presence to it.
     pub fn handle_proto_request(
         &mut self,
+        conn_id: u64,
         req: crate::proto::Request,
         out: std::sync::mpsc::SyncSender<crate::proto::OutMessage>,
     ) {
@@ -45,6 +52,8 @@ impl Renderer {
             }
             "activities_list" => self.proto_activities_list(&req.params),
             "activity_emit" => self.proto_activity_emit(&req.params),
+            "room_join" => self.proto_room_join(conn_id, &req.params),
+            "room_who" => self.proto_room_who(),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -106,6 +115,37 @@ impl Renderer {
         self.activities
             .emit_message(actor.to_string(), agent_name, to, text);
         crate::proto::OutPayload::Ok
+    }
+
+    /// Join the room: bind this connection to a host-assigned presence. The
+    /// agent supplies a `base` (type[+profile], e.g. `claude-gut`); terminite
+    /// picks a unique color and returns the assembled slug + color. Identity
+    /// is host-assigned — the agent can't choose its color, only its base.
+    /// Presence lasts until the connection drops (see `handle_proto_disconnect`).
+    pub(super) fn proto_room_join(
+        &mut self,
+        conn_id: u64,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let base = params
+            .get("base")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("agent");
+        let presence = self.roster.join(conn_id, base);
+        self.window.request_redraw();
+        crate::proto::OutPayload::Joined {
+            actor: presence_to_info(&presence),
+        }
+    }
+
+    /// The room roster — who is *present* right now (attendance), each with
+    /// its host-assigned color. Distinct from `activities_list` (history).
+    pub(super) fn proto_room_who(&self) -> crate::proto::OutPayload {
+        crate::proto::OutPayload::RoomWho {
+            actors: self.roster.present().iter().map(presence_to_info).collect(),
+        }
     }
 
     pub(super) fn proto_list_tabs(&self) -> crate::proto::OutPayload {
@@ -463,6 +503,16 @@ fn activity_to_info(a: &crate::activities::Activity) -> crate::proto::ActivityIn
         title: a.title.clone(),
         to,
         text,
+    }
+}
+
+/// Project a `Presence` onto the proto wire shape.
+fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
+    crate::proto::ActorInfo {
+        slug: p.slug.clone(),
+        base: p.base.clone(),
+        color: p.color.name.to_string(),
+        rgb: [p.color.rgb.0, p.color.rgb.1, p.color.rgb.2],
     }
 }
 

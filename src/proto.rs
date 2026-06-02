@@ -105,6 +105,16 @@ pub enum OutPayload {
     Activities {
         activities: Vec<ActivityInfo>,
     },
+    /// Response to `room_join` — the actor terminite assigned (a host-picked
+    /// color makes the slug unique). The agent uses this slug thereafter.
+    Joined {
+        actor: ActorInfo,
+    },
+    /// The room roster — who is *present* right now (attendance), each with
+    /// its host-assigned color. Distinct from `Activities` (what's been done).
+    RoomWho {
+        actors: Vec<ActorInfo>,
+    },
     Error {
         message: String,
     },
@@ -175,6 +185,17 @@ pub struct ActivityInfo {
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+/// One present actor on the wire. `slug` is the host-assigned id
+/// (`claude-gut-blue`); `base` is what the agent supplied (`claude-gut`);
+/// `color`/`rgb` are the host-picked palette color that both names and tints.
+#[derive(Serialize, Debug)]
+pub struct ActorInfo {
+    pub slug: String,
+    pub base: String,
+    pub color: String,
+    pub rgb: [u8; 3],
 }
 
 #[derive(Serialize, Debug)]
@@ -250,17 +271,22 @@ fn socket_path() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".terminite/socket"))
 }
 
+/// Per-connection id. Lets the renderer map a `room_join` to the exact
+/// connection and drop that actor's presence when the connection closes.
+static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn accept_loop(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let conn_id = CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Tell the main thread a new connection arrived so it
                 // drops any prior subscriber slot (v1 = single client).
                 let _ = proxy.send_event(UserEvent::ProtoConnect);
                 let p = proxy.clone();
                 if thread::Builder::new()
                     .name("terminite-proto-conn".into())
-                    .spawn(move || handle_connection(stream, p))
+                    .spawn(move || handle_connection(conn_id, stream, p))
                     .is_err()
                 {
                     eprintln!("terminite: proto failed to spawn connection thread");
@@ -278,7 +304,7 @@ fn accept_loop(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
 /// drains the response/event channel back out to the socket. Two
 /// threads per connection so subscription events can flow while the
 /// reader is blocked on the next request.
-fn handle_connection(stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
+fn handle_connection(conn_id: u64, stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
     let (out_tx, out_rx) = sync_channel::<OutMessage>(SUB_QUEUE_CAP);
     let writer_stream = match stream.try_clone() {
         Ok(s) => s,
@@ -325,6 +351,7 @@ fn handle_connection(stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
                 };
                 if proxy
                     .send_event(UserEvent::ProtoRequest {
+                        conn_id,
                         request: req,
                         out: out_tx.clone(),
                     })
@@ -338,7 +365,7 @@ fn handle_connection(stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
         }
     }
     drop(out_tx);
-    let _ = proxy.send_event(UserEvent::ProtoDisconnect);
+    let _ = proxy.send_event(UserEvent::ProtoDisconnect { conn_id });
     if let Some(w) = writer {
         let _ = w.join();
     }

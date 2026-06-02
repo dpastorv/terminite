@@ -21,6 +21,7 @@ mod mcp;
 mod modules;
 mod modules_watch;
 mod palette;
+mod presence;
 mod proto;
 mod proto_client;
 mod rect;
@@ -191,11 +192,15 @@ pub enum UserEvent {
     /// future subscription events) ride `out` back to the connection's
     /// writer.
     ProtoRequest {
+        conn_id: u64,
         request: proto::Request,
         out: std::sync::mpsc::SyncSender<proto::OutMessage>,
     },
-    /// The connected module disconnected. Clears the subscriber slot.
-    ProtoDisconnect,
+    /// A proto connection closed. Clears the subscriber slot and drops the
+    /// connection's room presence (if it had joined).
+    ProtoDisconnect {
+        conn_id: u64,
+    },
     /// A module process pushed a message via its stdout. Bundle 6
     /// step 2b — drives the pane's rendered content.
     ModuleMessage {
@@ -396,14 +401,14 @@ impl ApplicationHandler<UserEvent> for Terminite {
                     renderer.handle_proto_connect();
                 }
             }
-            UserEvent::ProtoRequest { request, out } => {
+            UserEvent::ProtoRequest { conn_id, request, out } => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.handle_proto_request(request, out);
+                    renderer.handle_proto_request(conn_id, request, out);
                 }
             }
-            UserEvent::ProtoDisconnect => {
+            UserEvent::ProtoDisconnect { conn_id } => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.handle_proto_disconnect();
+                    renderer.handle_proto_disconnect(conn_id);
                 }
             }
             UserEvent::ModuleMessage { tab_id, msg } => {
