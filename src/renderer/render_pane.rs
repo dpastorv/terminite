@@ -31,23 +31,18 @@ impl Renderer {
 
         // Build / refresh content_buffer if needed. For modules,
         // prefer the live session's body (what the module asked us
-        // to render); for Agent panes, render the ACP turn list;
-        // fall back to the kind's static placeholder.
+        // to render); fall back to the kind's static placeholder.
         let body = {
             let tab_opt = self
                 .root
                 .as_ref()
                 .and_then(|n| n.find(pid))
                 .map(|p| p.active_tab_ref());
-            let acp_body = tab_opt
-                .and_then(|t| t.acp_session.as_ref())
-                .map(render_acp_body);
             let session_body = tab_opt
                 .and_then(|t| t.module_session.as_ref())
                 .map(|s| s.body.clone())
                 .filter(|s| !s.is_empty());
-            acp_body
-                .or(session_body)
+            session_body
                 .unwrap_or_else(|| non_shell_body(&kind, &self.modules))
         };
         // Gutter width — content shifts right by this when the

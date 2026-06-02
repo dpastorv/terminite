@@ -27,7 +27,6 @@ use crate::{TabId, UserEvent, BACKGROUND};
 
 // The Renderer impl is split across these submodules (same type, multiple
 // impl blocks). Each child sees this module's private items via `use super::*`.
-mod acp;
 mod config;
 mod input;
 mod io;
@@ -42,9 +41,7 @@ mod tabs;
 // Supporting types and helper fns live in their topical submodules; re-export
 // them here so the rest of the renderer tree can name them unqualified via
 // `use super::*`.
-use acp::*;
 use input::*;
-use modules::*;
 use overlays::*;
 use panes::*;
 use render::*;
@@ -408,10 +405,6 @@ pub struct Renderer {
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
     activities: crate::activities::ActivityStore,
-    /// Per-agent-name counters for assigning session slugs (`codex-1`,
-    /// `codex-2`, `gemini-1`). Each hosted agent gets a stable id at
-    /// session open; that id is what it's known by in the room.
-    slug_counters: std::collections::HashMap<String, u32>,
 
     /// Recent frame timings in milliseconds — rolling window for the
     /// stats verb. Capped at `FRAME_TIMER_CAP` samples.
@@ -593,13 +586,6 @@ impl Renderer {
         for m in modules.list() {
             add_label(&mut font_system, &m.id, &m.name);
         }
-        for preset in crate::acp::presets() {
-            add_label(
-                &mut font_system,
-                preset.display_name,
-                preset.display_name,
-            );
-        }
 
         let mut renderer = Self {
             instance,
@@ -666,7 +652,6 @@ impl Renderer {
             proxy,
             proto_subscriber: None,
             activities: crate::activities::ActivityStore::new(),
-            slug_counters: std::collections::HashMap::new(),
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,

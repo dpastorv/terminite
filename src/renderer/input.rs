@@ -493,13 +493,11 @@ impl Renderer {
         // Data-module panes have no PTY — wheel events scroll the
         // rendered body instead of being forwarded as arrow keys to
         // a shell that isn't there. TTY modules have their own PTY
-        // and fall through to the regular path below. ACP Agent
-        // panes are non-TTY too and reuse the same module_scroll_y.
+        // and fall through to the regular path below.
         {
             let tab = self.pane_tab_mut(pid);
-            let is_data_module = (matches!(tab.kind, TabContentKind::Module(_))
-                && tab.module_pty.is_none())
-                || matches!(tab.kind, TabContentKind::Agent(_));
+            let is_data_module = matches!(tab.kind, TabContentKind::Module(_))
+                && tab.module_pty.is_none();
             if is_data_module {
                 let pixels = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y * 3.0 * line_height,

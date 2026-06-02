@@ -347,12 +347,11 @@ impl Renderer {
                         .as_ref()
                         .unwrap_or(&tab_ref.text_buffer),
                 };
-                // Data modules + Agent panes scroll their body via
-                // `module_scroll_y`. Bounds clip overflow so
-                // scrolled-out content doesn't leak past the pane.
-                let is_data_module = (matches!(tab_ref.kind, TabContentKind::Module(_))
-                    && tab_ref.module_pty.is_none())
-                    || matches!(tab_ref.kind, TabContentKind::Agent(_));
+                // Data modules scroll their body via `module_scroll_y`.
+                // Bounds clip overflow so scrolled-out content doesn't
+                // leak past the pane.
+                let is_data_module = matches!(tab_ref.kind, TabContentKind::Module(_))
+                    && tab_ref.module_pty.is_none();
                 let scroll_y = if is_data_module { tab_ref.module_scroll_y } else { 0.0 };
                 // When a data-module pane is showing an image (still or
                 // animated), suppress the text body — otherwise the
@@ -973,9 +972,6 @@ coordinates you do. see guide/getting-started.md for more."
                 "module '{id}' is no longer registered.\npick a different kind from the dropdown."
             ),
         },
-        TabContentKind::Agent(name) => format!(
-            "agent: {name}\n\nspawning agent process…\nwaiting for the initialize handshake."
-        ),
     }
 }
 

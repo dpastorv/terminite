@@ -115,11 +115,6 @@ pub(super) struct Tab {
     /// shell-tab last_click pattern with body coordinates. Reset
     /// (or rolled over) by `dispatch_data_module_click`.
     pub(super) last_module_click: Option<(Instant, u32, u32, u8)>,
-    /// Live ACP session when this tab is hosting an Agent (kind ==
-    /// Agent). Holds the subprocess, the turn list, and the
-    /// composing draft. None when the tab is a Shell / Welcome /
-    /// Module / TTY module.
-    pub(super) acp_session: Option<crate::acp::AcpSession>,
 }
 
 /// Hard cap on a single `set_text` body. A 16 MB body is already past
@@ -189,14 +184,12 @@ impl TabAnimation {
 /// What a tab currently shows. `Shell` has a live PTY behind it;
 /// `Welcome` is a built-in static card; `Module(id)` is an
 /// externally-registered module (step 2a: placeholder render only;
-/// step 2b spawns the process and wires IPC); `Agent(name)` is an
-/// ACP-hosted AI agent rendered as a structured chat surface.
+/// step 2b spawns the process and wires IPC).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum TabContentKind {
     Shell,
     Welcome,
     Module(String),
-    Agent(String),
 }
 
 impl TabContentKind {
@@ -207,7 +200,6 @@ impl TabContentKind {
             TabContentKind::Shell => "shell",
             TabContentKind::Welcome => "welcome",
             TabContentKind::Module(id) => id.as_str(),
-            TabContentKind::Agent(name) => name.as_str(),
         }
     }
 }
@@ -260,7 +252,6 @@ impl Tab {
             module_highlights: None,
             last_focused_path: None,
             last_module_click: None,
-            acp_session: None,
         }
     }
 

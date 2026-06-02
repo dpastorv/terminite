@@ -91,7 +91,6 @@ pub enum LayoutTabKind {
     Shell,
     Welcome,
     Module { id: String },
-    Agent { name: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

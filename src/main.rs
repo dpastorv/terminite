@@ -9,7 +9,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-mod acp;
 mod activities;
 mod blocks;
 mod config;
@@ -216,14 +215,6 @@ pub enum UserEvent {
     /// re-discovers and refreshes the dropdown. Debounced
     /// upstream so a multi-file drop only fires once.
     ModulesChanged,
-    /// One event from an ACP-hosted agent in a pane: streamed text,
-    /// tool call announcement / status, permission request,
-    /// filesystem callback, etc. Renderer mutates the session's
-    /// turn list and requests a redraw.
-    AcpEvent {
-        tab_id: TabId,
-        event: acp::AcpEvent,
-    },
     /// Exit requested from inside the renderer (e.g., user confirmed
     /// closing the last tab via the in-window modal).
     Exit,
@@ -428,11 +419,6 @@ impl ApplicationHandler<UserEvent> for Terminite {
             UserEvent::ModulesChanged => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.handle_modules_changed();
-                }
-            }
-            UserEvent::AcpEvent { tab_id, event } => {
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.handle_acp_event(tab_id, event);
                 }
             }
             UserEvent::Exit => event_loop.exit(),

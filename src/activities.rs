@@ -14,7 +14,8 @@
 
 // The message path (emit_message / list / get) is wired and live. The
 // ToolCall "see" half (ToolCall kind + update_status) is built but not yet
-// emitted — automatic ACP tool-call emission is a fast-follow. This allow
+// emitted — automatic tool-call emission (via agent-CLI hooks) is a
+// fast-follow. This allow
 // covers only that not-yet-exercised path; remove it when the see-half lands.
 #![allow(dead_code)]
 
@@ -31,7 +32,7 @@ pub const MAX_TITLE_LEN: usize = 256;
 pub type ActivityId = u64;
 
 /// What an activity *is*. `ToolCall` is the automatic "see" half (emitted
-/// from ACP tool-call events); `AgentMessage` is the "talk" half (emitted
+/// from agent-CLI tool-call hooks); `AgentMessage` is the "talk" half (emitted
 /// explicitly by an agent via `terminite_activity_emit`).
 #[derive(Clone, Debug)]
 pub enum ActivityKind {

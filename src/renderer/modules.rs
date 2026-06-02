@@ -36,12 +36,6 @@ impl Renderer {
         for m in self.modules.list() {
             next.insert(m.id.clone(), label(&mut self.font_system, &m.name));
         }
-        for preset in crate::acp::presets() {
-            next.insert(
-                preset.display_name.into(),
-                label(&mut self.font_system, preset.display_name),
-            );
-        }
         self.kind_label_buffers = next;
         self.window.request_redraw();
     }
@@ -278,9 +272,6 @@ impl Renderer {
                         crate::layout::LayoutTabKind::Welcome => TabContentKind::Welcome,
                         crate::layout::LayoutTabKind::Module { id } => {
                             TabContentKind::Module(id.clone())
-                        }
-                        crate::layout::LayoutTabKind::Agent { name } => {
-                            TabContentKind::Agent(name.clone())
                         }
                     };
                     let cwd = tab_layout
@@ -643,7 +634,6 @@ pub(super) fn snapshot_tab(tab: &Tab) -> crate::layout::LayoutTab {
         TabContentKind::Shell => crate::layout::LayoutTabKind::Shell,
         TabContentKind::Welcome => crate::layout::LayoutTabKind::Welcome,
         TabContentKind::Module(id) => crate::layout::LayoutTabKind::Module { id: id.clone() },
-        TabContentKind::Agent(name) => crate::layout::LayoutTabKind::Agent { name: name.clone() },
     };
     // Capture cwd from the shell side. TTY modules with a PTY also
     // have a current_dir but it's the module process's cwd — not
@@ -702,10 +692,5 @@ pub(super) fn pane_id_at_path(node: &PaneNode, path: &[u8]) -> Option<PaneId> {
     }
     None
 }
-
-/// Cap for ACP-driven fs reads — same shape as the editor's load
-/// limit. Keeps a hostile agent asking for /dev/zero from OOMing
-/// the host.
-pub(super) const ACP_FS_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 

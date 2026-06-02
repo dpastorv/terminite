@@ -180,15 +180,6 @@ impl Renderer {
 
     /// Write bytes to the active tab's PTY (keyboard input path).
     pub fn write_active(&mut self, bytes: Vec<u8>) {
-        // Agent panes intercept input — keystrokes build the draft,
-        // Enter sends it as a session/prompt, Esc cancels, the
-        // permission keys (a/A/r/R) close a pending prompt.
-        let is_agent = matches!(self.active_tab_ref().kind, TabContentKind::Agent(_))
-            && self.active_tab_ref().acp_session.is_some();
-        if is_agent {
-            self.write_to_agent(&bytes);
-            return;
-        }
         let tab = self.active_tab_ref();
         match &tab.kind {
             TabContentKind::Module(_) => {
@@ -203,70 +194,6 @@ impl Renderer {
                 }
             }
             _ => tab.live_term.write(bytes),
-        }
-    }
-
-    pub(super) fn write_to_agent(&mut self, bytes: &[u8]) {
-        let s = std::str::from_utf8(bytes).unwrap_or("").to_string();
-        let tab = self.active_tab_mut();
-        let Some(session) = tab.acp_session.as_mut() else {
-            return;
-        };
-        // Any keystroke that mutates session state needs the content
-        // buffer rebuilt so the typed character actually shows. The
-        // buffer is otherwise only invalidated on inbound AcpEvents,
-        // which made typing in an agent pane look like nothing was
-        // happening (or worse, gated on the agent's response stream).
-        let mut dirty = false;
-        let s = s.as_str();
-        // Permission keys first — when a prompt is pending, the
-        // keyboard is dedicated to picking an option.
-        if let Some(prompt) = session.pending_permission.clone() {
-            let pick: Option<&str> = match s {
-                "a" => Some("allow_once"),
-                "A" => Some("allow_always"),
-                "r" => Some("reject_once"),
-                "R" => Some("reject_always"),
-                _ => None,
-            };
-            if let Some(kind) = pick {
-                if let Some(opt) = prompt.options.iter().find(|o| o.kind == kind) {
-                    let opt_id = opt.option_id.clone();
-                    let req_id = prompt.request_id.clone();
-                    session.respond_permission(req_id, &opt_id);
-                    session.pending_permission = None;
-                    tab.content_buffer = None;
-                    self.window.request_redraw();
-                    return; // consumed the keystroke; don't also draft it
-                }
-            }
-            // Not a permission key — fall through to draft editing.
-        }
-        // Esc → cancel the in-flight prompt and clear the draft.
-        if s == "\x1b" {
-            session.draft.clear();
-            session.cancel();
-            dirty = true;
-        } else if s == "\r" || s == "\n" {
-            // Enter (CR) → send prompt.
-            session.send_prompt();
-            dirty = true;
-        } else if s == "\x7f" || s == "\u{8}" {
-            // Backspace.
-            if !session.draft.is_empty() {
-                session.draft.pop();
-                dirty = true;
-            }
-        } else if s.chars().all(|c| !c.is_control() || c == '\t') && !s.is_empty() {
-            // Printable text + tab.
-            session.draft.push_str(s);
-            dirty = true;
-        }
-        // Anything else (control sequences for arrows / function keys)
-        // ignored for v1.
-        if dirty {
-            tab.content_buffer = None;
-            self.window.request_redraw();
         }
     }
 
@@ -304,7 +231,6 @@ impl Renderer {
         // PTY and joins the IO threads via Drop.
         tab.module_session = None;
         tab.module_pty = None;
-        tab.acp_session = None;
         tab.last_module_body.clear();
         tab.kind = kind.clone();
         tab.content_buffer = None;
@@ -327,38 +253,6 @@ impl Renderer {
         tab.image = None;
         tab.animation = None;
         tab.last_focused_path = None;
-
-        // Agent kind — spawn an ACP-speaking agent subprocess via
-        // the new acp::AcpSession. The session fires the initialize
-        // handshake immediately; the SessionCreated event triggers
-        // session/new from handle_acp_event.
-        if let TabContentKind::Agent(name) = &kind {
-            let preset = crate::acp::presets()
-                .iter()
-                .find(|p| p.display_name == name);
-            if let Some(preset) = preset {
-                if let Some(binary) = crate::acp::resolve_preset(preset) {
-                    let args: Vec<String> = preset
-                        .default_args
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    tab.acp_session = crate::acp::AcpSession::spawn(
-                        &binary,
-                        &args,
-                        tab_id,
-                        proxy.clone(),
-                        prior_cwd.as_deref(),
-                    );
-                } else {
-                    crate::logging::warn(&format!(
-                        "acp: no binary for preset `{name}` found on PATH"
-                    ));
-                }
-            } else {
-                crate::logging::warn(&format!("acp: unknown preset `{name}`"));
-            }
-        }
 
         if let Some(manifest) = manifest {
             match manifest.kind {

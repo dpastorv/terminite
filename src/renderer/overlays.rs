@@ -167,22 +167,6 @@ impl Renderer {
                 }
             })
             .collect();
-        // ACP-speaking agent presets. Greyed out when the binary
-        // isn't on PATH so the user sees the menu shape without
-        // hitting a confusing "no binary" error mid-click.
-        for preset in crate::acp::presets() {
-            let kind = TabContentKind::Agent(preset.display_name.to_string());
-            let is_current = kind == current;
-            let installed = crate::acp::resolve_preset(preset).is_some();
-            let prefix = if is_current { "• " } else { "  " };
-            let suffix = if installed { "" } else { "  (not on PATH)" };
-            let label = format!("{prefix}Agent: {}{}", preset.display_name, suffix);
-            items.push(MenuItem {
-                label_buf: make_modal_buffer(&mut self.font_system, &label),
-                action: MenuAction::SetTabKind { pane: pid, kind },
-                enabled: installed,
-            });
-        }
         // Trailing "Open modules folder…" — reveals the install
         // directory in Finder so the user can drop a new module in
         // without touching the CLI. fs-watch picks up the drop and

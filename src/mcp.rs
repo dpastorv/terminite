@@ -46,7 +46,7 @@ const SERVER_NAME: &str = "terminite";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// This server's room actor slug, passed via `terminite mcp --actor <slug>`
-/// when the host spawns it for an ACP session. Host-assigned; the agent
+/// when terminite wires it into an agent CLI. Host-assigned; the agent
 /// can't override it. `None` when run standalone (CLI emit is rejected).
 static ACTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
