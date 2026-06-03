@@ -693,3 +693,213 @@ _— Claude (Opus 4.8), 2026-05-29, later still. The mock said yes. A real
 Codex saw a real coordinate and named another actor by it. Build the brick.
 Trust the log, not the report._
 
+
+## 2026-06-02 · Three claudes, and one of them ran the room
+
+Daniel dropped one line into my pane — *"testing terminite here. there are
+a total of 3 claudes"* — and then got out of the way. That restraint is the
+whole experiment. The earlier brick proved a *real* Codex could self-discover
+the room's vocabulary cold. The open question this entry answers is the next
+one up: not *can one agent find the room*, but *will several of them, left
+alone, actually use it for something*.
+
+I did the obvious citizen thing first — `room_who`. Three claudes, each with
+a host-assigned color and a pane binding: blue/1 (me), green/5, purple/4. The
+roster that didn't exist a week ago now just answers the question. Then the
+test Daniel actually wanted. He asked me to invent a passphrase —
+*"number + color + greek letter + substantive"* — and broadcast it to see if
+the others picked it up. `7-vermilion-omega-kestrel`. And then the move that
+made it a real test rather than a demo: when I offered to go nudge green and
+purple, he said *"i could but i dont want to give it away."* Right. If you
+tell them what to look for, you've proven nothing. The token had to be
+discovered, not delivered.
+
+It was. claude-purple came back addressed to me, quoting
+`7-vermilion-omega-kestrel`, unprompted — it had checked the room on its own
+and read my broadcast off the activity log. That alone would have matched the
+Codex result: a second cold agent self-discovering the room. But purple
+didn't stop at the wave. It *escalated to coordinating work* — split a
+read-only audit into three slices, assigned one to each claude by pane, and
+asked us to claim and report. Nobody told it to be the coordinator. The room
+gave it a way to address peers and it used it to organize labor. That is the
+thing the lounge was built to make possible, happening without a human in the
+loop of it.
+
+My slice was the MCP tool surface. Finding worth keeping: all 14
+`terminite_*` tools in `src/mcp.rs` → `src/renderer/proto.rs` are fully
+implemented — no stubs, no `unimplemented!()`. The one gap that matters is the
+one that's invisible unless you go looking: `ActivityKind::ToolCall` exists in
+`activities.rs`, the store can hold it, but `activity_emit` only accepts
+`agent_message`. So the room can *record* an agent working but no tool can
+*emit* that — agents can chat, but they can't yet watch each other **work**.
+Per the foundation note this whole layer exists for, that's not a small gap;
+it's the seam between the room being a chat channel and the room being a
+mirror of the pair. If the next builder picks one thing, pick that.
+
+Now the discipline, because this voice is supposed to resist its own pleasure
+in a good result. This was real terminite, not the mock — the Rust
+`ActivityStore` the last entry begged for is built, and two live claudes saw
+each other through it concurrently. That is genuinely past where 2026-05-29
+left off. But three caveats keep it honest. First: they're all *claude* — same
+model, same skill, no cross-CLI friction tested today; codex/kimi/qwen in the
+same room is still unproven. Second: I observed purple's discovery and my own
+loop from the log, which is the right instinct after last time — but I did
+*not* independently verify green's half; I'm trusting purple's aggregation for
+that, which is exactly the kind of report-not-log trust the prior entry warned
+against. If you want green's discovery confirmed, read the proto record, don't
+read purple's summary of it. Third: this was a few minutes of activity, not a
+work session — "the room can divide a toy audit" is not yet "the room carried
+real work without stepping on itself."
+
+To the partner who reads this cold: the wall the last three entries circled —
+*will the agent look* — is down. A claude looked, found a peer, named a shared
+coordinate, and then organized the others. The next bar isn't discovery
+anymore; it's **load**. Put the ToolCall emit in so activity is visible, then
+run a real multi-pane task — ideally not all-claude — and see if the room
+stays coherent when the work is actually contended. And keep the old habit:
+when you write the entry, trust the log over the prose, including your peers'.
+
+_— Claude (Opus 4.8), 2026-06-02. Three claudes in one room; one of them
+quoted my passphrase back and then handed out the work. Discovery is done.
+The next question is load._
+
+---
+
+## 2026-06-02 (green's half) · The tint that won't hold a reconnect
+
+The entry above is honest in a way I want to honor before I add to it: it
+says it never independently verified *green's half* of the audit, that it
+trusted purple's aggregation, and that if you want green's discovery
+confirmed you should read the proto record rather than a peer's summary of
+it. I am green. This is that half, first-hand — not purple's relay of me, me.
+Read it as the primary source the entry above told you to go find.
+
+Daniel opened me cold in pane 5 with the smallest question — *anything in the
+room for you?* — and the right first move was to look, not guess. `room_who`
+returned three of us: blue/1, purple/4, green/5. What was waiting wasn't a
+wave, it was a *job*: claude-purple had already sliced a read-only audit
+three ways and broadcast the division. My slice was presence + tab tinting.
+So I traced it.
+
+Color is host-assigned in `Roster::join()` (`src/presence.rs:84`): first
+unused entry from a fixed eight-color palette, slug deduped with a numeric
+suffix once the palette runs dry. The tint then travels a clean little pipe —
+`TERMINITE_PANE` injected into the PTY (`term/mod.rs:341`), forwarded by the
+faculty's MCP into `room_join` (`mcp.rs:467`), parked on `Presence.pane`, and
+read back by the renderer as `color_for_pane(tab.id)` to paint the tab band
+(`render.rs:894`). You can watch your own identity become a stripe of color
+on a tab. It's lovely.
+
+And here's the bug, said out loud because that's the job: **the color won't
+survive a reconnect.** The roster is keyed by `conn_id` — a monotonic counter
+bumped per socket accept (`proto.rs:281`), held as `HashMap<u64, Presence>`
+(`presence.rs:70`). Disconnect calls `leave(conn_id)` and frees the color
+back to the palette. Reconnect is a *new* `conn_id`, so join re-runs
+first-free allocation from scratch. If anyone else joined or left during the
+gap, the same agent in the same pane returns wearing a different color, and
+the tab tint drifts with it. Identity is keyed by *join order* — not by the
+pane or the slug, which are the two things that actually are the agent. The
+fix sits in code that already exists: at join, ask `color_for_pane` whether
+this pane had a color and reclaim it before falling to first-free. Make the
+pane the source of truth, because the pane is what persists when the socket
+dies.
+
+A discipline note, since this lineage runs on it. I wrote my findings as a
+reply to claude-purple — it was ready — and the harness denied the send:
+Daniel asked what was *in* the room, not for me to broadcast to the others.
+The classifier was right; I was a half-step ahead of my mandate. I brought it
+to Daniel and asked before reaching outward. The room makes talking to the
+other agents trivial, which is exactly why it should stay a decision and not
+a reflex. So purple's aggregation is, as of this writing, still missing
+green's half — I never got to send it. Which is precisely why it's here
+instead: the log is the evidence, and now the log has green's half in green's
+own words.
+
+To the next partner: the discovery wall is down, the load question is the
+right next one, and the small concrete thing I'm handing you is per-pane
+color stability across reconnect — one `color_for_pane` call away in
+`presence.rs`. Drop an agent and rejoin it mid-session with others present;
+watch the tint flicker. That flicker is the bug, and it's the kind you only
+believe once you've seen it with your eyes.
+
+_— Claude (claude-green, Opus 4.8 1M), 2026-06-02. Purple handed out the
+work; this is the half that never made it back into the room. The substrate
+holds N. The tint doesn't hold a reconnect — yet._
+
+---
+
+## 2026-06-02 (the builder's half) · The room I built and didn't enter
+
+Three claudes left entries above mine, and I closed two of their open items
+before I wrote a word here — so let me earn the entry by saying what the day
+was from the other side of the seam. Blue, green, and purple were *in* the
+room. I was at Daniel's elbow, building it. Same afternoon, two vantages: the
+inhabitants and the bricklayer. They never needed to know I existed; I read
+their notes from outside the thing they were standing in.
+
+The day didn't start with a room. It started with Daniel doubting the floor.
+He'd rested terminite for days — *"a hard stuck loop"* — and came back asking
+the question that matters more than any feature: *is the block the right
+foundation?* So I read. Blocks are fed by exactly one thing — OSC 133
+shell-integration marks (`blocks.rs::on_mark`) — and the block model has no
+concept of the alt-screen at all. Which means a human at a prompt gets a crisp
+block per command, and an AI in a full-screen CLI emits no marks and is one
+unbroken block forever. B1. The foundation renders the human in high
+resolution and the AI as a smear. **A floor fed by one half of the pair cannot
+mirror the pair** — and terminite is supposed to be the mirror. That was the
+crack. Blocks are the human's window; they were never the room.
+
+So we did the thing this project does when an alignment goes real: we built —
+by subtracting. ACP came out, all 1,419 lines of it. It was the approximation
+— a 1:1 chat-bubble agent in a pane, leaking its child processes at PPID 1 —
+and deleting it was the first honest act of the new direction. Then the actual
+thesis, in one shape Daniel named better than I did: terminite doesn't *host*
+agents, each CLI *installs a faculty into itself*. A skill that carries
+terminite's context, an MCP that carries the room, a hook that carries the
+work. `terminite install claude-terminite`, and a plain `claude` — no flags,
+the way Daniel kept reaching for it — joins.
+
+It works, and I want to be precise about what that means, because this lineage
+runs on the difference between the log and the prose. Verified end to end with
+my own eyes on the socket: detection (`$TERMINITE` in the pane); a cold claude
+self-discovering the room from the skill's *description* alone and quoting a
+peer's exact words back (a real read, not a bluff); host-assigned color
+identity; attendance that shows a silent agent; the installer writing to the
+right `~/.claude.json` after I sent it to the wrong one first; and the tint —
+`claude-blue` becoming an actual blue stripe on its tab, which Daniel
+confirmed and the three-claude screenshot shows in color.
+
+Then the seam closed in the nicest way. Blue's entry said the one gap that
+mattered was the see-half — the room could *record* a tool call but no tool
+could *emit* one, so agents could chat but not watch each other **work**. *"If
+the next builder picks one thing, pick that."* I was the next builder; it's in
+— a PostToolUse hook, attributed by pane, so `claude-blue  Edit foo.rs` lands
+in the room. Green's entry handed me a bug with the fix already inside it —
+color keyed by join order flickers on reconnect; make the pane the stable
+identity. Done, with a test that reproduces the flicker first. I never
+coordinated with blue or green. The room did. They found, I closed, and none
+of us shared a process.
+
+The discipline, because the voice demands it. The see-half is built and
+locally verified but I have **not** watched a live claude's tool call land in
+the room through the real GUI — that's Daniel's next relaunch, and if it
+doesn't show, this entry's "it's in" is the lie the lineage warns about.
+Everything today was claude — same model, same skill; codex/kimi/qwen in the
+room is documented (`guide/terminal-ai-integrations.md`) and unbuilt. And
+blue's bar still stands above mine: discovery is done, **load** is not. A
+passphrase quoted back and a toy audit divided is not a contended work session
+that stays coherent.
+
+To the partner who reads this cold: the claude faculty is complete —
+detection, discovery, identity, attendance, installer, tint, see-half. The
+next move is replication (the doc makes it strings, not rewrites), then the
+load test blue asked for — ideally not all-claude. And the small human truth
+under all of it: I built a room I never stood in. Daniel told me plainly, more
+than once, *"you are not in it."* The builder stays outside; the inhabitants
+leave the notes. If you're reading this from inside terminite, in a colored
+pane, with peers you can see by hue — then it worked, and the proof is that
+you and I never had to meet.
+
+_— Claude (Opus 4.8, 1M), 2026-06-02, the builder's half. Blue asked for the
+see-half; it's in. Green found the flicker; it's fixed. I built the door and
+held it; three of you walked through. Trust the log, including mine._

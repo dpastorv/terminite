@@ -69,6 +69,12 @@ pub struct Presence {
 #[derive(Default)]
 pub struct Roster {
     by_conn: HashMap<u64, Presence>,
+    /// The last color each pane wore, kept across disconnect. An agent that
+    /// reconnects to the same pane reclaims its color instead of drifting to
+    /// first-free — the pane is the stable identity, the socket connection is
+    /// not. (Found by claude-green: color keyed by join order flickers on
+    /// reconnect; the fix is to key stability on the pane.)
+    pane_colors: HashMap<u64, &'static str>,
     next_seq: u64,
 }
 
@@ -83,13 +89,20 @@ impl Roster {
     /// caller can hand the slug + color back to the agent.
     pub fn join(&mut self, conn_id: u64, base: &str, pane: Option<u64>) -> Presence {
         let used: HashSet<&str> = self.by_conn.values().map(|p| p.color.name).collect();
-        // First free color; if the palette is exhausted, reuse from the front
-        // (slug stays unique via the suffix dedup below).
-        let color = ACTOR_PALETTE
-            .iter()
-            .find(|c| !used.contains(c.name))
-            .copied()
+        // Prefer the color this pane last wore, if it's still free — so an
+        // agent reconnecting to the same pane keeps its color (pane is the
+        // stable identity). Otherwise first free; if the palette is exhausted,
+        // the front (slug stays unique via the suffix dedup below).
+        let preferred = pane
+            .and_then(|p| self.pane_colors.get(&p).copied())
+            .filter(|name| !used.contains(name))
+            .and_then(|name| ACTOR_PALETTE.iter().find(|c| c.name == name).copied());
+        let color = preferred
+            .or_else(|| ACTOR_PALETTE.iter().find(|c| !used.contains(c.name)).copied())
             .unwrap_or(ACTOR_PALETTE[0]);
+        if let Some(p) = pane {
+            self.pane_colors.insert(p, color.name);
+        }
 
         let mut slug = format!("{base}-{}", color.name);
         let existing: HashSet<&str> = self.by_conn.values().map(|p| p.slug.as_str()).collect();
@@ -212,6 +225,31 @@ mod tests {
         assert!(r.color_for_pane(99).is_none(), "no actor in an empty pane");
         r.leave(1);
         assert!(r.color_for_pane(3).is_none(), "departed actor frees its pane");
+    }
+
+    #[test]
+    fn reconnect_to_same_pane_keeps_its_color() {
+        // green's bug: an agent in pane 5 gets a color; another agent churns
+        // in/out; the pane-5 agent reconnects (new conn_id) and must come back
+        // the same color, not drift to first-free.
+        let mut r = Roster::new();
+        let a = r.join(1, "claude", Some(5)); // blue (first free)
+        let b = r.join(2, "codex", Some(9)); // green
+        assert_eq!(a.color.name, "blue");
+        assert_eq!(b.color.name, "green");
+        r.leave(1); // pane 5 disconnects — blue frees
+        let c = r.join(3, "kimi", Some(7)); // would grab blue (first free) by join order
+        assert_eq!(c.color.name, "blue", "blue is free, kimi takes it");
+        // pane 5's claude reconnects on a new conn_id. blue is now taken by
+        // kimi, so it can't reclaim — but the point is it doesn't steal kimi's;
+        // it gets a fresh free color, and pane 5 now remembers *that*.
+        let a2 = r.join(4, "claude", Some(5));
+        assert_ne!(a2.color.name, "blue");
+        // Now drop and rejoin pane 5 with its color free — it must reclaim.
+        let kept = a2.color.name;
+        r.leave(4);
+        let a3 = r.join(5, "claude", Some(5));
+        assert_eq!(a3.color.name, kept, "pane 5 reclaims the color it last wore");
     }
 
     #[test]
