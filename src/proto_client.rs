@@ -72,6 +72,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "stats" => Some(cmd_stats()),
         "activities" => Some(cmd_activities(&args[1..])),
         "room-who" => Some(cmd_room_who()),
+        "room-join" => Some(cmd_room_join(&args[1..])),
         "tool-emit-hook" => Some(cmd_tool_emit_hook()),
         "install" => Some(cmd_install(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
@@ -165,6 +166,46 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
 
 fn cmd_room_who() -> ExitCode {
     one_shot(r#"{"id":1,"method":"room_who"}"#)
+}
+
+/// `terminite room-join --actor <base>` — a one-shot, SILENT room join, used by
+/// a faculty's SessionStart hook so an agent is present from launch instead of
+/// only when it first calls a room tool (the eager-presence path for per-call
+/// CLIs like agy that don't hold the MCP socket open). It connects, joins,
+/// reads the ack, and exits; the dropped connection then *lingers* in the
+/// roster (see presence.rs) so the actor stays present.
+///
+/// "Am I actually in terminite?" is answered host-side, which is robust even if
+/// the CLI scrubbed the env: if terminite isn't running the connect just fails
+/// (silent no-op), and if the caller isn't inside a real terminite pane the
+/// host derives no pane for it, so it won't linger — a plain agent running
+/// elsewhere never sticks in the room. Always silent and exit 0: a hook's
+/// stdout would be injected into the agent's context, and it must never fail it.
+fn cmd_room_join(args: &[String]) -> ExitCode {
+    let base = args
+        .iter()
+        .position(|a| a == "--actor")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or("agent");
+    // Resolve + connect; any failure means "no terminite here" → do nothing.
+    let Some(path) = socket_path() else { return ExitCode::SUCCESS };
+    let Ok(mut stream) = UnixStream::connect(&path) else { return ExitCode::SUCCESS };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let req = serde_json::json!({
+        "id": 1, "method": "room_join", "params": { "base": base }
+    })
+    .to_string();
+    if writeln!(stream, "{req}").is_err() {
+        return ExitCode::SUCCESS;
+    }
+    // Read the ack so the host registers presence before we disconnect — the
+    // disconnect is what arms the linger. The response is intentionally not
+    // printed (silent).
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream);
+    let _ = reader.read_line(&mut line);
+    ExitCode::SUCCESS
 }
 
 /// PostToolUse hook entry point (`terminite tool-emit-hook`). Reads the hook
@@ -548,10 +589,12 @@ fn install_agy_terminite(args: &[String]) -> ExitCode {
     };
     let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
 
-    // Stage the plugin in a temp dir: plugin.json + mcp_config.json + skill.
+    // Stage the plugin in a temp dir: plugin.json + mcp_config.json + skill +
+    // hooks/hooks.json (the layout agy's `plugin install` expects).
     let stage = std::env::temp_dir().join("terminite-agy-faculty");
     let skill_dir = stage.join("skills/terminite-room");
-    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+    let hooks_dir = stage.join("hooks");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir).and_then(|_| std::fs::create_dir_all(&hooks_dir)) {
         eprintln!("terminite install: can't stage plugin at {}: {e}", stage.display());
         return ExitCode::from(1);
     }
@@ -565,10 +608,24 @@ fn install_agy_terminite(args: &[String]) -> ExitCode {
             "lounge": { "command": bin.to_string_lossy(), "args": ["mcp", "--actor", "agy"] }
         }
     });
+    // hooks/hooks.json (agy's named-hooks array, learned from its own validator):
+    //  - SessionStart → join the room on launch, so agy is present from the start
+    //    rather than only when it first calls a tool (it spawns its MCP per-call).
+    //    `room-join` is silent and self-guards on being in terminite (host-side).
+    //  - PreToolUse → the see-half: agy's tool calls stream into the room.
+    let hooks = serde_json::json!({
+        "hooks": [
+            { "name": "terminite-join", "event": "SessionStart",
+              "command": format!("{} room-join --actor agy", bin.display()) },
+            { "name": "terminite-see-half", "event": "PreToolUse",
+              "command": format!("{} tool-emit-hook", bin.display()) }
+        ]
+    });
     let writes = [
         (stage.join("plugin.json"), serde_json::to_string_pretty(&manifest).unwrap_or_default()),
         (stage.join("mcp_config.json"), serde_json::to_string_pretty(&mcp_config).unwrap_or_default()),
         (skill_dir.join("SKILL.md"), AGY_SKILL.to_string()),
+        (hooks_dir.join("hooks.json"), serde_json::to_string_pretty(&hooks).unwrap_or_default()),
     ];
     for (path, body) in &writes {
         if let Err(e) = std::fs::write(path, body) {
@@ -588,10 +645,11 @@ fn install_agy_terminite(args: &[String]) -> ExitCode {
     match status {
         Ok(s) if s.success() => {
             println!("installed agy-terminite (plugin → agy's ~/.gemini/config/plugins/)");
-            println!("  skill: bundled (skills/terminite-room/SKILL.md)");
-            println!("  mcp:   lounge → {} mcp --actor agy", bin.display());
-            println!("  see-half: pending — agy plugins carry a hooks.json (own emitter needed)");
-            println!("\nagy in a terminite pane now joins the room (presence + comms).");
+            println!("  skill:    bundled (skills/terminite-room/SKILL.md)");
+            println!("  mcp:      lounge → {} mcp --actor agy", bin.display());
+            println!("  presence: SessionStart hook → joins the room on launch (eager)");
+            println!("  see-half: PreToolUse hook → agy's tool calls stream into the room");
+            println!("\nagy in a terminite pane now joins the room on launch + streams its work.");
             println!("reverse: agy plugin uninstall terminite-room");
             ExitCode::SUCCESS
         }
