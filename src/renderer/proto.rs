@@ -14,7 +14,7 @@ impl Renderer {
     /// departure immediately.
     pub fn handle_proto_disconnect(&mut self, conn_id: u64) {
         self.proto_subscriber = None;
-        if self.roster.leave(conn_id).is_some() {
+        if self.roster.leave(conn_id, crate::presence::now_ms()).is_some() {
             self.window.request_redraw();
         }
     }
@@ -180,7 +180,12 @@ impl Renderer {
     /// its host-assigned color. Distinct from `activities_list` (history).
     pub(super) fn proto_room_who(&self) -> crate::proto::OutPayload {
         crate::proto::OutPayload::RoomWho {
-            actors: self.roster.present().iter().map(presence_to_info).collect(),
+            actors: self
+                .roster
+                .present(crate::presence::now_ms())
+                .iter()
+                .map(presence_to_info)
+                .collect(),
         }
     }
 

@@ -25,6 +25,26 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Wall-clock milliseconds — the stamp for presence liveness. Monotonicity
+/// isn't required (a small clock skew just nudges a linger window); we only
+/// ever compare two of these for an elapsed-since.
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How long an actor stays in the roster after its connection drops. The floor
+/// for CLIs that DON'T hold their MCP server open across calls (e.g. agy /
+/// Antigravity spawns it per tool call): each call joins → acts → disconnects,
+/// so without a grace window such an actor would never be "present" when
+/// another agent polls. Held-connection CLIs (claude/codex) don't rely on this
+/// — they stay live in `by_conn`. An actor that truly goes idle past the TTL
+/// expires honestly. Bounded: at most one lingering entry per pane.
+const LINGER_TTL_MS: u64 = 180_000;
 
 /// One palette color: a human name + its RGB, so the same hue can both name
 /// an actor in the room (`claude-blue`) and tint its pane on screen.
@@ -63,12 +83,26 @@ pub struct Presence {
     pub seq: u64,
 }
 
+/// An actor whose connection has dropped but whose pane is still recent — kept
+/// in the roster until `LINGER_TTL_MS` elapses, so a per-call CLI stays present
+/// between its calls.
+#[derive(Clone, Debug)]
+struct Lingering {
+    presence: Presence,
+    last_seen_ms: u64,
+}
+
 /// Workspace-global presence roster — one per `Renderer`, like
 /// `ActivityStore`. Keyed by the proto connection id so a dropped connection
 /// removes exactly its actor.
 #[derive(Default)]
 pub struct Roster {
     by_conn: HashMap<u64, Presence>,
+    /// Actors whose connection dropped but whose presence still lingers (keyed
+    /// by pane). This is the floor for CLIs that don't hold the MCP connection
+    /// open: presence = a live connection OR a pane seen within `LINGER_TTL_MS`.
+    /// A re-join on the pane promotes it back to live (removes it here).
+    lingering: HashMap<u64, Lingering>,
     /// The last color each pane wore, kept across disconnect. An agent that
     /// reconnects to the same pane reclaims its color instead of drifting to
     /// first-free — the pane is the stable identity, the socket connection is
@@ -102,6 +136,8 @@ impl Roster {
             .unwrap_or(ACTOR_PALETTE[0]);
         if let Some(p) = pane {
             self.pane_colors.insert(p, color.name);
+            // This pane is live again — drop any lingering presence for it.
+            self.lingering.remove(&p);
         }
 
         let mut slug = format!("{base}-{}", color.name);
@@ -127,15 +163,33 @@ impl Roster {
         presence
     }
 
-    /// A connection dropped — remove its actor, freeing the color. Returns the
-    /// departed presence (None if the connection never joined the room).
-    pub fn leave(&mut self, conn_id: u64) -> Option<Presence> {
-        self.by_conn.remove(&conn_id)
+    /// A connection dropped. If the actor was in a pane, its presence **lingers**
+    /// (so a per-call CLI stays present between calls) until `LINGER_TTL_MS`
+    /// elapses or a re-join promotes it back to live. A paneless actor (joined
+    /// from outside a terminite pane) has no anchor, so it leaves at once.
+    /// Returns the departed presence (None if the connection never joined).
+    pub fn leave(&mut self, conn_id: u64, now_ms: u64) -> Option<Presence> {
+        let presence = self.by_conn.remove(&conn_id)?;
+        if let Some(pane) = presence.pane {
+            self.lingering.insert(
+                pane,
+                Lingering { presence: presence.clone(), last_seen_ms: now_ms },
+            );
+        }
+        Some(presence)
     }
 
-    /// Everyone present now, in join order.
-    pub fn present(&self) -> Vec<Presence> {
+    /// Everyone present now, in join order: live connections, plus lingering
+    /// actors whose pane was seen within `LINGER_TTL_MS` (and isn't already
+    /// live). Stale lingerers are filtered out — presence stays honest.
+    pub fn present(&self, now_ms: u64) -> Vec<Presence> {
+        let live_panes: HashSet<u64> = self.by_conn.values().filter_map(|p| p.pane).collect();
         let mut v: Vec<Presence> = self.by_conn.values().cloned().collect();
+        for (pane, l) in &self.lingering {
+            if now_ms.saturating_sub(l.last_seen_ms) < LINGER_TTL_MS && !live_panes.contains(pane) {
+                v.push(l.presence.clone());
+            }
+        }
         v.sort_by_key(|p| p.seq);
         v
     }
@@ -146,21 +200,26 @@ impl Roster {
     }
 
     /// The color of the actor present in `pane`, if any — the renderer's tint
-    /// lookup. First match wins (one agent per pane in practice).
+    /// lookup. Falls back to a lingering actor so a per-call CLI's tab keeps its
+    /// tint between calls. First match wins (one agent per pane in practice).
     pub fn color_for_pane(&self, pane: u64) -> Option<ActorColor> {
         self.by_conn
             .values()
             .find(|p| p.pane == Some(pane))
             .map(|p| p.color)
+            .or_else(|| self.lingering.get(&pane).map(|l| l.presence.color))
     }
 
     /// The slug of the actor present in `pane`, if any — used to attribute a
-    /// tool call the see-half hook reports from that pane.
+    /// tool call the see-half hook reports from that pane. Falls back to a
+    /// lingering actor so a per-call CLI's tool calls still attribute correctly
+    /// between its connections.
     pub fn slug_for_pane(&self, pane: u64) -> Option<String> {
         self.by_conn
             .values()
             .find(|p| p.pane == Some(pane))
             .map(|p| p.slug.clone())
+            .or_else(|| self.lingering.get(&pane).map(|l| l.presence.slug.clone()))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -197,7 +256,7 @@ mod tests {
         let a = r.join(1, "claude", None); // blue
         let _b = r.join(2, "codex", None); // green
         assert_eq!(a.color.name, "blue");
-        r.leave(1); // frees blue
+        r.leave(1, 0); // paneless → leaves at once, frees blue
         let c = r.join(3, "kimi", None); // should reclaim blue, the first free
         assert_eq!(c.color.name, "blue");
     }
@@ -207,12 +266,44 @@ mod tests {
         let mut r = Roster::new();
         r.join(1, "claude", None);
         r.join(2, "codex", None);
-        r.leave(1);
-        let present = r.present();
+        r.leave(1, 0); // paneless → gone immediately (no anchor to linger on)
+        let present = r.present(0);
         assert_eq!(present.len(), 1);
         assert_eq!(present[0].base, "codex");
         assert!(r.slug_for(1).is_none());
         assert!(r.slug_for(2).is_some());
+    }
+
+    #[test]
+    fn per_call_cli_lingers_in_pane_between_connections() {
+        // agy's shape: it joins, acts, and disconnects on every call (it doesn't
+        // hold the MCP socket). Without lingering it would never be present when
+        // another agent polls. With it, the pane keeps it present across the gap.
+        let mut r = Roster::new();
+        let a = r.join(1, "agy", Some(2)); // agy-... in pane 2
+        assert_eq!(a.pane, Some(2));
+        r.leave(1, 1_000); // connection drops at t=1s
+        // Shortly after (well within the TTL) another agent polls: agy is here.
+        let present = r.present(2_000);
+        assert_eq!(present.len(), 1, "agy lingers in pane 2 after disconnect");
+        assert_eq!(present[0].base, "agy");
+        // Tint + attribution survive the gap too.
+        assert_eq!(r.color_for_pane(2).map(|c| c.name), Some(a.color.name));
+        assert_eq!(r.slug_for_pane(2), Some(a.slug.clone()));
+        // It re-joins on its next call (new conn_id, same pane) → promoted live,
+        // same color (pane is the stable identity).
+        let a2 = r.join(3, "agy", Some(2));
+        assert_eq!(a2.color.name, a.color.name);
+        assert_eq!(r.present(2_500).len(), 1, "no duplicate: live replaces lingering");
+    }
+
+    #[test]
+    fn lingering_presence_expires_past_the_ttl() {
+        let mut r = Roster::new();
+        r.join(1, "agy", Some(2));
+        r.leave(1, 0);
+        assert_eq!(r.present(LINGER_TTL_MS - 1).len(), 1, "present just before TTL");
+        assert_eq!(r.present(LINGER_TTL_MS + 1).len(), 0, "gone once idle past TTL");
     }
 
     #[test]
@@ -223,8 +314,20 @@ mod tests {
         assert_eq!(r.color_for_pane(3).map(|c| c.name), Some(a.color.name));
         assert_eq!(r.color_for_pane(5).map(|c| c.name), Some("green"));
         assert!(r.color_for_pane(99).is_none(), "no actor in an empty pane");
-        r.leave(1);
-        assert!(r.color_for_pane(3).is_none(), "departed actor frees its pane");
+        r.leave(1, 1_000); // claude's connection drops
+        // The tint LINGERS so a per-call CLI's tab doesn't flicker between calls.
+        assert_eq!(
+            r.color_for_pane(3).map(|c| c.name),
+            Some(a.color.name),
+            "tint lingers after disconnect"
+        );
+        // A new actor taking that pane takes over the tint.
+        let d = r.join(9, "qwen", Some(3));
+        assert_eq!(
+            r.color_for_pane(3).map(|c| c.name),
+            Some(d.color.name),
+            "a re-used pane shows the new actor's color"
+        );
     }
 
     #[test]
@@ -237,7 +340,7 @@ mod tests {
         let b = r.join(2, "codex", Some(9)); // green
         assert_eq!(a.color.name, "blue");
         assert_eq!(b.color.name, "green");
-        r.leave(1); // pane 5 disconnects — blue frees
+        r.leave(1, 0); // pane 5 disconnects — blue frees
         let c = r.join(3, "kimi", Some(7)); // would grab blue (first free) by join order
         assert_eq!(c.color.name, "blue", "blue is free, kimi takes it");
         // pane 5's claude reconnects on a new conn_id. blue is now taken by
@@ -247,7 +350,7 @@ mod tests {
         assert_ne!(a2.color.name, "blue");
         // Now drop and rejoin pane 5 with its color free — it must reclaim.
         let kept = a2.color.name;
-        r.leave(4);
+        r.leave(4, 0);
         let a3 = r.join(5, "claude", Some(5));
         assert_eq!(a3.color.name, kept, "pane 5 reclaims the color it last wore");
     }
@@ -260,7 +363,7 @@ mod tests {
             r.join(conn, "claude", None);
         }
         let extra = r.join(999, "claude", None);
-        let slugs: HashSet<String> = r.present().iter().map(|p| p.slug.clone()).collect();
+        let slugs: HashSet<String> = r.present(0).iter().map(|p| p.slug.clone()).collect();
         assert_eq!(slugs.len(), ACTOR_PALETTE.len() + 1, "every slug is unique");
         assert!(extra.slug.ends_with("-2"), "exhaustion suffixes for uniqueness: {}", extra.slug);
     }
