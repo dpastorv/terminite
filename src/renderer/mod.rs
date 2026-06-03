@@ -384,6 +384,21 @@ pub struct Renderer {
     next_blink_deadline: Option<Instant>,
     next_autoscroll_deadline: Option<Instant>,
 
+    /// Backoff deadline for re-attempting a frame after the surface failed
+    /// to deliver a texture (timeout / outdated / lost). Common during a
+    /// display-mode switch — alt-tabbing out of a fullscreen game on a
+    /// high-refresh external display renegotiates resolution+refresh, and
+    /// the surface is perpetually invalid until it settles. The failure
+    /// path used to call `request_redraw()` immediately, spinning render +
+    /// surface-reconfigure at full CPU while the OS compositor was already
+    /// fighting the bad mode — a livelock that could amplify a recoverable
+    /// glitch into a system-wide stall (the 2026-06-03 alt-tab freeze).
+    /// Routing the retry through this deadline + `WaitUntil` caps the
+    /// cadence; `surface_retry_count` drives an exponential backoff and
+    /// resets the instant a frame succeeds, so recovery stays immediate.
+    next_surface_retry_deadline: Option<Instant>,
+    surface_retry_count: u32,
+
     /// Peak-RSS kill-switch threshold in bytes; `0` disables. Checked once
     /// per frame in `render()`.
     rss_kill_bytes: u64,
@@ -666,6 +681,8 @@ impl Renderer {
             find: None,
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
+            next_surface_retry_deadline: None,
+            surface_retry_count: 0,
             rss_kill_bytes: rss_kill_threshold_bytes(),
             config,
             proxy,
@@ -764,6 +781,7 @@ impl Renderer {
             self.bell_flash_until,
             self.next_blink_deadline,
             self.next_autoscroll_deadline,
+            self.next_surface_retry_deadline,
             earliest_anim,
         ]
         .into_iter()

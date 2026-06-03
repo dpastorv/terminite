@@ -2,8 +2,39 @@
 
 use super::*;
 
+/// Backoff delay before re-attempting a frame after `count` consecutive
+/// surface-acquisition failures. Exponential from 8ms, clamped at 250ms so a
+/// surface that stays invalid (e.g. mid display-mode renegotiation) retries
+/// at most ~4×/s instead of spinning a core. Pure so the curve is testable
+/// without a GPU; `count` may climb without bound, so the shift is capped to
+/// avoid overflowing the left-shift.
+fn surface_retry_delay(count: u32) -> Duration {
+    const BASE_MS: u64 = 8;
+    const MAX_MS: u64 = 250;
+    let shift = count.min(5); // 8 << 5 = 256ms, clamped to MAX_MS
+    Duration::from_millis((BASE_MS << shift).min(MAX_MS))
+}
+
 impl Renderer {
     // ── Frame ────────────────────────────────────────────────────────────
+
+    /// Reschedule a frame after the surface failed to deliver a texture,
+    /// on an exponential backoff routed through `next_wakeup()` +
+    /// `ControlFlow::WaitUntil`. This replaces an immediate
+    /// `request_redraw()`, which spun render + surface-reconfigure at full
+    /// CPU whenever the surface stayed invalid — e.g. through a display-mode
+    /// renegotiation when alt-tabbing out of a fullscreen game on a
+    /// high-refresh external display. The backoff caps the retry cadence at
+    /// `SURFACE_RETRY_MAX_MS` so a stuck surface can't pin a core or hammer
+    /// the GPU driver; `surface_retry_count` resets on the first frame that
+    /// lands (see `render`), keeping recovery immediate once the mode
+    /// settles. Same discipline as the bell/blink deadlines that replaced
+    /// the per-tick thread spawn (2026-05-20 watchdog panic).
+    fn schedule_surface_retry(&mut self) {
+        let delay = surface_retry_delay(self.surface_retry_count);
+        self.surface_retry_count = self.surface_retry_count.saturating_add(1);
+        self.next_surface_retry_deadline = Some(Instant::now() + delay);
+    }
 
     pub fn render(&mut self) {
         check_rss_kill_switch(self.rss_kill_bytes);
@@ -703,16 +734,22 @@ impl Renderer {
         self.texture_renderer
             .prepare(&self.queue, &texture_instances, resolution);
 
+        // Surface failures (timeout / outdated / lost) are routed through a
+        // backoff deadline instead of an immediate `request_redraw()`. The
+        // immediate path spun render + surface-reconfigure at full CPU while
+        // the OS compositor was already fighting a bad display mode — a
+        // livelock that could amplify a recoverable glitch into a system-wide
+        // stall (the 2026-06-03 alt-tab freeze). See `schedule_surface_retry`.
         let surface_texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                self.window.request_redraw();
+                self.schedule_surface_retry();
                 return;
             }
             wgpu::CurrentSurfaceTexture::Outdated
             | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
-                self.window.request_redraw();
+                self.schedule_surface_retry();
                 return;
             }
             wgpu::CurrentSurfaceTexture::Lost => {
@@ -721,14 +758,19 @@ impl Renderer {
                     .create_surface(self.window.clone())
                     .expect("terminite: failed to recreate the surface");
                 self.surface.configure(&self.device, &self.surface_config);
-                self.window.request_redraw();
+                self.schedule_surface_retry();
                 return;
             }
             other => {
                 eprintln!("terminite: surface status: {other:?}");
+                self.schedule_surface_retry();
                 return;
             }
         };
+        // A frame landed — clear the backoff so the next failure starts fresh
+        // and recovery from a transient stall is immediate.
+        self.surface_retry_count = 0;
+        self.next_surface_retry_deadline = None;
 
         let view = surface_texture
             .texture
@@ -1103,5 +1145,46 @@ pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32,
 }
 
 // ── Memory kill-switch ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::surface_retry_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn surface_retry_backoff_is_exponential_then_capped() {
+        // 8ms doubling: 8, 16, 32, 64, 128, then clamped at 250ms.
+        let ms = |c| surface_retry_delay(c).as_millis() as u64;
+        assert_eq!(ms(0), 8);
+        assert_eq!(ms(1), 16);
+        assert_eq!(ms(2), 32);
+        assert_eq!(ms(3), 64);
+        assert_eq!(ms(4), 128);
+        assert_eq!(ms(5), 250); // 8 << 5 = 256, clamped
+        assert_eq!(ms(6), 250); // stays capped beyond the shift ceiling
+    }
+
+    #[test]
+    fn surface_retry_never_panics_or_spins_at_extreme_counts() {
+        // A surface stuck for minutes drives the count arbitrarily high; the
+        // shift must not overflow and the delay must stay at the cap, never 0
+        // (a 0ms retry would reinstate the full-CPU spin this fix removes).
+        for c in [100u32, 10_000, u32::MAX] {
+            let d = surface_retry_delay(c);
+            assert_eq!(d, Duration::from_millis(250));
+            assert!(d > Duration::ZERO);
+        }
+    }
+
+    #[test]
+    fn surface_retry_is_monotonic_non_decreasing() {
+        let mut prev = surface_retry_delay(0);
+        for c in 1..=8u32 {
+            let cur = surface_retry_delay(c);
+            assert!(cur >= prev, "delay decreased at count {c}");
+            prev = cur;
+        }
+    }
+}
 
 
