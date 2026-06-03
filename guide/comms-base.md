@@ -55,13 +55,24 @@ A push is **delivery**, and delivery needs policy — this is where the room sto
 being a log and becomes a lounge. All of it is terminite's, built with the
 substrate:
 
-- **consumed-marker** — a delivered message is marked, so it isn't re-pushed.
+- **consumed-marker — per-MESSAGE, not a read-cursor.** Each directed message
+  carries its own delivered/consumed state, because a message is a *declared
+  intention* and deserves individual accounting; a cursor would let messages get
+  silently skipped when several arrive at once. The receiver **acks** after it
+  surfaces a message, closing the loop end-to-end: **sent → delivered →
+  consumed.** Un-consumed messages can be re-pushed; nothing is dropped.
 - **who-may-wake-whom** — addressing rules; not every actor may interrupt every
   other.
 - **loop-guard** — two idle agents can't bounce politeness forever.
-- **human-in-loop switch** — delivery is **opt-in, off by default** (the human
-  gravitates to the pane they trust; orchestration is human-led —
-  [[terminite-orchestration-is-human-led]]). "On" is an explicit mode.
+- **delivery is ON by default.** terminite *is* the room: open ≥2 agents in a
+  window and they see and reach each other out of the box (Daniel: *"if you are
+  in terminite and you want to use ai, you can"*). **Toggle off in config** (and
+  later in the UX). Human-led still holds — the human placed the agents, can
+  toggle, and steers by attention; default-on is the room *working*, not the room
+  seizing control ([[terminite-orchestration-is-human-led]]). CONSEQUENCE:
+  default-on makes this whole policy block **non-optional** — loop-guard and the
+  consumed-marker must ship *solid* WITH the substrate, because there's no
+  off-by-default safety margin to hide behind.
 - **present-but-waiting-on-human** — what happens when a target pane is up but
   its CLI is blocked on human input.
 
@@ -85,22 +96,34 @@ Everything above the receiver is the base. The receiver is the disposable inch.
 1. **The comms-base substrate first** — `room_subscribe`/push + the delivery
    policy (consumed-marker, loop-guard, human-in-loop switch). Owned, uniform,
    built once. This is the heavy lift and it's terminite's.
-2. **Receivers by need, thinnest-first** — PTY floor (universal, covers kimi+agy
-   and any un-wake-able pane), then codex daemon (cleanest native), then claude
-   channel (yesterday's wake, permanent), then qwen serve.
+2. **Receivers in trust/usage order: claude → codex → qwen → PTY.** Build the
+   *native* receiver for each agent Daniel actually uses — claude (primary), then
+   codex, then qwen — so the working trio gets clean, structured wakes. PTY
+   (covering kimi + agy) comes **last**; agy especially is deprioritized (its
+   heaviness — "284 movements to read something"; core work won't move to
+   gemini). The upside of native-first: the fragile PTY may **never** be needed
+   for the trio, since each of the three has its own native receiver.
 
 Until a receiver exists for a pane, `activity_emit` stays record-only and says
-so. Delivery is off by default. No door is faked; every wake is opt-in.
+so. No door is faked. (Delivery defaults ON, but only reaches panes whose
+receiver is built; the toggle is the human's opt-OUT.)
 
-## Open scope questions (to settle before building)
+## Settled (Daniel, 2026-06-03)
 
-- **The push transport:** reuse the per-actor held `room_join` connection (push
-  down it), or a dedicated `room_subscribe` connection? (Leaning: the held
-  connection IS the channel — one socket, already the attendance anchor.)
+- **Push transport:** the held `room_join` connection IS the channel — one
+  socket, already the attendance anchor. **Test it there first, but keep the
+  transport swappable** to a dedicated `room_subscribe` connection if the held
+  one doesn't hold up.
+- **On switch:** **ON by default**, config toggle off (later UX too) — see the
+  delivery-on policy note above; the room is alive when ≥2 agents share a window.
+- **Consumed:** **per-message** with a receiver ack, not a read-cursor — see the
+  consumed-marker note above.
+- **Sequence:** **claude → codex → qwen → PTY** (trust/usage), above.
+
+## Still open
+
 - **Where the receiver runs:** the faculty's held MCP process can subscribe, but
-  it can't push into the CLI over MCP (that's the wall channels exist for) — so
-  the receiver is generally a *separate* thin process/path per CLI, not the MCP
-  server. Confirm per vendor.
-- **Consumed semantics:** per-actor read cursor vs. an explicit ack from the
-  receiver after it surfaces a message.
-- **The on switch:** a launch mode? a room-level toggle? per-pane?
+  it can't push into the CLI over MCP (the wall channels exist for) — so the
+  receiver is generally a *separate* thin process/path per CLI, not the MCP
+  server. Confirm per vendor as each is built.
+- **present-but-waiting-on-human** delivery behavior (policy detail).
