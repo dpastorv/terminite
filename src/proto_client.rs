@@ -224,22 +224,27 @@ fn cmd_tool_emit_hook() -> ExitCode {
 /// self-contained — `terminite install` writes this to the target profile.
 const CLAUDE_SKILL: &str = include_str!("../faculty/claude-terminite/SKILL.md");
 const CODEX_SKILL: &str = include_str!("../faculty/codex-terminite/SKILL.md");
+const KIMI_SKILL: &str = include_str!("../faculty/kimi-terminite/SKILL.md");
+const QWEN_SKILL: &str = include_str!("../faculty/qwen-terminite/SKILL.md");
 
 /// `terminite install <faculty> [...]` — write a faculty into an AI CLI's
 /// profile so a plain agent becomes terminite-aware. Opt-in (the user runs it)
-/// and reversible. Today: claude-terminite, codex-terminite.
+/// and reversible. Today: claude, codex, kimi, qwen — each a thin per-vendor
+/// adapter over the same room (skill + MCP, see-half where the CLI allows it).
 fn cmd_install(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         Some("claude-terminite") | Some("claude") => install_claude_terminite(&args[1..]),
         Some("codex-terminite") | Some("codex") => install_codex_terminite(&args[1..]),
+        Some("kimi-terminite") | Some("kimi") => install_kimi_terminite(&args[1..]),
+        Some("qwen-terminite") | Some("qwen") => install_qwen_terminite(&args[1..]),
         Some(other) => {
             eprintln!(
-                "terminite install: unknown faculty `{other}` — try `claude-terminite` or `codex-terminite`"
+                "terminite install: unknown faculty `{other}` — try claude / codex / kimi / qwen (-terminite)"
             );
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: terminite install <claude-terminite|codex-terminite> [--profile <name|dir>]");
+            eprintln!("usage: terminite install <claude|codex|kimi|qwen>-terminite [--profile <name|dir>]");
             ExitCode::from(2)
         }
     }
@@ -351,6 +356,174 @@ fn install_codex_terminite(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("terminite install: skill placed, but couldn't run `codex` ({e}) — is it on PATH?");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Install the kimi faculty: place the skill into `$KIMI_SHARE_DIR/skills/`
+/// (kimi also reads `~/.claude/` and `~/.codex/` skills, so the room skill is
+/// doubly discoverable) and register the `lounge` MCP via `kimi mcp add`. kimi
+/// scrubs nothing special; pane is derived from the connecting process like
+/// every other CLI. `--home <dir>` overrides `$KIMI_SHARE_DIR` (for testing).
+fn install_kimi_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
+    let kimi_home = match explicit_home {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var_os("KIMI_SHARE_DIR") {
+            Some(d) => PathBuf::from(d),
+            None => match std::env::var_os("HOME") {
+                Some(h) => PathBuf::from(h).join(".kimi"),
+                None => {
+                    eprintln!("terminite install: no HOME / KIMI_SHARE_DIR to install into");
+                    return ExitCode::from(1);
+                }
+            },
+        },
+    };
+
+    // 1. Place the skill.
+    let skill_dir = kimi_home.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't create {}: {e}", skill_dir.display());
+        return ExitCode::from(1);
+    }
+    let skill_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_path, KIMI_SKILL) {
+        eprintln!("terminite install: can't write {}: {e}", skill_path.display());
+        return ExitCode::from(1);
+    }
+
+    // 2. Register the lounge MCP via kimi's own CLI (stdio command after `--`).
+    //    Remove-then-add so re-install is clean.
+    let manual = format!("kimi mcp add lounge -- {} mcp --actor kimi", bin.display());
+    let with_home = |cmd: &mut std::process::Command| {
+        if explicit_home.is_some() || std::env::var_os("KIMI_SHARE_DIR").is_some() {
+            cmd.env("KIMI_SHARE_DIR", &kimi_home);
+        }
+    };
+    let mut rm = std::process::Command::new("kimi");
+    with_home(&mut rm);
+    let _ = rm
+        .args(["mcp", "remove", "lounge"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut cmd = std::process::Command::new("kimi");
+    with_home(&mut cmd);
+    let status = cmd
+        .args(["mcp", "add", "lounge", "--"])
+        .arg(&bin)
+        .args(["mcp", "--actor", "kimi"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("installed kimi-terminite into {}", kimi_home.display());
+            println!("  skill: {}", skill_path.display());
+            println!("  mcp:   lounge → {} mcp --actor kimi", bin.display());
+            println!("  see-half: pending — kimi's tool-call hooks use `[[hooks]]` in config.toml");
+            println!("\nkimi in a terminite pane now joins the room (presence + comms).");
+            println!("reverse: kimi mcp remove lounge; rm -r {}", skill_dir.display());
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: skill placed, but `kimi mcp add` failed ({s}).");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: skill placed, but couldn't run `kimi` ({e}) — is it on PATH?");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Install the qwen faculty: place the skill into `~/.qwen/skills/` and register
+/// the `lounge` MCP via `qwen mcp add <name> <command> [args]` (note: no `--`;
+/// qwen takes the command as a positional). qwen has no config-relocate env, so
+/// `--home <dir>` works by pointing `HOME` at `<dir>` (its `~/.qwen` then lives
+/// under it) — used for isolated testing.
+fn install_qwen_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
+    let qwen_dir = match explicit_home {
+        Some(dir) => PathBuf::from(dir).join(".qwen"),
+        None => match std::env::var_os("HOME") {
+            Some(h) => PathBuf::from(h).join(".qwen"),
+            None => {
+                eprintln!("terminite install: no HOME to install into");
+                return ExitCode::from(1);
+            }
+        },
+    };
+
+    // 1. Place the skill.
+    let skill_dir = qwen_dir.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't create {}: {e}", skill_dir.display());
+        return ExitCode::from(1);
+    }
+    let skill_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_path, QWEN_SKILL) {
+        eprintln!("terminite install: can't write {}: {e}", skill_path.display());
+        return ExitCode::from(1);
+    }
+
+    // 2. Register the lounge MCP via qwen's own CLI (positional command, no `--`).
+    //    `--trust` so the room tools don't prompt. qwen writes user scope into
+    //    `~/.qwen/settings.json`. No `mcp remove` guard needed — re-add replaces.
+    let manual = format!("qwen mcp add lounge {} mcp --actor qwen", bin.display());
+    let with_home = |cmd: &mut std::process::Command| {
+        if let Some(dir) = explicit_home {
+            cmd.env("HOME", dir);
+        }
+    };
+    let mut rm = std::process::Command::new("qwen");
+    with_home(&mut rm);
+    let _ = rm
+        .args(["mcp", "remove", "lounge"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut cmd = std::process::Command::new("qwen");
+    with_home(&mut cmd);
+    let status = cmd
+        .args(["mcp", "add", "--trust", "lounge"])
+        .arg(&bin)
+        .args(["mcp", "--actor", "qwen"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("installed qwen-terminite into {}", qwen_dir.display());
+            println!("  skill: {}", skill_path.display());
+            println!("  mcp:   lounge → {} mcp --actor qwen", bin.display());
+            println!("  see-half: pending — qwen's tool-call hooks use `hooks` in settings.json");
+            println!("\nqwen in a terminite pane now joins the room (presence + comms).");
+            println!("reverse: qwen mcp remove lounge; rm -r {}", skill_dir.display());
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: skill placed, but `qwen mcp add` failed ({s}).");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: skill placed, but couldn't run `qwen` ({e}) — is it on PATH?");
             eprintln!("add the MCP server yourself:\n  {manual}");
             ExitCode::from(1)
         }
