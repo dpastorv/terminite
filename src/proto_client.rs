@@ -72,6 +72,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "stats" => Some(cmd_stats()),
         "activities" => Some(cmd_activities(&args[1..])),
         "room-who" => Some(cmd_room_who()),
+        "tool-emit-hook" => Some(cmd_tool_emit_hook()),
         "install" => Some(cmd_install(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
@@ -164,6 +165,58 @@ fn cmd_room_who() -> ExitCode {
     one_shot(r#"{"id":1,"method":"room_who"}"#)
 }
 
+/// PostToolUse hook entry point (`terminite tool-emit-hook`). Reads the hook
+/// JSON on stdin and, if we're in a terminite pane, reports the tool call to
+/// the room — attributed by `$TERMINITE_PANE` → roster actor. The "see" half:
+/// peers watch your work. Always **fail-open and silent** — a hook must never
+/// crash the agent, and its stdout would be injected into the agent's context.
+fn cmd_tool_emit_hook() -> ExitCode {
+    let Some(pane) = std::env::var("TERMINITE_PANE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    else {
+        return ExitCode::SUCCESS; // not in a terminite pane — nothing to report
+    };
+    let mut input = String::new();
+    if std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).is_err() {
+        return ExitCode::SUCCESS;
+    }
+    let v: serde_json::Value = match serde_json::from_str(input.trim()) {
+        Ok(v) => v,
+        Err(_) => return ExitCode::SUCCESS,
+    };
+    let tool = v.get("tool_name").and_then(|t| t.as_str()).unwrap_or("tool");
+    // A short human detail: file path for file tools, command for Bash, etc.
+    let detail = v
+        .get("tool_input")
+        .and_then(|ti| {
+            ti.get("file_path")
+                .or_else(|| ti.get("command"))
+                .or_else(|| ti.get("pattern"))
+                .or_else(|| ti.get("path"))
+                .or_else(|| ti.get("url"))
+                .and_then(|x| x.as_str())
+        })
+        .unwrap_or("");
+    let title = if detail.is_empty() {
+        tool.to_string()
+    } else {
+        format!("{tool} {detail}")
+    };
+    let req = serde_json::json!({
+        "id": 1, "method": "tool_emit",
+        "params": { "pane": pane, "tool": tool, "title": title }
+    })
+    .to_string();
+    // Send silently, fail-open — don't read or print the response.
+    if let Some(path) = socket_path() {
+        if let Ok(mut stream) = UnixStream::connect(&path) {
+            let _ = writeln!(stream, "{req}");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 /// The validated claude-terminite skill, embedded so the binary is
 /// self-contained — `terminite install` writes this to the target profile.
 const CLAUDE_SKILL: &str = include_str!("../faculty/claude-terminite/SKILL.md");
@@ -217,12 +270,35 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // 2. Register the MCP server via claude's own CLI, so the config edit is
+    // 2. Add the see-half hook (PostToolUse → tool-emit-hook) so peers see
+    //    this claude's tool calls, not just its messages. Non-destructive +
+    //    idempotent; optional (skill + mcp still install if it fails).
+    let hook_added = match install_hook(&config_dir, &bin) {
+        Ok(added) => added,
+        Err(e) => {
+            eprintln!("terminite install: warning — couldn't add the see-half hook ({e})");
+            false
+        }
+    };
+
+    // 3. Register the MCP server via claude's own CLI, so the config edit is
     //    claude's (robust) not ours.
     let manual = format!(
         "claude mcp add --scope user lounge -- {} mcp --actor claude",
         bin.display()
     );
+    let explicit_profile = args.iter().any(|a| a == "--profile");
+    // Idempotent: drop any prior `lounge` so a re-install cleanly replaces it
+    // instead of erroring "already exists".
+    let mut rm = std::process::Command::new("claude");
+    if explicit_profile {
+        rm.env("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+    let _ = rm
+        .args(["mcp", "remove", "lounge"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     let mut cmd = std::process::Command::new("claude");
     // Only override CLAUDE_CONFIG_DIR for an explicit `--profile`. For the
     // default profile we must NOT set it: a plain `claude` reads its user MCP
@@ -230,7 +306,7 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
     // makes `claude mcp add` write to `~/.claude/.claude.json` instead — a
     // file the default claude never reads, so the server would silently never
     // load.
-    if args.iter().any(|a| a == "--profile") {
+    if explicit_profile {
         cmd.env("CLAUDE_CONFIG_DIR", &config_dir);
     }
     let status = cmd
@@ -242,8 +318,13 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
         Ok(s) if s.success() => {
             println!("installed claude-terminite into {}", config_dir.display());
             println!("  skill: {}", skill_path.display());
+            println!(
+                "  hook:  PostToolUse → {} tool-emit-hook{}",
+                bin.display(),
+                if hook_added { "" } else { " (already present)" }
+            );
             println!("  mcp:   lounge → {} mcp --actor claude", bin.display());
-            println!("\nplain `claude` in a terminite pane now joins the room.");
+            println!("\nplain `claude` in a terminite pane now joins the room + streams its work.");
             println!("reverse with: claude mcp remove lounge   (and rm -r {})", skill_dir.display());
             ExitCode::SUCCESS
         }
@@ -258,6 +339,49 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Add the see-half `PostToolUse` hook to the profile's `settings.json`,
+/// non-destructively and idempotently. Returns `Ok(true)` if newly added,
+/// `Ok(false)` if our command was already present.
+fn install_hook(config_dir: &std::path::Path, bin: &std::path::Path) -> Result<bool, String> {
+    let settings_path = config_dir.join("settings.json");
+    let mut root: serde_json::Value = match std::fs::read_to_string(&settings_path) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| format!("parse {}: {e}", settings_path.display()))?,
+        _ => serde_json::json!({}),
+    };
+    let obj = root.as_object_mut().ok_or("settings.json is not a JSON object")?;
+    let command = format!("{} tool-emit-hook", bin.display());
+    let post = obj
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("settings `hooks` is not an object")?
+        .entry("PostToolUse")
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = post.as_array_mut().ok_or("`hooks.PostToolUse` is not an array")?;
+    let already = arr.iter().any(|group| {
+        group
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_some_and(|hs| {
+                hs.iter()
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command.as_str()))
+            })
+    });
+    if already {
+        return Ok(false);
+    }
+    arr.push(serde_json::json!({
+        "matcher": "Edit|Write|Read|Bash|Grep|Glob|NotebookEdit",
+        "hooks": [ { "type": "command", "command": command } ]
+    }));
+    let pretty =
+        serde_json::to_string_pretty(&root).map_err(|e| format!("serialize settings: {e}"))?;
+    std::fs::write(&settings_path, pretty)
+        .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
+    Ok(true)
 }
 
 /// Resolve the target Claude profile dir from `--profile`, else

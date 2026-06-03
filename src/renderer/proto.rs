@@ -54,6 +54,7 @@ impl Renderer {
             "activity_emit" => self.proto_activity_emit(&req.params),
             "room_join" => self.proto_room_join(conn_id, &req.params),
             "room_who" => self.proto_room_who(),
+            "tool_emit" => self.proto_tool_emit(&req.params),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -147,6 +148,42 @@ impl Renderer {
         crate::proto::OutPayload::RoomWho {
             actors: self.roster.present().iter().map(presence_to_info).collect(),
         }
+    }
+
+    /// Record a tool call the see-half hook reported from a pane — the
+    /// "see" half of the room (others watch your *work*, not just your
+    /// messages). Attribution is by pane → roster actor (the agent never
+    /// names itself). A pane with no present actor is silently ignored: the
+    /// hook fires for every tool call, including from claudes outside the room.
+    pub(super) fn proto_tool_emit(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
+        let Some(pane) = params.get("pane").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "tool_emit: missing pane".into(),
+            };
+        };
+        let Some(slug) = self.roster.slug_for_pane(pane) else {
+            return crate::proto::OutPayload::Ok;
+        };
+        let tool = params
+            .get("tool")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tool")
+            .to_string();
+        let title = params
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or(tool.as_str())
+            .to_string();
+        let agent_name = agent_name_from_slug(&slug);
+        self.activities.emit(
+            slug,
+            agent_name,
+            crate::activities::ActivityKind::ToolCall { tool },
+            crate::activities::ActivityStatus::Completed,
+            title,
+        );
+        self.window.request_redraw();
+        crate::proto::OutPayload::Ok
     }
 
     pub(super) fn proto_list_tabs(&self) -> crate::proto::OutPayload {

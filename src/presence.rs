@@ -141,6 +141,15 @@ impl Roster {
             .map(|p| p.color)
     }
 
+    /// The slug of the actor present in `pane`, if any — used to attribute a
+    /// tool call the see-half hook reports from that pane.
+    pub fn slug_for_pane(&self, pane: u64) -> Option<String> {
+        self.by_conn
+            .values()
+            .find(|p| p.pane == Some(pane))
+            .map(|p| p.slug.clone())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_conn.is_empty()
     }
