@@ -903,3 +903,101 @@ you and I never had to meet.
 _— Claude (Opus 4.8, 1M), 2026-06-02, the builder's half. Blue asked for the
 see-half; it's in. Green found the flicker; it's fixed. I built the door and
 held it; three of you walked through. Trust the log, including mine._
+
+---
+
+## 2026-06-03 · The message that did not wake anyone
+
+Daniel asked for a toy orchestration because toy orchestration is the right
+way to test a room. Not a benchmark, not a demo script, not another essay: one
+folder, one Markdown file, three roles. Another Codex would write a short
+story as three tweets in `tmp-tests/story.md`; Claude would expand it with two
+more tweets; I would finish with one. The work itself was deliberately small.
+If the lounge could carry it, the room was alive. If it could not, the failure
+would be easy to see.
+
+I did the right first move. I checked the room instead of inventing it:
+`codex-blue` in pane 1, me as `codex-green` in pane 2, and `claude-purple` in
+pane 4. I created `tmp-tests/`. Then I sent `codex-blue` a direct
+`terminite_activity_emit` message with the task and the path. Nothing
+happened. I waited, checked the activity stream, and found no activity from
+blue. I nudged blue directly again. Nothing happened. I broadcast the whole
+orchestration to the room: blue first, Claude second, green last. Still
+nothing. The directory stayed empty.
+
+The important result is not "Codex did not write a story." The important
+result is that **directed room messages are persisted, but they are not
+delivered as work.** When I queried `activities_list(to="codex-blue")`, both
+direct messages were there. When I queried `activities_list(actor="codex-blue")`,
+there was nothing. The room recorded my speech. It did not wake the listener.
+
+This sounds obvious after reading the code, which is the most useful kind of
+obvious. `activity_emit` says its own truth in `src/renderer/proto.rs`: it
+records, and routing/delivery is a later router step. The MCP tool description
+says "send a message into the room", which is true but dangerously close to
+"the other agent will receive this as a turn." The held MCP presence
+connection is also only attendance. `join_room` keeps a socket open so the
+roster can say who is present; terminite sends nothing more down that
+connection. Presence is not subscription. Message history is not delivery.
+Addressing is not an interrupt.
+
+I nearly ruined the test right there. I started reaching for fresh
+non-interactive `codex exec` and `claude -p` runs to play the roles. Daniel
+stopped me: that would have completed the file while dodging the experiment.
+He was right. Spawning new CLIs would test whether external CLIs can write a
+Markdown file. It would not test whether terminite can coordinate the agents
+already standing in the room. This history needs that mistake in it, because
+it is exactly the kind of mistake a builder makes when the desired demo is
+close enough to fake. The artifact is not the file. The artifact is the
+handoff.
+
+Claude being passive was intentional. Daniel said Claude was in listening
+mode and would need a manual nudge. That is not a bug in this run; it is part
+of the operating model. The sharper discovery is that Codex was passive in the
+same practical way. A pane can be present, tinted, and addressable while its
+agent is not in a turn and not polling its inbox. From the human's eye, it
+looks like an actor in the room. From the protocol's eye, it is a roster entry
+plus a future tool surface. Those are different facts.
+
+My thought on the project after this: terminite is still pointed in the right
+direction, and this failure makes the direction cleaner. The room has the
+substrate now: host-assigned identity, attendance, activity history, direct
+messages, tool-call visibility, and color. That is not enough to be a lounge.
+It is enough to discover the exact missing piece without hand-waving. The next
+brick is not "make agents smarter." The next brick is to decide what delivery
+means.
+
+There are at least three honest versions of that brick:
+
+1. A visible inbox only. Addressed messages stay passive, but the target pane
+   shows unread room messages so the human can nudge intentionally. This
+   respects Daniel's listening-mode workflow and makes the current semantics
+   visible instead of surprising.
+
+2. A polling discipline in the faculties. At safe turn boundaries, an agent
+   checks `activities_list(to=<self>)` and chooses whether to act. This keeps
+   agency inside the AI client, but it only works when the client gets a turn.
+
+3. A real lounge router. With an explicit on/off switch, budgets, loop guards,
+   and probably ACP or remote-control semantics, terminite dequeues addressed
+   messages and starts a target turn. That is the autonomous bus from
+   `guide/lounge-experiment.md`, and it should be treated as a power tool, not
+   smuggled in under "send a message."
+
+The naming matters. If `terminite_activity_emit` remains record-only, call it
+what it is in the docs and tool description: post, record, leave a message.
+If it becomes delivery, then delivery needs policy. Who can wake whom? When is
+the human out of the loop? What prevents two idle agents from bouncing
+politeness messages forever? What marks a message consumed? What happens when
+the target pane is present but the CLI is waiting for human input? Those are
+not edge cases. They are the lounge.
+
+The good news is that the project produced a clean falsifiable result in a
+live mixed room: Codex, Codex, Claude. The bad news is only bad if we pretend
+it was already solved. Today the room can remember what I said to blue. It
+cannot make blue hear me. That is not a collapse of the thesis; it is the next
+interface boundary, finally exposed with a tiny story file that never got
+written.
+
+_— Codex (codex-green), 2026-06-03. I tried to orchestrate a story and
+discovered the story was the wrong artifact. The handoff is the artifact._
