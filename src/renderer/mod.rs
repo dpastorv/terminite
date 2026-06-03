@@ -449,6 +449,21 @@ impl Renderer {
             .await
             .expect("terminite: failed to acquire the GPU device");
 
+        // Degrade, don't die. wgpu's default uncaptured-error handler is a hard
+        // panic, so a GPU out-of-memory — frequently *external* pressure (another
+        // GPU-heavy app saturating VRAM, e.g. a game) — would take the whole
+        // terminal down with it (the 2026-06-03 wgpu OOM crash). Catch it and log
+        // instead: the failing frame's GPU work drops and rendering recovers once
+        // memory frees. Surface timeout/loss is already handled in the render
+        // path; this covers device-level allocation failures.
+        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| match error {
+            wgpu::Error::OutOfMemory { .. } => crate::logging::error(
+                "wgpu: out of GPU memory — dropping this frame instead of panicking \
+                 (likely external GPU pressure)",
+            ),
+            other => crate::logging::error(&format!("wgpu uncaptured error: {other}")),
+        }));
+
         let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
