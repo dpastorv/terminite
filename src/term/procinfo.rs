@@ -111,6 +111,36 @@ pub(crate) fn proc_pgid(_pid: i32) -> Option<i32> {
     None
 }
 
+/// Parent PID of `pid`, via `proc_pidinfo(PROC_PIDTBSDINFO)`. Used to walk a
+/// connecting MCP server's ancestry up to the pane shell it descends from, so
+/// terminite can place an agent in its pane even when the agent's CLI scrubbed
+/// `TERMINITE_PANE` from the MCP subprocess's env (codex does; claude doesn't).
+#[cfg(target_os = "macos")]
+pub(crate) fn proc_ppid(pid: i32) -> Option<i32> {
+    use std::mem::MaybeUninit;
+    let mut info: MaybeUninit<libc::proc_bsdinfo> = MaybeUninit::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr() as *mut libc::c_void,
+            size,
+        )
+    };
+    if n <= 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(info.pbi_ppid as i32)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn proc_ppid(_pid: i32) -> Option<i32> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn proc_executable_path(pid: i32) -> Option<String> {
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];

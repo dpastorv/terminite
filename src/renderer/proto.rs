@@ -24,6 +24,7 @@ impl Renderer {
     pub fn handle_proto_request(
         &mut self,
         conn_id: u64,
+        peer_pid: Option<i32>,
         req: crate::proto::Request,
         out: std::sync::mpsc::SyncSender<crate::proto::OutMessage>,
     ) {
@@ -52,7 +53,7 @@ impl Renderer {
             }
             "activities_list" => self.proto_activities_list(&req.params),
             "activity_emit" => self.proto_activity_emit(&req.params),
-            "room_join" => self.proto_room_join(conn_id, &req.params),
+            "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
             "tool_emit" => self.proto_tool_emit(&req.params),
             other => crate::proto::OutPayload::Error {
@@ -126,6 +127,7 @@ impl Renderer {
     pub(super) fn proto_room_join(
         &mut self,
         conn_id: u64,
+        peer_pid: Option<i32>,
         params: &serde_json::Value,
     ) -> crate::proto::OutPayload {
         let base = params
@@ -134,12 +136,44 @@ impl Renderer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("agent");
-        let pane = params.get("pane").and_then(|v| v.as_u64());
+        // Pane: prefer what the agent forwarded (`$TERMINITE_PANE` — the fast
+        // path, works when the CLI passes env through, e.g. claude), else
+        // derive it from the connecting process's ancestry (the floor — works
+        // even when the CLI scrubbed the env, e.g. codex).
+        let pane = params
+            .get("pane")
+            .and_then(|v| v.as_u64())
+            .or_else(|| peer_pid.and_then(|p| self.pane_from_pid(p)));
         let presence = self.roster.join(conn_id, base, pane);
         self.window.request_redraw();
         crate::proto::OutPayload::Joined {
             actor: presence_to_info(&presence),
         }
+    }
+
+    /// Find the tab/pane a connecting process belongs to by walking its PID
+    /// ancestry up to a pane shell terminite spawned. The CLI-agnostic floor
+    /// for pane detection: an agent's MCP server is a descendant of its pane's
+    /// shell, so the shell PID terminite recorded identifies the pane —
+    /// regardless of whether the CLI forwarded `TERMINITE_PANE`.
+    pub(super) fn pane_from_pid(&self, start: i32) -> Option<u64> {
+        let mut all: Vec<&Tab> = Vec::new();
+        self.root.as_ref()?.all_tabs(&mut all);
+        let shells: std::collections::HashMap<i32, u64> = all
+            .iter()
+            .map(|t| (t.live_term.shell_pid(), t.id.0))
+            .collect();
+        let mut pid = start;
+        for _ in 0..32 {
+            if let Some(&tab_id) = shells.get(&pid) {
+                return Some(tab_id);
+            }
+            match crate::term::proc_ppid(pid) {
+                Some(ppid) if ppid > 1 && ppid != pid => pid = ppid,
+                _ => return None,
+            }
+        }
+        None
     }
 
     /// The room roster — who is *present* right now (attendance), each with

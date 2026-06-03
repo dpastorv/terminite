@@ -280,6 +280,30 @@ fn socket_path() -> Option<PathBuf> {
 /// connection and drop that actor's presence when the connection closes.
 static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// PID of the process on the other end of a Unix-socket connection (macOS
+/// `LOCAL_PEERPID`). `None` if it can't be determined.
+#[cfg(target_os = "macos")]
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    let r = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            &mut pid as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    (r == 0 && pid > 0).then_some(pid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn peer_pid(_stream: &UnixStream) -> Option<i32> {
+    None
+}
+
 fn accept_loop(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
     for stream in listener.incoming() {
         match stream {
@@ -310,6 +334,11 @@ fn accept_loop(listener: UnixListener, proxy: EventLoopProxy<UserEvent>) {
 /// threads per connection so subscription events can flow while the
 /// reader is blocked on the next request.
 fn handle_connection(conn_id: u64, stream: UnixStream, proxy: EventLoopProxy<UserEvent>) {
+    // The PID of the connecting process (the MCP server / CLI client). Lets the
+    // renderer place an agent in its pane by walking this PID's ancestry to a
+    // pane shell — pane detection that survives a CLI scrubbing TERMINITE_PANE
+    // (codex does). Captured once; the connection is one process for its life.
+    let peer_pid = peer_pid(&stream);
     let (out_tx, out_rx) = sync_channel::<OutMessage>(SUB_QUEUE_CAP);
     let writer_stream = match stream.try_clone() {
         Ok(s) => s,
@@ -357,6 +386,7 @@ fn handle_connection(conn_id: u64, stream: UnixStream, proxy: EventLoopProxy<Use
                 if proxy
                     .send_event(UserEvent::ProtoRequest {
                         conn_id,
+                        peer_pid,
                         request: req,
                         out: out_tx.clone(),
                     })

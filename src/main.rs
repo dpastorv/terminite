@@ -193,6 +193,9 @@ pub enum UserEvent {
     /// writer.
     ProtoRequest {
         conn_id: u64,
+        /// PID of the connecting process — used to place an agent in its pane
+        /// when its CLI didn't forward `TERMINITE_PANE` to the MCP server.
+        peer_pid: Option<i32>,
         request: proto::Request,
         out: std::sync::mpsc::SyncSender<proto::OutMessage>,
     },
@@ -401,9 +404,9 @@ impl ApplicationHandler<UserEvent> for Terminite {
                     renderer.handle_proto_connect();
                 }
             }
-            UserEvent::ProtoRequest { conn_id, request, out } => {
+            UserEvent::ProtoRequest { conn_id, peer_pid, request, out } => {
                 if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.handle_proto_request(conn_id, request, out);
+                    renderer.handle_proto_request(conn_id, peer_pid, request, out);
                 }
             }
             UserEvent::ProtoDisconnect { conn_id } => {
