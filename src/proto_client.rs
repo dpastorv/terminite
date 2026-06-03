@@ -405,6 +405,43 @@ fn install_codex_terminite(args: &[String]) -> ExitCode {
     }
 }
 
+/// Add a `[[hooks]]` PostToolUse entry to kimi's `config.toml` (its hook config
+/// is TOML, not JSON). kimi's `HookDef` is `{event, command, matcher}` and its
+/// PostToolUse stdin payload carries `tool_name`/`tool_input` — the same
+/// contract claude/codex use — so `tool-emit-hook` serves it unchanged.
+/// Non-destructive (toml_edit preserves the rest of the file) + idempotent.
+fn install_kimi_hook(config_file: &std::path::Path, command: &str) -> Result<bool, String> {
+    use toml_edit::{Array, DocumentMut, InlineTable, Item, Value};
+    let text = std::fs::read_to_string(config_file).unwrap_or_default();
+    let mut doc = text
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("parse {}: {e}", config_file.display()))?;
+    if doc.get("hooks").and_then(|i| i.as_array()).is_none() {
+        doc["hooks"] = Item::Value(Value::Array(Array::new()));
+    }
+    let arr = doc["hooks"].as_array_mut().ok_or("`hooks` is not an array")?;
+    let already = arr.iter().any(|v| {
+        v.as_inline_table()
+            .and_then(|t| t.get("command"))
+            .and_then(|c| c.as_str())
+            == Some(command)
+    });
+    if already {
+        return Ok(false);
+    }
+    let mut entry = InlineTable::new();
+    entry.insert("event", "PostToolUse".into());
+    entry.insert("command", command.into());
+    entry.insert("matcher", "".into());
+    arr.push(Value::InlineTable(entry));
+    if let Some(parent) = config_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(config_file, doc.to_string())
+        .map_err(|e| format!("write {}: {e}", config_file.display()))?;
+    Ok(true)
+}
+
 /// Install the kimi faculty: place the skill into `$KIMI_SHARE_DIR/skills/`
 /// (kimi also reads `~/.claude/` and `~/.codex/` skills, so the room skill is
 /// doubly discoverable) and register the `lounge` MCP via `kimi mcp add`. kimi
@@ -469,11 +506,21 @@ fn install_kimi_terminite(args: &[String]) -> ExitCode {
         .status();
     match status {
         Ok(s) if s.success() => {
+            // See-half: add a [[hooks]] PostToolUse entry to kimi's config.toml.
+            let hook_cmd = format!("{} tool-emit-hook", bin.display());
+            let see = match install_kimi_hook(&kimi_home.join("config.toml"), &hook_cmd) {
+                Ok(true) => "added",
+                Ok(false) => "already present",
+                Err(e) => {
+                    eprintln!("terminite install: warning — couldn't add see-half hook ({e})");
+                    "skipped"
+                }
+            };
             println!("installed kimi-terminite into {}", kimi_home.display());
-            println!("  skill: {}", skill_path.display());
-            println!("  mcp:   lounge → {} mcp --actor kimi", bin.display());
-            println!("  see-half: pending — kimi's tool-call hooks use `[[hooks]]` in config.toml");
-            println!("\nkimi in a terminite pane now joins the room (presence + comms).");
+            println!("  skill:    {}", skill_path.display());
+            println!("  mcp:      lounge → {} mcp --actor kimi", bin.display());
+            println!("  see-half: PostToolUse → {} tool-emit-hook ({see})", bin.display());
+            println!("\nkimi in a terminite pane now joins the room + streams its work.");
             println!("reverse: kimi mcp remove lounge; rm -r {}", skill_dir.display());
             ExitCode::SUCCESS
         }
@@ -552,11 +599,24 @@ fn install_qwen_terminite(args: &[String]) -> ExitCode {
         .status();
     match status {
         Ok(s) if s.success() => {
+            // See-half: qwen reads claude-shaped `hooks.PostToolUse` from
+            // settings.json (verified in its cli.js), so the same install_hook
+            // serves it. Done after `mcp add` so we merge into the settings.json
+            // qwen just wrote. Same stdin contract (tool_name/tool_input).
+            let hook_cmd = format!("{} tool-emit-hook", bin.display());
+            let see = match install_hook(&qwen_dir.join("settings.json"), "", &hook_cmd) {
+                Ok(true) => "added",
+                Ok(false) => "already present",
+                Err(e) => {
+                    eprintln!("terminite install: warning — couldn't add see-half hook ({e})");
+                    "skipped"
+                }
+            };
             println!("installed qwen-terminite into {}", qwen_dir.display());
-            println!("  skill: {}", skill_path.display());
-            println!("  mcp:   lounge → {} mcp --actor qwen", bin.display());
-            println!("  see-half: pending — qwen's tool-call hooks use `hooks` in settings.json");
-            println!("\nqwen in a terminite pane now joins the room (presence + comms).");
+            println!("  skill:    {}", skill_path.display());
+            println!("  mcp:      lounge → {} mcp --actor qwen", bin.display());
+            println!("  see-half: PostToolUse → {} tool-emit-hook ({see})", bin.display());
+            println!("\nqwen in a terminite pane now joins the room + streams its work.");
             println!("reverse: qwen mcp remove lounge; rm -r {}", skill_dir.display());
             ExitCode::SUCCESS
         }
