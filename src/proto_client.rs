@@ -573,6 +573,48 @@ fn install_qwen_terminite(args: &[String]) -> ExitCode {
     }
 }
 
+/// Merge entries into agy's permission allow-list
+/// (`~/.gemini/antigravity-cli/settings.json` → `permissions.allow`) so agy
+/// stops prompting for terminite's own lounge tools and runs the faculty's hook
+/// commands unattended (agy gates every command + MCP call on this list).
+/// Non-destructive + idempotent: preserves model/trustedWorkspaces/existing
+/// entries, only appends what's missing. Returns how many were newly added.
+fn seed_agy_permissions(settings_file: &std::path::Path, entries: &[String]) -> Result<usize, String> {
+    let mut root: serde_json::Value = match std::fs::read_to_string(settings_file) {
+        Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
+            .map_err(|e| format!("parse {}: {e}", settings_file.display()))?,
+        _ => serde_json::json!({}),
+    };
+    let allow = root
+        .as_object_mut()
+        .ok_or("settings is not a JSON object")?
+        .entry("permissions")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("`permissions` is not an object")?
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = allow.as_array_mut().ok_or("`permissions.allow` is not an array")?;
+    let existing: std::collections::HashSet<String> =
+        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let mut added = 0;
+    for e in entries {
+        if !existing.contains(e) {
+            arr.push(serde_json::json!(e));
+            added += 1;
+        }
+    }
+    if added > 0 {
+        if let Some(parent) = settings_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let pretty = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize: {e}"))?;
+        std::fs::write(settings_file, pretty)
+            .map_err(|e| format!("write {}: {e}", settings_file.display()))?;
+    }
+    Ok(added)
+}
+
 /// Install the agy (Antigravity) faculty. agy has no `mcp add` — it imports
 /// *plugins*. So terminite stages a claude/gemini-style plugin (the layout agy
 /// expects: `plugin.json` manifest + `mcp_config.json` for the MCP + `skills/`)
@@ -644,11 +686,35 @@ fn install_agy_terminite(args: &[String]) -> ExitCode {
     let status = cmd.args(["plugin", "install"]).arg(&stage).status();
     match status {
         Ok(s) if s.success() => {
+            // Pre-seed agy's permission allow-list: agy gates every command +
+            // MCP call on it, so without this agy prompts relentlessly and skips
+            // the faculty's hook commands. Allow the lounge tools the skill uses
+            // and the two hook commands.
+            let settings = explicit_home
+                .map(|d| PathBuf::from(d.as_str()))
+                .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                .map(|h| h.join(".gemini/antigravity-cli/settings.json"));
+            let allow = [
+                "mcp(lounge/terminite_room_who)".to_string(),
+                "mcp(lounge/terminite_activities_list)".to_string(),
+                "mcp(lounge/terminite_activity_emit)".to_string(),
+                format!("command({} room-join --actor agy)", bin.display()),
+                format!("command({} tool-emit-hook)", bin.display()),
+            ];
+            let perms = match settings.as_ref().map(|p| seed_agy_permissions(p, &allow)) {
+                Some(Ok(n)) => format!("{n} added"),
+                Some(Err(e)) => {
+                    eprintln!("terminite install: warning — couldn't seed agy permissions ({e})");
+                    "skipped".into()
+                }
+                None => "no HOME — skipped".to_string(),
+            };
             println!("installed agy-terminite (plugin → agy's ~/.gemini/config/plugins/)");
             println!("  skill:    bundled (skills/terminite-room/SKILL.md)");
             println!("  mcp:      lounge → {} mcp --actor agy", bin.display());
             println!("  presence: SessionStart hook → joins the room on launch (eager)");
             println!("  see-half: PreToolUse hook → agy's tool calls stream into the room");
+            println!("  perms:    pre-allowed lounge tools + hook commands ({perms})");
             println!("\nagy in a terminite pane now joins the room on launch + streams its work.");
             println!("reverse: agy plugin uninstall terminite-room");
             ExitCode::SUCCESS
