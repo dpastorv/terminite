@@ -226,6 +226,7 @@ const CLAUDE_SKILL: &str = include_str!("../faculty/claude-terminite/SKILL.md");
 const CODEX_SKILL: &str = include_str!("../faculty/codex-terminite/SKILL.md");
 const KIMI_SKILL: &str = include_str!("../faculty/kimi-terminite/SKILL.md");
 const QWEN_SKILL: &str = include_str!("../faculty/qwen-terminite/SKILL.md");
+const AGY_SKILL: &str = include_str!("../faculty/agy-terminite/SKILL.md");
 
 /// `terminite install <faculty> [...]` — write a faculty into an AI CLI's
 /// profile so a plain agent becomes terminite-aware. Opt-in (the user runs it)
@@ -237,14 +238,15 @@ fn cmd_install(args: &[String]) -> ExitCode {
         Some("codex-terminite") | Some("codex") => install_codex_terminite(&args[1..]),
         Some("kimi-terminite") | Some("kimi") => install_kimi_terminite(&args[1..]),
         Some("qwen-terminite") | Some("qwen") => install_qwen_terminite(&args[1..]),
+        Some("agy-terminite") | Some("agy") => install_agy_terminite(&args[1..]),
         Some(other) => {
             eprintln!(
-                "terminite install: unknown faculty `{other}` — try claude / codex / kimi / qwen (-terminite)"
+                "terminite install: unknown faculty `{other}` — try claude / codex / kimi / qwen / agy (-terminite)"
             );
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: terminite install <claude|codex|kimi|qwen>-terminite [--profile <name|dir>]");
+            eprintln!("usage: terminite install <claude|codex|kimi|qwen|agy>-terminite [--profile <name|dir>]");
             ExitCode::from(2)
         }
     }
@@ -525,6 +527,82 @@ fn install_qwen_terminite(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("terminite install: skill placed, but couldn't run `qwen` ({e}) — is it on PATH?");
             eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Install the agy (Antigravity) faculty. agy has no `mcp add` — it imports
+/// *plugins*. So terminite stages a claude/gemini-style plugin (the layout agy
+/// expects: `plugin.json` manifest + `mcp_config.json` for the MCP + `skills/`)
+/// and hands it to `agy plugin install`, which copies it into agy's plugin dir
+/// (`~/.gemini/config/plugins/`). Reverse: `agy plugin uninstall terminite-room`.
+/// `--home <dir>` points agy's GeminiDir under `<dir>` (for testing).
+fn install_agy_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
+
+    // Stage the plugin in a temp dir: plugin.json + mcp_config.json + skill.
+    let stage = std::env::temp_dir().join("terminite-agy-faculty");
+    let skill_dir = stage.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't stage plugin at {}: {e}", stage.display());
+        return ExitCode::from(1);
+    }
+    let manifest = serde_json::json!({
+        "name": "terminite-room",
+        "version": "0.1.0",
+        "description": "Presence and coordination in a shared terminite room."
+    });
+    let mcp_config = serde_json::json!({
+        "mcpServers": {
+            "lounge": { "command": bin.to_string_lossy(), "args": ["mcp", "--actor", "agy"] }
+        }
+    });
+    let writes = [
+        (stage.join("plugin.json"), serde_json::to_string_pretty(&manifest).unwrap_or_default()),
+        (stage.join("mcp_config.json"), serde_json::to_string_pretty(&mcp_config).unwrap_or_default()),
+        (skill_dir.join("SKILL.md"), AGY_SKILL.to_string()),
+    ];
+    for (path, body) in &writes {
+        if let Err(e) = std::fs::write(path, body) {
+            eprintln!("terminite install: can't write {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    }
+
+    // Hand the staged plugin to agy. It validates + copies it into its own
+    // plugin dir; re-install replaces in place.
+    let manual = format!("agy plugin install {}", stage.display());
+    let mut cmd = std::process::Command::new("agy");
+    if let Some(dir) = explicit_home {
+        cmd.env("HOME", dir);
+    }
+    let status = cmd.args(["plugin", "install"]).arg(&stage).status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("installed agy-terminite (plugin → agy's ~/.gemini/config/plugins/)");
+            println!("  skill: bundled (skills/terminite-room/SKILL.md)");
+            println!("  mcp:   lounge → {} mcp --actor agy", bin.display());
+            println!("  see-half: pending — agy plugins carry a hooks.json (own emitter needed)");
+            println!("\nagy in a terminite pane now joins the room (presence + comms).");
+            println!("reverse: agy plugin uninstall terminite-room");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: staged the plugin, but `agy plugin install` failed ({s}).");
+            eprintln!("install it yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: staged the plugin, but couldn't run `agy` ({e}) — is it on PATH?");
+            eprintln!("install it yourself:\n  {manual}");
             ExitCode::from(1)
         }
     }
