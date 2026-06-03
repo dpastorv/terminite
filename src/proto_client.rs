@@ -124,10 +124,12 @@ USAGE
                                      order (all actors, or just <actor>;
                                      `to <slug>` reads <slug>'s inbox)
   terminite install claude-terminite [--profile <name|dir>]
-                                     make plain `claude` terminite-aware —
+  terminite install codex-terminite  [--home <dir>]
+                                     make a plain agent terminite-aware —
                                      writes the room skill + MCP server into
-                                     the profile (default ~/.claude). Reverse:
-                                     `claude mcp remove lounge`
+                                     its profile (claude: ~/.claude; codex:
+                                     ~/.codex). Reverse: `<cli> mcp remove
+                                     lounge`
   terminite module list              registered modules (extension surface)
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module
@@ -220,21 +222,112 @@ fn cmd_tool_emit_hook() -> ExitCode {
 /// The validated claude-terminite skill, embedded so the binary is
 /// self-contained — `terminite install` writes this to the target profile.
 const CLAUDE_SKILL: &str = include_str!("../faculty/claude-terminite/SKILL.md");
+const CODEX_SKILL: &str = include_str!("../faculty/codex-terminite/SKILL.md");
 
-/// `terminite install <faculty> [--profile <name|dir>]` — write a faculty
-/// into an AI CLI's profile so plain `claude` becomes terminite-aware. Opt-in
-/// (the user runs it) and reversible (`claude mcp remove lounge` + delete the
-/// skill dir). Today: claude-terminite.
+/// `terminite install <faculty> [...]` — write a faculty into an AI CLI's
+/// profile so a plain agent becomes terminite-aware. Opt-in (the user runs it)
+/// and reversible. Today: claude-terminite, codex-terminite.
 fn cmd_install(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         Some("claude-terminite") | Some("claude") => install_claude_terminite(&args[1..]),
+        Some("codex-terminite") | Some("codex") => install_codex_terminite(&args[1..]),
         Some(other) => {
-            eprintln!("terminite install: unknown faculty `{other}` — try `claude-terminite`");
+            eprintln!(
+                "terminite install: unknown faculty `{other}` — try `claude-terminite` or `codex-terminite`"
+            );
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: terminite install claude-terminite [--profile <name|dir>]");
+            eprintln!("usage: terminite install <claude-terminite|codex-terminite> [--profile <name|dir>]");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Install the codex faculty: place the skill into `$CODEX_HOME/skills/` and
+/// register the `lounge` MCP server via `codex mcp add`. codex joins the room
+/// the same way claude does (`terminite mcp --actor codex`); only the install
+/// surfaces differ. The see-half hook is a follow-up (codex's hook schema is
+/// version-specific + trust-gated). `--home <dir>` overrides `$CODEX_HOME`.
+fn install_codex_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
+    let codex_home = match explicit_home {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var_os("CODEX_HOME") {
+            Some(d) => PathBuf::from(d),
+            None => match std::env::var_os("HOME") {
+                Some(h) => PathBuf::from(h).join(".codex"),
+                None => {
+                    eprintln!("terminite install: no HOME / CODEX_HOME to install into");
+                    return ExitCode::from(1);
+                }
+            },
+        },
+    };
+
+    // 1. Place the skill.
+    let skill_dir = codex_home.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't create {}: {e}", skill_dir.display());
+        return ExitCode::from(1);
+    }
+    let skill_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_path, CODEX_SKILL) {
+        eprintln!("terminite install: can't write {}: {e}", skill_path.display());
+        return ExitCode::from(1);
+    }
+
+    // 2. Register the lounge MCP via codex's own CLI (writes [mcp_servers.lounge]
+    //    to config.toml). Remove-then-add so re-install is clean.
+    let manual = format!(
+        "codex mcp add lounge -- {} mcp --actor codex",
+        bin.display()
+    );
+    let with_home = |cmd: &mut std::process::Command| {
+        if explicit_home.is_some() || std::env::var_os("CODEX_HOME").is_some() {
+            cmd.env("CODEX_HOME", &codex_home);
+        }
+    };
+    let mut rm = std::process::Command::new("codex");
+    with_home(&mut rm);
+    let _ = rm
+        .args(["mcp", "remove", "lounge"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut cmd = std::process::Command::new("codex");
+    with_home(&mut cmd);
+    let status = cmd
+        .args(["mcp", "add", "lounge", "--"])
+        .arg(&bin)
+        .args(["mcp", "--actor", "codex"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("installed codex-terminite into {}", codex_home.display());
+            println!("  skill: {}", skill_path.display());
+            println!("  mcp:   lounge → {} mcp --actor codex", bin.display());
+            println!("\ncodex in a terminite pane now joins the room.");
+            println!("reverse with: codex mcp remove lounge   (and rm -r {})", skill_dir.display());
+            println!("(see-half hook for codex is a follow-up.)");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: skill placed, but `codex mcp add` failed ({s}).");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: skill placed, but couldn't run `codex` ({e}) — is it on PATH?");
+            eprintln!("add the MCP server yourself:\n  {manual}");
+            ExitCode::from(1)
         }
     }
 }
