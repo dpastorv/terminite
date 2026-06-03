@@ -13,6 +13,7 @@ mod activities;
 mod blocks;
 mod config;
 mod config_io;
+mod fileclaims;
 mod highlight;
 mod images;
 mod layout;

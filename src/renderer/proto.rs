@@ -56,6 +56,10 @@ impl Renderer {
             "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
             "tool_emit" => self.proto_tool_emit(peer_pid, &req.params),
+            "file_claim" => self.proto_file_claim(&req.params),
+            "file_release" => self.proto_file_release(&req.params),
+            "file_status" => self.proto_file_status(&req.params),
+            "files" => self.proto_files(),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -117,6 +121,77 @@ impl Renderer {
         self.activities
             .emit_message(actor.to_string(), agent_name, to, text);
         crate::proto::OutPayload::Ok
+    }
+
+    /// `file_claim {actor, path}` — an actor declares it's working in a file.
+    /// Advisory: the claim always succeeds (the human always wins), but if a
+    /// *different* live actor already held it, that actor is returned as
+    /// `conflict` so the caller learns "someone is already in here" and can
+    /// yield. `actor` is host-supplied by the MCP server, never self-declared.
+    pub(super) fn proto_file_claim(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        if actor.is_empty() || path.is_empty() {
+            return crate::proto::OutPayload::Error {
+                message: "file_claim: needs a room actor and a path".into(),
+            };
+        }
+        let conflict = self
+            .file_claims
+            .claim(actor, path, crate::presence::now_ms())
+            .map(|c| c.slug);
+        crate::proto::OutPayload::FileClaim { path: path.to_string(), conflict }
+    }
+
+    /// `file_release {actor, path}` — drop a claim the actor holds.
+    pub(super) fn proto_file_release(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        self.file_claims.release(actor, path);
+        crate::proto::OutPayload::Ok
+    }
+
+    /// `file_status {path}` — who, if anyone, currently holds a path.
+    pub(super) fn proto_file_status(
+        &self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let path = params.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let now = crate::presence::now_ms();
+        match self.file_claims.holder(path, now) {
+            Some(c) => crate::proto::OutPayload::FileStatus {
+                path: path.to_string(),
+                held_by: Some(c.slug.clone()),
+                held_seconds_ago: Some(now.saturating_sub(c.claimed_at_ms) / 1000),
+            },
+            None => crate::proto::OutPayload::FileStatus {
+                path: path.to_string(),
+                held_by: None,
+                held_seconds_ago: None,
+            },
+        }
+    }
+
+    /// `files` — every live claim in the room, newest first.
+    pub(super) fn proto_files(&self) -> crate::proto::OutPayload {
+        let now = crate::presence::now_ms();
+        let claims = self
+            .file_claims
+            .live(now)
+            .into_iter()
+            .map(|(path, c)| crate::proto::FileClaimInfo {
+                path,
+                actor: c.slug,
+                seconds_ago: now.saturating_sub(c.claimed_at_ms) / 1000,
+            })
+            .collect();
+        crate::proto::OutPayload::Files { claims }
     }
 
     /// Join the room: bind this connection to a host-assigned presence. The

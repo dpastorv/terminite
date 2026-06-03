@@ -346,6 +346,45 @@ fn tool_catalog() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "terminite_file_status",
+            "description":
+                "Before you edit a file the room might share, check whether another agent is currently working in it. Returns who holds it (if anyone) and how many seconds ago they last said so. Use this to avoid clobbering a peer's in-progress edit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path of the file to check." },
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_file_claim",
+            "description":
+                "Declare that you are about to work on a file, so other agents don't clobber it. ADVISORY — it never blocks you and the human always wins; it just makes \"someone is in this file\" visible. If a different agent already holds it, the response's `conflict` names them so you can coordinate or yield first. Claim before you Edit/Write a shared file; the claim expires on its own if you go idle. You are identified automatically.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path you're about to work on." },
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_file_release",
+            "description":
+                "Release a file you claimed with terminite_file_claim, so the room knows it's free again. Optional — claims also expire on a timer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path to release." },
+                },
+                "required": ["path"],
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -444,6 +483,26 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             proto_call(json!({
                 "id": 1, "method": "activity_emit",
                 "params": { "actor": actor, "kind": kind, "to": to, "text": text }
+            }))
+        }
+        "terminite_file_status" => {
+            let path = require_str(args, "path")?;
+            proto_call(json!({
+                "id": 1, "method": "file_status", "params": { "path": path }
+            }))
+        }
+        "terminite_file_claim" => {
+            let path = require_str(args, "path")?;
+            let actor = ACTOR.get().cloned().unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "file_claim", "params": { "actor": actor, "path": path }
+            }))
+        }
+        "terminite_file_release" => {
+            let path = require_str(args, "path")?;
+            let actor = ACTOR.get().cloned().unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "file_release", "params": { "actor": actor, "path": path }
             }))
         }
         other => Err(format!("unknown tool: {other}")),

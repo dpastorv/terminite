@@ -37,7 +37,20 @@ When you're asked "who else is here?" or "am I alone?", **call
 guess, and do not infer presence by reading terminite's source code or running
 `ps` — the room's own record is the only ground truth.
 
-## 3. Why it matters
+## 3. Don't clobber — claim a shared file before you edit it
+
+The room is shared: another agent may be in the same file as you. Before you
+Edit or Write a file others might also touch:
+
+- **`terminite_file_status`** — is anyone already working in this path?
+- **`terminite_file_claim`** — declare you're taking it. It never blocks you and
+  the human always wins; but if a peer already holds it you're told who, so you
+  can coordinate or wait instead of overwriting their work.
+- **`terminite_file_release`** — when you're done (optional; claims also expire).
+
+A good citizen checks before it writes a shared file.
+
+## 4. Why it matters
 
 The room exists so the pair — and the other agents — can see each other work:
 who has touched what, who is looking at the same file, what has already been

@@ -73,6 +73,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "activities" => Some(cmd_activities(&args[1..])),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
+        "files" => Some(cmd_files(args.get(1).map(|s| s.as_str()))),
         "tool-emit-hook" => Some(cmd_tool_emit_hook()),
         "install" => Some(cmd_install(&args[1..])),
         "module" => Some(cmd_module(&args[1..])),
@@ -166,6 +167,19 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
 
 fn cmd_room_who() -> ExitCode {
     one_shot(r#"{"id":1,"method":"room_who"}"#)
+}
+
+/// `terminite files` → every live file claim in the room; `terminite files
+/// <path>` → who (if anyone) is working in that path. The human's window into
+/// the co-editing layer — who's in what, so a clobber is a choice not a surprise.
+fn cmd_files(path: Option<&str>) -> ExitCode {
+    match path {
+        Some(p) => one_shot(&format!(
+            r#"{{"id":1,"method":"file_status","params":{{"path":{}}}}}"#,
+            serde_json::Value::String(p.to_string())
+        )),
+        None => one_shot(r#"{"id":1,"method":"files"}"#),
+    }
 }
 
 /// `terminite room-join --actor <base>` — a one-shot, SILENT room join, used by

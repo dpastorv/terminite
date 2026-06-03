@@ -115,6 +115,26 @@ pub enum OutPayload {
     RoomWho {
         actors: Vec<ActorInfo>,
     },
+    /// Result of `file_claim`: `conflict` is a *different* actor already in the
+    /// file (advisory — the claim still succeeds; the human always wins). `null`
+    /// conflict means you took it cleanly.
+    FileClaim {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        conflict: Option<String>,
+    },
+    /// `file_status` — who, if anyone, currently holds a path (within the TTL).
+    FileStatus {
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        held_by: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        held_seconds_ago: Option<u64>,
+    },
+    /// `files` — every live claim in the room.
+    Files {
+        claims: Vec<FileClaimInfo>,
+    },
     Error {
         message: String,
     },
@@ -185,6 +205,15 @@ pub struct ActivityInfo {
     pub to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+}
+
+/// One live file claim on the wire — who is working in which path, and how
+/// long ago they last said so.
+#[derive(Serialize, Debug)]
+pub struct FileClaimInfo {
+    pub path: String,
+    pub actor: String,
+    pub seconds_ago: u64,
 }
 
 /// One present actor on the wire. `slug` is the host-assigned id

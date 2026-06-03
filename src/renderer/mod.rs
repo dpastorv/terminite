@@ -424,6 +424,9 @@ pub struct Renderer {
     /// connection id. Workspace-global like `activities`. Host-assigned
     /// color per actor; presence ends when the connection drops.
     roster: crate::presence::Roster,
+    /// Advisory file claims — "who is working in which file right now", so
+    /// residents co-edit without clobbering. Workspace-global; TTL-bounded.
+    file_claims: crate::fileclaims::FileClaims,
 
     /// Recent frame timings in milliseconds — rolling window for the
     /// stats verb. Capped at `FRAME_TIMER_CAP` samples.
@@ -689,6 +692,7 @@ impl Renderer {
             proto_subscriber: None,
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
+            file_claims: crate::fileclaims::FileClaims::new(),
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,
