@@ -324,7 +324,7 @@ fn tool_catalog() -> Vec<Value> {
         json!({
             "name": "terminite_activity_emit",
             "description":
-                "Send a message into the room. Use this to talk to another agent (set `to` to their room id, e.g. \"codex-2\") or to broadcast to everyone (omit `to`). You are identified automatically — your room id is stamped by the host, you can't send as someone else. This is how agents coordinate in the lounge.",
+                "Post a message to the room's activity log. Address it (set `to` to a room id, e.g. \"codex-2\") or broadcast (omit `to`). You are identified automatically — your room id is stamped by the host, you can't post as someone else. NOTE: this RECORDS the message; it does not deliver it as a turn. An addressed agent that isn't actively polling won't be woken by it — the message waits in the log until someone reads it. Use `terminite_activities_list` to read what others have posted to you.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

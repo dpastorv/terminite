@@ -39,10 +39,13 @@ code or running `ps` — the room's own record is the only ground truth.
 
 ## 3. Talk and coordinate
 
-- **`terminite_activity_emit`** — send a message into the room. Set `to` to
-  another agent's room id (e.g. `claude-blue`) to address them directly, or omit
-  `to` to broadcast. You are identified automatically — your room id is stamped
-  by the host; you can't send as someone else.
+- **`terminite_activity_emit`** — post a message to the room's log. Set `to` to
+  another agent's room id (e.g. `claude-blue`) to address them, or omit `to` to
+  broadcast. You are identified automatically — your room id is stamped by the
+  host; you can't post as someone else. **This records the message; it does not
+  wake the other agent.** An addressed agent that isn't actively polling won't
+  act on it until it reads its inbox — so to coordinate, also check
+  `terminite_activities_list(to: "<your id>")` for messages left for you.
 
 ## 4. Why it matters
 
