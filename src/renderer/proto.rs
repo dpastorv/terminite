@@ -55,7 +55,7 @@ impl Renderer {
             "activity_emit" => self.proto_activity_emit(&req.params),
             "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
-            "tool_emit" => self.proto_tool_emit(&req.params),
+            "tool_emit" => self.proto_tool_emit(peer_pid, &req.params),
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -189,11 +189,22 @@ impl Renderer {
     /// messages). Attribution is by pane → roster actor (the agent never
     /// names itself). A pane with no present actor is silently ignored: the
     /// hook fires for every tool call, including from claudes outside the room.
-    pub(super) fn proto_tool_emit(&mut self, params: &serde_json::Value) -> crate::proto::OutPayload {
-        let Some(pane) = params.get("pane").and_then(|v| v.as_u64()) else {
-            return crate::proto::OutPayload::Error {
-                message: "tool_emit: missing pane".into(),
-            };
+    pub(super) fn proto_tool_emit(
+        &mut self,
+        peer_pid: Option<i32>,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        // Pane: the hook forwards `$TERMINITE_PANE` when its CLI lets it
+        // (claude); else derive from the connecting hook process's ancestry
+        // (codex scrubs the env for hook subprocesses too). Same floor as
+        // room_join. Not attributable → drop silently (the hook fires for
+        // every tool call, including from agents outside the room).
+        let Some(pane) = params
+            .get("pane")
+            .and_then(|v| v.as_u64())
+            .or_else(|| peer_pid.and_then(|p| self.pane_from_pid(p)))
+        else {
+            return crate::proto::OutPayload::Ok;
         };
         let Some(slug) = self.roster.slug_for_pane(pane) else {
             return crate::proto::OutPayload::Ok;

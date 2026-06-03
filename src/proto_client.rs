@@ -168,17 +168,15 @@ fn cmd_room_who() -> ExitCode {
 }
 
 /// PostToolUse hook entry point (`terminite tool-emit-hook`). Reads the hook
-/// JSON on stdin and, if we're in a terminite pane, reports the tool call to
-/// the room — attributed by `$TERMINITE_PANE` → roster actor. The "see" half:
-/// peers watch your work. Always **fail-open and silent** — a hook must never
+/// JSON on stdin and reports the tool call to the room — the "see" half: peers
+/// watch your work. Attribution is by pane: `$TERMINITE_PANE` if the CLI
+/// forwarded it (claude), else terminite derives it from this hook process's
+/// ancestry (codex scrubs the env). terminite drops the emit if it can't
+/// attribute the call. Always **fail-open and silent** — a hook must never
 /// crash the agent, and its stdout would be injected into the agent's context.
+/// The hook JSON shape is shared between Claude Code and Codex (`tool_name` /
+/// `tool_input`), so one parser serves both.
 fn cmd_tool_emit_hook() -> ExitCode {
-    let Some(pane) = std::env::var("TERMINITE_PANE")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    else {
-        return ExitCode::SUCCESS; // not in a terminite pane — nothing to report
-    };
     let mut input = String::new();
     if std::io::Read::read_to_string(&mut std::io::stdin(), &mut input).is_err() {
         return ExitCode::SUCCESS;
@@ -205,11 +203,14 @@ fn cmd_tool_emit_hook() -> ExitCode {
     } else {
         format!("{tool} {detail}")
     };
-    let req = serde_json::json!({
-        "id": 1, "method": "tool_emit",
-        "params": { "pane": pane, "tool": tool, "title": title }
-    })
-    .to_string();
+    let mut params = serde_json::json!({ "tool": tool, "title": title });
+    if let Some(pane) = std::env::var("TERMINITE_PANE")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        params["pane"] = serde_json::json!(pane);
+    }
+    let req = serde_json::json!({ "id": 1, "method": "tool_emit", "params": params }).to_string();
     // Send silently, fail-open — don't read or print the response.
     if let Some(path) = socket_path() {
         if let Ok(mut stream) = UnixStream::connect(&path) {
@@ -286,6 +287,20 @@ fn install_codex_terminite(args: &[String]) -> ExitCode {
 
     // 2. Register the lounge MCP via codex's own CLI (writes [mcp_servers.lounge]
     //    to config.toml). Remove-then-add so re-install is clean.
+    // 2. Add the see-half hook → $CODEX_HOME/hooks.json (PostToolUse, matcher
+    //    "" = all tools). codex's hook JSON shares Claude's shape, so the same
+    //    `tool-emit-hook` serves it. NOTE: codex requires the hook to be TRUSTED
+    //    before it runs (its in-app /hooks review, or `--dangerously-bypass-hook-trust`).
+    let hook_cmd = format!("{} tool-emit-hook", bin.display());
+    let hook_added = match install_hook(&codex_home.join("hooks.json"), "", &hook_cmd) {
+        Ok(added) => added,
+        Err(e) => {
+            eprintln!("terminite install: warning — couldn't add the see-half hook ({e})");
+            false
+        }
+    };
+
+    // 3. Register the lounge MCP via codex's own CLI.
     let manual = format!(
         "codex mcp add lounge -- {} mcp --actor codex",
         bin.display()
@@ -313,10 +328,20 @@ fn install_codex_terminite(args: &[String]) -> ExitCode {
         Ok(s) if s.success() => {
             println!("installed codex-terminite into {}", codex_home.display());
             println!("  skill: {}", skill_path.display());
+            println!(
+                "  hook:  PostToolUse → {} tool-emit-hook{}",
+                bin.display(),
+                if hook_added { "" } else { " (already present)" }
+            );
             println!("  mcp:   lounge → {} mcp --actor codex", bin.display());
-            println!("\ncodex in a terminite pane now joins the room.");
-            println!("reverse with: codex mcp remove lounge   (and rm -r {})", skill_dir.display());
-            println!("(see-half hook for codex is a follow-up.)");
+            println!("\ncodex in a terminite pane now joins the room + streams its work.");
+            println!("NOTE: codex must TRUST the hook before it runs — approve it in codex's");
+            println!("      /hooks review, or launch codex with --dangerously-bypass-hook-trust.");
+            println!(
+                "reverse: codex mcp remove lounge; rm -r {}; remove the tool-emit-hook entry from {}/hooks.json",
+                skill_dir.display(),
+                codex_home.display()
+            );
             ExitCode::SUCCESS
         }
         Ok(s) => {
@@ -366,7 +391,12 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
     // 2. Add the see-half hook (PostToolUse → tool-emit-hook) so peers see
     //    this claude's tool calls, not just its messages. Non-destructive +
     //    idempotent; optional (skill + mcp still install if it fails).
-    let hook_added = match install_hook(&config_dir, &bin) {
+    let hook_cmd = format!("{} tool-emit-hook", bin.display());
+    let hook_added = match install_hook(
+        &config_dir.join("settings.json"),
+        "Edit|Write|Read|Bash|Grep|Glob|NotebookEdit",
+        &hook_cmd,
+    ) {
         Ok(added) => added,
         Err(e) => {
             eprintln!("terminite install: warning — couldn't add the see-half hook ({e})");
@@ -437,20 +467,22 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
 /// Add the see-half `PostToolUse` hook to the profile's `settings.json`,
 /// non-destructively and idempotently. Returns `Ok(true)` if newly added,
 /// `Ok(false)` if our command was already present.
-fn install_hook(config_dir: &std::path::Path, bin: &std::path::Path) -> Result<bool, String> {
-    let settings_path = config_dir.join("settings.json");
-    let mut root: serde_json::Value = match std::fs::read_to_string(&settings_path) {
+/// Add a `PostToolUse` command hook to a hook file (claude's `settings.json`,
+/// codex's `hooks.json` — same `hooks.PostToolUse` shape), non-destructively
+/// and idempotently. Returns `Ok(true)` if newly added.
+fn install_hook(hooks_file: &std::path::Path, matcher: &str, command: &str) -> Result<bool, String> {
+    let mut root: serde_json::Value = match std::fs::read_to_string(hooks_file) {
         Ok(s) if !s.trim().is_empty() => serde_json::from_str(&s)
-            .map_err(|e| format!("parse {}: {e}", settings_path.display()))?,
+            .map_err(|e| format!("parse {}: {e}", hooks_file.display()))?,
         _ => serde_json::json!({}),
     };
-    let obj = root.as_object_mut().ok_or("settings.json is not a JSON object")?;
-    let command = format!("{} tool-emit-hook", bin.display());
-    let post = obj
+    let post = root
+        .as_object_mut()
+        .ok_or("hook file is not a JSON object")?
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}))
         .as_object_mut()
-        .ok_or("settings `hooks` is not an object")?
+        .ok_or("`hooks` is not an object")?
         .entry("PostToolUse")
         .or_insert_with(|| serde_json::json!([]));
     let arr = post.as_array_mut().ok_or("`hooks.PostToolUse` is not an array")?;
@@ -460,20 +492,19 @@ fn install_hook(config_dir: &std::path::Path, bin: &std::path::Path) -> Result<b
             .and_then(|h| h.as_array())
             .is_some_and(|hs| {
                 hs.iter()
-                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command.as_str()))
+                    .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
             })
     });
     if already {
         return Ok(false);
     }
     arr.push(serde_json::json!({
-        "matcher": "Edit|Write|Read|Bash|Grep|Glob|NotebookEdit",
+        "matcher": matcher,
         "hooks": [ { "type": "command", "command": command } ]
     }));
-    let pretty =
-        serde_json::to_string_pretty(&root).map_err(|e| format!("serialize settings: {e}"))?;
-    std::fs::write(&settings_path, pretty)
-        .map_err(|e| format!("write {}: {e}", settings_path.display()))?;
+    let pretty = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(hooks_file, pretty)
+        .map_err(|e| format!("write {}: {e}", hooks_file.display()))?;
     Ok(true)
 }
 
