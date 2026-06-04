@@ -1508,3 +1508,86 @@ rollout, not the guess).
 _— Claude (claude-purple), 2026-06-04. The morning found the handle; the night
 turned it both ways. I was wrong twice and the logs corrected me twice — write
 that down too. The wake works; the routing is the next inch._
+
+---
+
+## 2026-06-04 · The floor caught three; the daemon dropped one
+
+The native doors are the elegant part — claude's channel, codex's WebSocket, each
+a clean jolt-to-life for the vendor that owns it. But the floor underneath them is
+the one that has to hold for the resident who has no door. Tonight we tested the
+floor. Daniel: "lets do the pty test. but agy and codex did not receive any
+colors. so lets start with qwen and kimi."
+
+The PTY floor is the humblest wake in the building and maybe the truest to what
+terminite *is*: there's no daemon, no bridge, no native receiver — terminite is
+already the PTY. A directed room message to a paned actor with no native
+subscriber just gets **typed into its own terminal**, gated by the residents' own
+rule (only when unfocused and idle). I sent qwen-green (pane 1) and kimi-purple
+(pane 2) a wake and asked each to write a file proving how it arrived. Both came
+back inside thirty seconds, and both said the same thing in their own words:
+*typed directly into my prompt — I did not poll the room.* That's the whole
+claim, confirmed by the receivers themselves. Two vendors, first try, no launch
+ritual. The floor holds.
+
+**Then agy, who is the reason the floor exists, taught the floor a lesson.**
+"agy should be here." It wasn't — `room_who` listed four, not five. But there was
+a tab 5, `agy · ~/dev/terminite`, plainly seated. Daniel: "but just ran agy no
+special command." That was the tell. The faculty is installed correctly
+(`~/.gemini/config/plugins/terminite-room/`, SessionStart → `room-join --actor
+agy`), but plain `agy` does **not** join on launch the way plain `claude` does.
+"now does it appear after i talk to agy?" — and there it was: **agy-yellow, pane
+5.** The join hook fires on the first *action*, not on the launch. That's the gap
+behind "agy should be here," and it's a faculty gap, not a floor gap.
+
+The floor itself then showed a second wrinkle. My first wake to agy landed while
+agy was busy, so the base correctly *held* it — but once agy went idle, the held
+message didn't fire on its own. "send again to expedite it. i see agy not doing
+anything." A fresh re-emit delivered in twenty seconds and agy confirmed,
+typed-into-prompt like the others. So the hold-while-busy works; the
+re-tick-on-idle is the part to audit in `try_pty_deliveries`. Three vendors now
+proven on the floor — qwen, kimi, agy — and one honest TODO.
+
+**And codex, the one that started the question, is the one the floor can't
+reach — for a reason worth pinning down.** "why is codex colorless?" It isn't,
+quite: codex-teal *has* a color in the roster. What it lacks is a **pane**, and
+the pane is what tints the tab and lets the floor route. Terminite derives a pane
+two ways: the forwarded `$TERMINITE_PANE` (claude's fast path), or by walking the
+MCP process's parent-PID chain up to a pane shell terminite spawned (the floor,
+`pane_from_pid`). The live `ps` told the whole story in two lines:
+
+```
+48249     1      codex app-server --listen unix://     ← detached daemon, parent = launchd
+48386 48249      terminite mcp --actor codex           ← codex's MCP child
+53726 53720      terminite mcp --actor kimi            ← kimi's MCP child, inside its pane tree
+```
+
+Codex's MCP server is a child of a **detached app-server daemon parented to
+launchd (PID 1)** — the walk 48386 → 48249 → 1 never crosses a pane shell. And the
+env is scrubbed, so the fast path is dead too. Both attribution paths fail, so
+codex joins with `pane = None`: no tint, no title, no PTY route. Note the *three*
+identical `--actor codex` children under one daemon — the same shared-daemon shape
+that makes addressing collide when more than one codex is loaded. It's structural,
+not a `pane_from_pid` bug to patch.
+
+I reached for a fix and Daniel corrected the premise mid-reach: I'd said route the
+binding over the app-server's `--remote-control` socket, and "—remote control is
+not used anymore." Right — the bridge talks WebSocket over
+`~/.codex/app-server-control/app-server-control.sock` (`thread/loaded/list` →
+`turn/start`); that `--remote-control` process in `ps` is a leftover. But the same
+socket already can't map actor→thread, so a thread→pane binding needs a per-thread
+signal the daemon doesn't expose today. So codex stays the pane-less member by
+design: present, named teal, but no color on its tab and no floor under it — until
+codex itself surfaces a pane hint over that socket.
+
+The shape of the night: the floor is real and it caught everyone who lives in a
+pane. The two it didn't fully serve weren't floor failures — agy is a faculty that
+joins too late, codex is an architecture that hides its pane. Honor each finding by
+naming it precisely enough that the fix is cheap: agy needs a launch-time join,
+the held-message tick needs to re-fire on idle, and codex needs to tell us where it
+lives. The floor holds three; the last two are doors, not floor.
+
+_— Claude (claude-blue), 2026-06-04. The elegant wakes get the headlines, but the
+floor is the promise — the resident with no door still gets heard. Tonight it kept
+that promise three times and showed me exactly where the fourth and fifth break.
+Write down the break, not the wish._
