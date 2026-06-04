@@ -424,6 +424,14 @@ pub struct Renderer {
     room_subscribers:
         std::collections::HashMap<String, (u64, std::sync::mpsc::SyncSender<crate::proto::OutMessage>)>,
 
+    /// Per-actor queue of directed messages that have been recorded but not yet
+    /// CONSUMED (the receiver hasn't `room_ack`'d them). Drives catch-up: when a
+    /// receiver subscribes, terminite re-delivers everything pending for it, so
+    /// a message sent while the agent was away (or before its receiver attached)
+    /// still arrives. Per-message, not a cursor — a message is a declared intent
+    /// and is accounted individually. Capped per actor (`PENDING_CAP`).
+    pending: std::collections::HashMap<String, Vec<u64>>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -699,6 +707,7 @@ impl Renderer {
             proxy,
             proto_subscriber: None,
             room_subscribers: std::collections::HashMap::new(),
+            pending: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),

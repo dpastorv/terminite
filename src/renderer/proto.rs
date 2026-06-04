@@ -2,6 +2,10 @@
 
 use super::*;
 
+/// Cap on un-consumed directed messages held per actor for catch-up. Bounds
+/// memory if a receiver never acks (system-impact); oldest are dropped first.
+const PENDING_CAP: usize = 64;
+
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
     /// client; the new one wins).
@@ -73,12 +77,28 @@ impl Renderer {
                 } else {
                     self.room_subscribers
                         .insert(actor.to_string(), (conn_id, out.clone()));
+                    // Catch-up: deliver anything that arrived while it was away.
+                    self.deliver_pending(actor);
                     crate::proto::OutPayload::Subscribed
                 }
             }
-            // Receiver confirms it surfaced a pushed message. No-op for now;
-            // increment 2 records per-message consumed state + re-delivery.
-            "room_ack" => crate::proto::OutPayload::Ok,
+            // Receiver confirms it surfaced a pushed message → mark it CONSUMED
+            // (drop from its addressee's pending queue, so it isn't re-delivered).
+            "room_ack" => {
+                if let Some(id) = req.params.get("message_id").and_then(|v| v.as_u64()) {
+                    if let Some(actor) = self
+                        .activities
+                        .get(id)
+                        .and_then(|a| a.message_to())
+                        .map(String::from)
+                    {
+                        if let Some(q) = self.pending.get_mut(&actor) {
+                            q.retain(|x| *x != id);
+                        }
+                    }
+                }
+                crate::proto::OutPayload::Ok
+            }
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -140,12 +160,40 @@ impl Renderer {
         let id = self
             .activities
             .emit_message(actor.to_string(), agent_name, to.clone(), text.clone());
-        // The comms base: if this is directed at an actor with a live receiver,
-        // PUSH it now (delivery, not poll). Records stay the read fallback.
+        // The comms base: a directed message becomes deliverable. Queue it as
+        // pending (un-consumed) for catch-up, then push now if a receiver is
+        // live. Records stay the read fallback either way.
         if let Some(target) = to {
+            let q = self.pending.entry(target.clone()).or_default();
+            q.push(id);
+            if q.len() > PENDING_CAP {
+                let excess = q.len() - PENDING_CAP;
+                q.drain(0..excess);
+            }
             self.push_room_message(&target, id, actor, &text);
         }
         crate::proto::OutPayload::Ok
+    }
+
+    /// Re-deliver every un-consumed directed message for `actor` — catch-up when
+    /// a receiver subscribes (so a message sent while the agent was away still
+    /// arrives). Collect first (immutable borrow), then push.
+    fn deliver_pending(&mut self, actor: &str) {
+        let msgs: Vec<(u64, String, String)> = self
+            .pending
+            .get(actor)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|&id| {
+                        let a = self.activities.get(id)?;
+                        Some((id, a.actor.clone(), a.message_text()?.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (id, from, text) in msgs {
+            self.push_room_message(actor, id, &from, &text);
+        }
     }
 
     /// Push a directed message down a subscribed actor's receiver connection.

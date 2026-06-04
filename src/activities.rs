@@ -91,6 +91,14 @@ impl Activity {
     pub fn is_closed(&self) -> bool {
         self.closed_at.is_some()
     }
+
+    /// The body of a message activity (for re-delivery), `None` for tool calls.
+    pub fn message_text(&self) -> Option<&str> {
+        match &self.kind {
+            ActivityKind::AgentMessage { text, .. } => Some(text),
+            _ => None,
+        }
+    }
 }
 
 /// Workspace-global store of activities, oldest-first by id.
