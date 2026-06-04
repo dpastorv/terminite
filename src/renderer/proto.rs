@@ -143,6 +143,13 @@ impl Renderer {
                 } else if state == "busy" || state == "available" {
                     self.actor_status
                         .insert(actor.to_string(), (state.to_string(), std::time::Instant::now()));
+                    // Back at the prompt → flush anything held while busy down a
+                    // native receiver (channel/WS). PTY-paned actors catch up on
+                    // the next floor tick. Either way the wait ends the moment
+                    // the agent says it's ready.
+                    if state == "available" {
+                        self.deliver_pending(actor);
+                    }
                     crate::proto::OutPayload::Ok
                 } else {
                     // Clearing / unknown state → drop back to the heuristic.
@@ -269,6 +276,14 @@ impl Renderer {
         // queued as pending, so toggling back on catches up). The single choke
         // point for both direct push and catch-up.
         if !self.config.comms_delivery {
+            return;
+        }
+        // The actor declared itself heads-down: hold every wake path, not just
+        // the PTY floor. A `busy` claude/codex receiver gets nothing pushed; the
+        // message waits in pending and flushes when it goes `available`. The
+        // status gate is uniform across receivers — the base obeys the
+        // declaration whoever the resident is.
+        if self.declared_status(target) == Some("busy") {
             return;
         }
         // Loop-guard: prune the actor's delivery window, and if it's already at
