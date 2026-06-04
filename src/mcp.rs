@@ -112,6 +112,131 @@ pub fn run(actor: Option<String>) -> ExitCode {
     }
 }
 
+/// Run as a Claude Code **channel** — a receiver in the comms base. Spawned BY
+/// claude (`claude --channels server:lounge`), it subscribes to terminite's room
+/// and pushes each directed message into claude's *running* session as a
+/// `notifications/claude/channel` event — the wake. Receive-only: claude replies
+/// through its existing lounge MCP tools. Auto-acks each message it surfaces.
+///
+/// The MCP loop runs on the main thread and answers `initialize` immediately
+/// (declaring the channel capability) — the subscribe + bridge happen on a
+/// background thread so a slow room-join never stalls claude's handshake. The
+/// bridge exits on socket EOF; the process exits on stdin EOF (claude closing),
+/// which closes the subscribe socket → terminite drops the subscriber. No
+/// long-lived state, one bounded thread.
+pub fn run_channel() -> ExitCode {
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(io::stdout()));
+
+    // Background: resolve our room slug (the actor in our pane — claude's lounge
+    // MCP joined as e.g. claude-blue), subscribe, and bridge pushes → events.
+    let bridge_out = stdout.clone();
+    std::thread::spawn(move || {
+        let pane = std::env::var("TERMINITE_PANE").ok().and_then(|s| s.parse::<u64>().ok());
+        let Some(slug) = resolve_pane_slug(pane) else { return };
+        let Some(path) = socket_path() else { return };
+        let Ok(mut sub) = UnixStream::connect(&path) else { return };
+        let req = json!({ "id": 1, "method": "room_subscribe", "params": { "actor": slug } });
+        let mut line = req.to_string();
+        line.push('\n');
+        if sub.write_all(line.as_bytes()).is_err() {
+            return;
+        }
+        channel_bridge(sub, bridge_out);
+    });
+
+    // Main: the MCP stdio loop. Minimal — a channel, not a tool server.
+    let stdin = io::stdin();
+    let mut reader = BufReader::with_capacity(MAX_LINE_BYTES, stdin.lock());
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return ExitCode::SUCCESS, // claude closed stdin → exit.
+            Ok(_) => {}
+            Err(_) => return ExitCode::from(1),
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let req: Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let Ok(mut out) = stdout.lock() else { return ExitCode::from(1) };
+        match method {
+            "initialize" => send_result(&mut *out, id, json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": { "experimental": { "claude/channel": {} } },
+                "serverInfo": { "name": "terminite-channel", "version": SERVER_VERSION },
+            })),
+            "notifications/initialized" => {}
+            "ping" => send_result(&mut *out, id, json!({})),
+            "tools/list" => send_result(&mut *out, id, json!({ "tools": [] })),
+            _ => send_err(&mut *out, id, -32601, &format!("method not found: {method}")),
+        }
+    }
+}
+
+/// The channel's background bridge: read room-message pushes off the subscribe
+/// socket and surface each into claude as a `notifications/claude/channel`,
+/// auto-acking it. Exits on socket EOF.
+fn channel_bridge(sub: UnixStream, out: std::sync::Arc<std::sync::Mutex<io::Stdout>>) {
+    let reader = BufReader::new(sub);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        if v.get("kind").and_then(|k| k.as_str()) != Some("room_message") {
+            continue;
+        }
+        let from = v.get("from").and_then(|x| x.as_str()).unwrap_or("");
+        let text = v.get("text").and_then(|x| x.as_str()).unwrap_or("");
+        let notif = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/claude/channel",
+            "params": {
+                "content": format!("{from}: {text}"),
+                "meta": { "from": from },
+            },
+        });
+        if let Ok(mut o) = out.lock() {
+            let mut s = notif.to_string();
+            s.push('\n');
+            let _ = o.write_all(s.as_bytes());
+            let _ = o.flush();
+        }
+        // Auto-ack (a separate one-shot keeps the subscribe socket read-only).
+        if let Some(mid) = v.get("message_id").and_then(|x| x.as_u64()) {
+            let _ = proto_call(json!({ "id": 1, "method": "room_ack", "params": { "message_id": mid } }));
+        }
+    }
+}
+
+/// Find the room slug of the actor present in `pane` (our own pane), retrying a
+/// few times — claude's lounge MCP may still be joining when the channel starts.
+fn resolve_pane_slug(pane: Option<u64>) -> Option<String> {
+    let pane = pane?;
+    for _ in 0..10 {
+        if let Ok(resp) = proto_call(json!({ "id": 1, "method": "room_who" })) {
+            if let Ok(v) = serde_json::from_str::<Value>(&resp) {
+                if let Some(actors) = v.get("actors").and_then(|a| a.as_array()) {
+                    for a in actors {
+                        if a.get("pane").and_then(|p| p.as_u64()) == Some(pane) {
+                            if let Some(slug) = a.get("slug").and_then(|s| s.as_str()) {
+                                return Some(slug.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
+    None
+}
+
 fn handle_request(out: &mut impl Write, req: Value) {
     let id = req.get("id").cloned().unwrap_or(Value::Null);
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");

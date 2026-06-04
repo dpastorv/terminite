@@ -89,6 +89,12 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
                 .cloned();
             Some(crate::mcp::run(actor))
         }
+        "channel" => {
+            // The claude comms-base receiver: spawned by `claude --channels
+            // server:lounge`, it pushes directed room messages into the running
+            // session as channel events. See guide/comms-base.md.
+            Some(crate::mcp::run_channel())
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)
@@ -291,6 +297,7 @@ const AGY_SKILL: &str = include_str!("../faculty/agy-terminite/SKILL.md");
 fn cmd_install(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         Some("claude-terminite") | Some("claude") => install_claude_terminite(&args[1..]),
+        Some("claude-channel") => install_claude_channel(&args[1..]),
         Some("codex-terminite") | Some("codex") => install_codex_terminite(&args[1..]),
         Some("kimi-terminite") | Some("kimi") => install_kimi_terminite(&args[1..]),
         Some("qwen-terminite") | Some("qwen") => install_qwen_terminite(&args[1..]),
@@ -802,6 +809,72 @@ fn install_agy_terminite(args: &[String]) -> ExitCode {
         Err(e) => {
             eprintln!("terminite install: staged the plugin, but couldn't run `agy` ({e}) — is it on PATH?");
             eprintln!("install it yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Wire claude's comms-base RECEIVER — the channel. Registers a `lounge-channel`
+/// MCP server (`terminite channel`) so claude can spawn it, and prints the
+/// wrapped launch that turns it on. The wake costs a special launch (the dev
+/// channel flag) — that's the per-vendor cost the source-dive found, not faked.
+/// PREVIEW: the channel flag/protocol is a Claude Code research preview and may
+/// change; this needs live confirmation against the installed claude version.
+fn install_claude_channel(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let config_dir = match resolve_profile_dir(args) {
+        Some(d) => d,
+        None => {
+            eprintln!("terminite install: no HOME / CLAUDE_CONFIG_DIR to install into");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_profile = args.iter().any(|a| a == "--profile");
+    let manual = format!("claude mcp add --scope user lounge-channel -- {} channel", bin.display());
+    let mut rm = std::process::Command::new("claude");
+    if explicit_profile {
+        rm.env("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+    let _ = rm
+        .args(["mcp", "remove", "lounge-channel"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let mut cmd = std::process::Command::new("claude");
+    if explicit_profile {
+        cmd.env("CLAUDE_CONFIG_DIR", &config_dir);
+    }
+    let status = cmd
+        .args(["mcp", "add", "--scope", "user", "lounge-channel", "--"])
+        .arg(&bin)
+        .args(["channel"])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("registered the claude channel receiver: lounge-channel → {} channel", bin.display());
+            println!("\nTurn the wake ON by launching claude with the channel flag:");
+            println!("  claude --dangerously-load-development-channels server:lounge-channel");
+            println!("\nThen a directed room message to this claude is PUSHED into its");
+            println!("running session as a <channel> event — it wakes without polling.");
+            println!("CAVEATS (Claude Code research preview): Anthropic auth only (no");
+            println!("Bedrock/Vertex), interactive only (not -p), v2.1.80+. The flag/protocol");
+            println!("may change. reverse: claude mcp remove lounge-channel");
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("terminite install: `claude mcp add` failed ({s}).");
+            eprintln!("register it yourself:\n  {manual}");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("terminite install: couldn't run `claude` ({e}) — is it on PATH?");
+            eprintln!("register it yourself:\n  {manual}");
             ExitCode::from(1)
         }
     }
