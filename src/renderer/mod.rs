@@ -47,6 +47,10 @@ use panes::*;
 use render::*;
 use tabs::*;
 
+/// Re-check interval for a held PTY-floor message's gate (unfocused + idle)
+/// while it waits. Only ticks while one is undelivered (see `has_pending_pty_work`).
+const PTY_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
+
 const UNDERLINE_THICKNESS: f32 = 1.5;
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
@@ -454,6 +458,12 @@ pub struct Renderer {
     /// the salt set down instead of polling. Cleared when notified; bounded.
     file_waiters: std::collections::HashMap<String, Vec<String>>,
 
+    /// Last time each actor *did* something (emitted or made a tool call). The
+    /// PTY floor's idle signal: an actor silent for `PTY_IDLE` is treated as
+    /// sitting at its prompt, so terminite can safely type a held room message
+    /// into its pane. A coarse cross-vendor proxy (agy has a precise idle hook).
+    last_activity: std::collections::HashMap<String, Instant>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -733,6 +743,7 @@ impl Renderer {
             delivery_log: std::collections::HashMap::new(),
             delivery_watch: std::collections::HashMap::new(),
             file_waiters: std::collections::HashMap::new(),
+            last_activity: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
@@ -825,6 +836,11 @@ impl Renderer {
             }
         }
         let earliest_stall = self.delivery_watch.values().map(|(d, _)| *d).min();
+        // While a PTY-floor message waits for its gate (unfocused + idle), tick
+        // so we re-check; no tick when nothing's held.
+        let pty_tick = self
+            .has_pending_pty_work()
+            .then(|| Instant::now() + PTY_RETRY);
         [
             self.bell_flash_until,
             self.next_blink_deadline,
@@ -832,6 +848,7 @@ impl Renderer {
             self.next_surface_retry_deadline,
             earliest_anim,
             earliest_stall,
+            pty_tick,
         ]
         .into_iter()
         .flatten()

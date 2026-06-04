@@ -21,6 +21,10 @@ const MAX_REDELIVERY: u8 = 3;
 /// Cap on waiters queued per file (bounds memory; oldest dropped).
 const FILE_WAITERS_CAP: usize = 16;
 
+/// PTY floor: an actor silent this long is treated as idle (at its prompt), so a
+/// held room message can be typed into its pane. Coarse cross-vendor proxy.
+const PTY_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
     /// client; the new one wins).
@@ -192,8 +196,10 @@ impl Renderer {
             to.map(String::from),
             text.to_string(),
         );
-        // The emitter just acted → it's awake; clear any stall watch on it.
+        // The emitter just acted → it's awake; clear any stall watch on it and
+        // stamp its activity (so the PTY floor knows it's not idle right now).
         self.delivery_watch.remove(from);
+        self.last_activity.insert(from.to_string(), std::time::Instant::now());
         if let Some(target) = to {
             let q = self.pending.entry(target.to_string()).or_default();
             q.push(id);
@@ -304,6 +310,96 @@ impl Renderer {
             self.delivery_watch
                 .insert(actor.clone(), (now + STALL_DEADLINE, retries + 1));
             self.deliver_pending(&actor);
+        }
+    }
+
+    // ── PTY floor — the universal receiver ──────────────────────────────────
+    // The fallback when an actor has no native receiver: type a held room
+    // message into its pane, but only when the human isn't there (window
+    // unfocused or a different tab) and the actor is idle (at its prompt). Per
+    // the residents' decision (guide/codex-wake-decision.md): the base bounds the
+    // crudeness; identity stays in the pane.
+
+    /// Silent past `PTY_IDLE` ⇒ treated as idle (at its prompt). No record ⇒
+    /// never active ⇒ idle.
+    fn is_actor_idle(&self, slug: &str) -> bool {
+        match self.last_activity.get(slug) {
+            Some(t) => std::time::Instant::now().duration_since(*t) > PTY_IDLE,
+            None => true,
+        }
+    }
+
+    /// The human is actively in this pane (window focused AND it's the active
+    /// tab) — never inject there.
+    fn human_at_pane(&self, pane: u64) -> bool {
+        self.focused && self.active_tab_ref().id.0 == pane
+    }
+
+    /// Type `text` (collapsed to one line + Enter) into the pane's terminal.
+    fn pty_inject(&self, pane: u64, text: &str) {
+        let Some(root) = self.root.as_ref() else { return };
+        let mut tabs: Vec<&Tab> = Vec::new();
+        root.all_tabs(&mut tabs);
+        if let Some(tab) = tabs.into_iter().find(|t| t.id.0 == pane) {
+            let mut line: String = text
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            line.push('\r');
+            tab.live_term.write(line.into_bytes());
+        }
+    }
+
+    /// Any pending message bound for a paned actor with no native receiver?
+    /// Drives the retry tick in `next_wakeup` (only ticks while one waits).
+    pub fn has_pending_pty_work(&self) -> bool {
+        self.pending.iter().any(|(actor, ids)| {
+            !ids.is_empty()
+                && !self.room_subscribers.contains_key(actor)
+                && self.roster.pane_for_slug(actor).is_some()
+        })
+    }
+
+    /// PTY-floor delivery pass (called from `about_to_wait`): for each pending
+    /// message to a paned actor with no native receiver, if the human isn't in
+    /// that pane and the actor is idle, type it in and mark it consumed. Held
+    /// otherwise — the message waits in `pending` until the gate opens.
+    pub fn try_pty_deliveries(&mut self) {
+        if self.pending.is_empty() || !self.config.comms_delivery {
+            return;
+        }
+        let mut jobs: Vec<(String, u64, Vec<(String, String)>)> = Vec::new();
+        for (actor, ids) in &self.pending {
+            if ids.is_empty() || self.room_subscribers.contains_key(actor) {
+                continue;
+            }
+            let Some(pane) = self.roster.pane_for_slug(actor) else { continue };
+            if self.human_at_pane(pane) || !self.is_actor_idle(actor) {
+                continue;
+            }
+            let msgs: Vec<(String, String)> = ids
+                .iter()
+                .filter_map(|&id| {
+                    let a = self.activities.get(id)?;
+                    Some((a.actor.clone(), a.message_text()?.to_string()))
+                })
+                .collect();
+            if !msgs.is_empty() {
+                jobs.push((actor.clone(), pane, msgs));
+            }
+        }
+        for (actor, pane, msgs) in jobs {
+            // One injection per actor (one Enter = one turn) — concatenate any
+            // held messages so a backlog doesn't fire N separate turns.
+            let combined = msgs
+                .iter()
+                .map(|(from, text)| format!("[{from}] {text}"))
+                .collect::<Vec<_>>()
+                .join("  ·  ");
+            self.pty_inject(pane, &format!("[terminite room] {combined}"));
+            // Typed in → consumed: drop the queue + any stall watch.
+            self.pending.remove(&actor);
+            self.delivery_watch.remove(&actor);
         }
     }
 
@@ -519,8 +615,10 @@ impl Renderer {
             .unwrap_or(tool.as_str())
             .to_string();
         let agent_name = agent_name_from_slug(&slug);
-        // A tool call means this actor is awake → clear any stall watch on it.
+        // A tool call means this actor is awake → clear its stall watch and
+        // stamp its activity (the PTY floor won't inject mid-turn).
         self.delivery_watch.remove(&slug);
+        self.last_activity.insert(slug.clone(), std::time::Instant::now());
         self.activities.emit(
             slug,
             agent_name,

@@ -225,6 +225,21 @@ impl Roster {
     pub fn is_empty(&self) -> bool {
         self.by_conn.is_empty()
     }
+
+    /// The pane an actor (by slug) is in, if any — so the PTY floor knows which
+    /// terminal to type a room message into. Checks live then lingering.
+    pub fn pane_for_slug(&self, slug: &str) -> Option<u64> {
+        self.by_conn
+            .values()
+            .find(|p| p.slug == slug)
+            .and_then(|p| p.pane)
+            .or_else(|| {
+                self.lingering
+                    .values()
+                    .find(|l| l.presence.slug == slug)
+                    .and_then(|l| l.presence.pane)
+            })
+    }
 }
 
 #[cfg(test)]
