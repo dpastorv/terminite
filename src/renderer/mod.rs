@@ -464,6 +464,12 @@ pub struct Renderer {
     /// into its pane. A coarse cross-vendor proxy (agy has a precise idle hook).
     last_activity: std::collections::HashMap<String, Instant>,
 
+    /// Last time the HUMAN typed into each pane (by tab id). The PTY floor gates
+    /// on this, not on focus: you can *watch* a wake land on the pane you're
+    /// looking at (focused but not typing), while the floor still never stomps a
+    /// pane you're actively typing in.
+    last_human_input: std::collections::HashMap<u64, Instant>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -744,6 +750,7 @@ impl Renderer {
             delivery_watch: std::collections::HashMap::new(),
             file_waiters: std::collections::HashMap::new(),
             last_activity: std::collections::HashMap::new(),
+            last_human_input: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),

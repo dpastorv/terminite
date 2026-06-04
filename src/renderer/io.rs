@@ -179,7 +179,15 @@ impl Renderer {
     }
 
     /// Write bytes to the active tab's PTY (keyboard input path).
+    /// Stamp that the human just typed into the active pane — the PTY floor's
+    /// "actively in use" signal (so it holds, instead of stomping your input).
+    pub(super) fn note_human_input(&mut self) {
+        let id = self.active_tab_ref().id.0;
+        self.last_human_input.insert(id, std::time::Instant::now());
+    }
+
     pub fn write_active(&mut self, bytes: Vec<u8>) {
+        self.note_human_input();
         let tab = self.active_tab_ref();
         match &tab.kind {
             TabContentKind::Module(_) => {

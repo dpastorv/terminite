@@ -698,6 +698,7 @@ impl Renderer {
         if text.is_empty() {
             return;
         }
+        self.note_human_input();
         if self.active_tab_mut().live_term.mode_flags().bracketed_paste {
             // Wrap so the shell treats the whole paste as one input, not as
             // typed-and-pressed-enter for each newline. Strips any embedded
@@ -725,6 +726,7 @@ impl Renderer {
     pub fn ime_commit(&mut self, text: String) {
         self.preedit.clear();
         if !text.is_empty() {
+            self.note_human_input();
             self.active_tab_mut().active_term().write(text.into_bytes());
         }
         self.window.request_redraw();

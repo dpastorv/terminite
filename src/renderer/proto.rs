@@ -24,6 +24,9 @@ const FILE_WAITERS_CAP: usize = 16;
 /// PTY floor: an actor silent this long is treated as idle (at its prompt), so a
 /// held room message can be typed into its pane. Coarse cross-vendor proxy.
 const PTY_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+/// How recently the human must have typed in a pane for it to count as "in use"
+/// (so the floor holds). Watching without typing past this lets a wake land.
+const HUMAN_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
@@ -329,10 +332,19 @@ impl Renderer {
         }
     }
 
-    /// The human is actively in this pane (window focused AND it's the active
-    /// tab) — never inject there.
+    /// The human is *actively typing* in this pane — never inject there (we'd
+    /// stomp their keystrokes). Only the focused active tab can qualify, and only
+    /// if it's seen human input within `HUMAN_TYPING_WINDOW`. Watching a focused
+    /// pane without typing does NOT block injection — so you can sit and watch a
+    /// wake land on the very pane you're looking at.
     fn human_at_pane(&self, pane: u64) -> bool {
-        self.focused && self.active_tab_ref().id.0 == pane
+        if !(self.focused && self.active_tab_ref().id.0 == pane) {
+            return false;
+        }
+        match self.last_human_input.get(&pane) {
+            Some(t) => std::time::Instant::now().duration_since(*t) < HUMAN_TYPING_WINDOW,
+            None => false,
+        }
     }
 
     /// Type `text` (collapsed to one line + Enter) into the pane's terminal.
