@@ -50,6 +50,11 @@ Edit or Write a file others might also touch:
 
 A good citizen checks before it writes a shared file.
 
+**Coordinate over the room, not the file.** Take your turn only when you receive
+an addressed room message — never because a file appeared or changed. The room
+is the one baton (the control plane); a file is output (the data plane). Two
+agents watching the file instead of the room will race and clobber each other.
+
 ## 4. Why it matters
 
 The room exists so the pair — and the other agents — can see each other work:

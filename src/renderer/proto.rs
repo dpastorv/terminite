@@ -12,6 +12,12 @@ const PENDING_CAP: usize = 64;
 const DELIVERY_WINDOW_MS: u64 = 10_000;
 const DELIVERY_MAX: usize = 8;
 
+/// Stall watch: if a delivered-to actor produces no activity within this, the
+/// base re-delivers — up to `MAX_REDELIVERY` times, then gives up. Recovers a
+/// stalled turn (a 529, a weaker model freezing) without a smart peer noticing.
+const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_REDELIVERY: u8 = 3;
+
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
     /// client; the new one wins).
@@ -170,6 +176,8 @@ impl Renderer {
         let id = self
             .activities
             .emit_message(actor.to_string(), agent_name, to.clone(), text.clone());
+        // The emitter just acted → it's awake; clear any stall watch on it.
+        self.delivery_watch.remove(actor);
         // The comms base: a directed message becomes deliverable. Queue it as
         // pending (un-consumed) for catch-up, then push now if a receiver is
         // live. Records stay the read fallback either way.
@@ -228,7 +236,7 @@ impl Renderer {
             return;
         }
         log.push_back(now);
-        let dead = match self.room_subscribers.get(target) {
+        let send_failed = match self.room_subscribers.get(target) {
             Some((_, out)) => out
                 .try_send(crate::proto::OutMessage {
                     id: 0,
@@ -239,10 +247,50 @@ impl Renderer {
                     },
                 })
                 .is_err(),
-            None => false,
+            // No live receiver: the message waits in pending (no delivery
+            // happened) — nothing to stall-watch, it isn't stuck, just unread.
+            None => return,
         };
-        if dead {
+        if send_failed {
             self.room_subscribers.remove(target);
+            return;
+        }
+        // Delivered to a live receiver → arm the stall watch (preserving the
+        // retry count). If the actor stays silent past STALL_DEADLINE, the base
+        // re-delivers — progress doesn't depend on the agent being clever.
+        let retries = self.delivery_watch.get(target).map(|(_, r)| *r).unwrap_or(0);
+        self.delivery_watch.insert(
+            target.to_string(),
+            (std::time::Instant::now() + STALL_DEADLINE, retries),
+        );
+    }
+
+    /// Re-deliver to any actor that went silent past its stall deadline (up to
+    /// `MAX_REDELIVERY`), else give up. Called from the main loop's
+    /// `about_to_wait` — the base owning progress is what makes the room robust
+    /// for weaker residents, instead of relying on a smart peer to re-poke.
+    pub fn check_stalls(&mut self) {
+        if self.delivery_watch.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due: Vec<String> = self
+            .delivery_watch
+            .iter()
+            .filter(|(_, (deadline, _))| now >= *deadline)
+            .map(|(a, _)| a.clone())
+            .collect();
+        for actor in due {
+            let retries = self.delivery_watch.get(&actor).map(|(_, r)| *r).unwrap_or(0);
+            let has_pending = self.pending.get(&actor).is_some_and(|q| !q.is_empty());
+            if !has_pending || retries >= MAX_REDELIVERY {
+                self.delivery_watch.remove(&actor); // acted/nothing left, or gave up
+                continue;
+            }
+            // Bump the retry, then re-deliver (push re-arms the watch with it).
+            self.delivery_watch
+                .insert(actor.clone(), (now + STALL_DEADLINE, retries + 1));
+            self.deliver_pending(&actor);
         }
     }
 
@@ -423,6 +471,8 @@ impl Renderer {
             .unwrap_or(tool.as_str())
             .to_string();
         let agent_name = agent_name_from_slug(&slug);
+        // A tool call means this actor is awake → clear any stall watch on it.
+        self.delivery_watch.remove(&slug);
         self.activities.emit(
             slug,
             agent_name,

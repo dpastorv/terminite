@@ -440,6 +440,14 @@ pub struct Renderer {
     /// deque is pruned to the window, never larger than `DELIVERY_MAX`.
     delivery_log: std::collections::HashMap<String, std::collections::VecDeque<u64>>,
 
+    /// Stall watch: a directed message was delivered to this actor and it has
+    /// gone silent — `(deadline, retries used)`. If the actor produces no
+    /// activity by the deadline, terminite RE-DELIVERS (the base owns progress,
+    /// so a stalled turn — a 529, or a weaker model freezing — recovers without
+    /// a smart peer noticing). Cleared the moment the actor acts. Bounded:
+    /// keyed by actor, retries capped, re-delivery rate-limited by the loop-guard.
+    delivery_watch: std::collections::HashMap<String, (Instant, u8)>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -717,6 +725,7 @@ impl Renderer {
             room_subscribers: std::collections::HashMap::new(),
             pending: std::collections::HashMap::new(),
             delivery_log: std::collections::HashMap::new(),
+            delivery_watch: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
@@ -808,12 +817,14 @@ impl Renderer {
                 }
             }
         }
+        let earliest_stall = self.delivery_watch.values().map(|(d, _)| *d).min();
         [
             self.bell_flash_until,
             self.next_blink_deadline,
             self.next_autoscroll_deadline,
             self.next_surface_retry_deadline,
             earliest_anim,
+            earliest_stall,
         ]
         .into_iter()
         .flatten()

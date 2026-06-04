@@ -326,6 +326,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Re-deliver any stalled directed message (the comms base owns progress).
+        // Cheap: a no-op unless a delivery deadline has come due.
+        if let Some(r) = self.renderer.as_mut() {
+            r.check_stalls();
+        }
         // Drive the renderer's pending deadlines via the native scheduler
         // instead of detached threads — the latter pinned the machine on
         // bell storms (2026-05-20 watchdog panic).
