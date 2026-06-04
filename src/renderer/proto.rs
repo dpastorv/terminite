@@ -14,6 +14,8 @@ impl Renderer {
     /// departure immediately.
     pub fn handle_proto_disconnect(&mut self, conn_id: u64) {
         self.proto_subscriber = None;
+        // Drop any comms-base receiver this connection was holding.
+        self.room_subscribers.retain(|_, (cid, _)| *cid != conn_id);
         if self.roster.leave(conn_id, crate::presence::now_ms()).is_some() {
             self.window.request_redraw();
         }
@@ -60,6 +62,23 @@ impl Renderer {
             "file_release" => self.proto_file_release(&req.params),
             "file_status" => self.proto_file_status(&req.params),
             "files" => self.proto_files(),
+            "room_subscribe" => {
+                // The comms base: park this connection as the push target for an
+                // actor's directed messages. The receiver holds it open.
+                let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+                if actor.is_empty() {
+                    crate::proto::OutPayload::Error {
+                        message: "room_subscribe: missing actor".into(),
+                    }
+                } else {
+                    self.room_subscribers
+                        .insert(actor.to_string(), (conn_id, out.clone()));
+                    crate::proto::OutPayload::Subscribed
+                }
+            }
+            // Receiver confirms it surfaced a pushed message. No-op for now;
+            // increment 2 records per-message consumed state + re-delivery.
+            "room_ack" => crate::proto::OutPayload::Ok,
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
             },
@@ -118,9 +137,37 @@ impl Renderer {
         }
         let to = params.get("to").and_then(|v| v.as_str()).map(String::from);
         let agent_name = agent_name_from_slug(actor);
-        self.activities
-            .emit_message(actor.to_string(), agent_name, to, text);
+        let id = self
+            .activities
+            .emit_message(actor.to_string(), agent_name, to.clone(), text.clone());
+        // The comms base: if this is directed at an actor with a live receiver,
+        // PUSH it now (delivery, not poll). Records stay the read fallback.
+        if let Some(target) = to {
+            self.push_room_message(&target, id, actor, &text);
+        }
         crate::proto::OutPayload::Ok
+    }
+
+    /// Push a directed message down a subscribed actor's receiver connection.
+    /// A dead writer (receiver gone) is dropped. This is the delivery half of
+    /// the comms base — `guide/comms-base.md`.
+    fn push_room_message(&mut self, target: &str, message_id: u64, from: &str, text: &str) {
+        let dead = match self.room_subscribers.get(target) {
+            Some((_, out)) => out
+                .try_send(crate::proto::OutMessage {
+                    id: 0,
+                    payload: crate::proto::OutPayload::RoomMessage {
+                        message_id,
+                        from: from.to_string(),
+                        text: text.to_string(),
+                    },
+                })
+                .is_err(),
+            None => false,
+        };
+        if dead {
+            self.room_subscribers.remove(target);
+        }
     }
 
     /// `file_claim {actor, path}` — an actor declares it's working in a file.

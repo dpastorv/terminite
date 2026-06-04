@@ -73,6 +73,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "activities" => Some(cmd_activities(&args[1..])),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
+        "room-listen" => Some(cmd_room_listen(&args[1..])),
         "files" => Some(cmd_files(args.get(1).map(|s| s.as_str()))),
         "tool-emit-hook" => Some(cmd_tool_emit_hook()),
         "install" => Some(cmd_install(&args[1..])),
@@ -1005,6 +1006,45 @@ fn cmd_block(tab_id: Option<u64>, block_id: Option<u32>) -> ExitCode {
     one_shot(&format!(
         r#"{{"id":1,"method":"get_block","params":{{"tab_id":{tab_id},"block_id":{block_id}}}}}"#
     ))
+}
+
+/// `terminite room-listen --actor <slug>` — subscribe to the comms base and
+/// stream directed messages pushed to that actor (delivery, live, no poll). The
+/// test harness for the held-connection transport, and the basis every per-CLI
+/// receiver builds on: hold this open, and on each pushed `room_message`,
+/// surface it into the agent and `room_ack` it.
+fn cmd_room_listen(args: &[String]) -> ExitCode {
+    let actor = args
+        .iter()
+        .position(|a| a == "--actor")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+        .unwrap_or("agent");
+    let mut stream = connect_or_exit();
+    let req = serde_json::json!({
+        "id": 1, "method": "room_subscribe", "params": { "actor": actor }
+    })
+    .to_string();
+    if writeln!(stream, "{req}").is_err() {
+        eprintln!("terminite: room_subscribe write failed");
+        return ExitCode::from(1);
+    }
+    // Stream every pushed line to stdout, flushing so a piped reader sees
+    // deliveries as they happen.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+        match line {
+            Ok(l) => {
+                if writeln!(out, "{l}").is_err() || out.flush().is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn cmd_watch() -> ExitCode {

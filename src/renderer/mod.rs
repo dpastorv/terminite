@@ -416,6 +416,14 @@ pub struct Renderer {
     /// (channel full or disconnected) clears the slot.
     proto_subscriber: Option<std::sync::mpsc::SyncSender<crate::proto::OutMessage>>,
 
+    /// The comms base's push channels — one per subscribed actor. The faculty's
+    /// receiver calls `room_subscribe {actor}` and terminite pushes directed
+    /// messages for that actor down this writer as they arrive (delivery, not
+    /// poll). Keyed by actor slug → (conn_id, writer); conn_id is for cleanup on
+    /// disconnect. This is `guide/comms-base.md`'s substrate.
+    room_subscribers:
+        std::collections::HashMap<String, (u64, std::sync::mpsc::SyncSender<crate::proto::OutMessage>)>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -690,6 +698,7 @@ impl Renderer {
             config,
             proxy,
             proto_subscriber: None,
+            room_subscribers: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
