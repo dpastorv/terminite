@@ -446,19 +446,56 @@ impl Renderer {
         }
     }
 
-    /// Type `text` (collapsed to one line + Enter) into the pane's terminal.
-    fn pty_inject(&self, pane: u64, text: &str) {
+    /// Write raw bytes into a pane's terminal by id. The low-level half of the
+    /// floor — used to type the text and, separately, to send the Enter.
+    fn pty_write_raw(&self, pane: u64, bytes: Vec<u8>) {
         let Some(root) = self.root.as_ref() else { return };
         let mut tabs: Vec<&Tab> = Vec::new();
         root.all_tabs(&mut tabs);
         if let Some(tab) = tabs.into_iter().find(|t| t.id.0 == pane) {
-            let mut line: String = text
-                .chars()
-                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                .collect();
-            line.push('\r');
-            tab.live_term.write(line.into_bytes());
+            tab.live_term.write(bytes);
         }
+    }
+
+    /// Type `text` (collapsed to one line) into the pane, then queue its Enter a
+    /// beat later. The split is the fix for the relay's "submit gap": a fast
+    /// text+`\r` burst reads as a paste and the newline never submits; a delayed,
+    /// isolated Enter does. See `PTY_SUBMIT_DELAY` / `flush_pty_submits`.
+    fn pty_inject(&mut self, pane: u64, text: &str) {
+        let line: String = text
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+        let n = line.len();
+        self.pty_write_raw(pane, line.into_bytes());
+        self.pty_submit_queue
+            .push((std::time::Instant::now() + PTY_SUBMIT_DELAY, pane));
+        // Host-side diagnostic (the agents can't see the PTY buffer): proves the
+        // floor typed text to a pane, and that the Enter is coming separately.
+        eprintln!(
+            "[pty-floor] typed {n} chars → pane {pane}; Enter in {}ms",
+            PTY_SUBMIT_DELAY.as_millis()
+        );
+    }
+
+    /// Send the deferred Enter for any floor injection whose delay has elapsed.
+    /// Called from `about_to_wait`; scheduled via `next_wakeup`. Cheap no-op
+    /// when the queue is empty.
+    pub fn flush_pty_submits(&mut self) {
+        if self.pty_submit_queue.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut still_waiting = Vec::new();
+        for (deadline, pane) in std::mem::take(&mut self.pty_submit_queue) {
+            if deadline <= now {
+                self.pty_write_raw(pane, b"\r".to_vec());
+                eprintln!("[pty-floor] Enter → pane {pane}");
+            } else {
+                still_waiting.push((deadline, pane));
+            }
+        }
+        self.pty_submit_queue = still_waiting;
     }
 
     /// Any pending message bound for a paned actor with no native receiver?

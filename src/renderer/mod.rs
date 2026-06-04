@@ -50,6 +50,13 @@ use tabs::*;
 /// Re-check interval for a held PTY-floor message's gate (unfocused + idle)
 /// while it waits. Only ticks while one is undelivered (see `has_pending_pty_work`).
 const PTY_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Gap between typing a floor message's text and sending its Enter. TUIs read a
+/// fast text+Enter burst as a *paste*, where the trailing newline is buffered as
+/// content, not a submit — so the message lands in the prompt but never fires
+/// (the relay's "submit gap": text appeared, Daniel had to press Enter). A
+/// distinct, delayed Enter is seen as a real keystroke and submits. Well outside
+/// any paste-coalescing window, imperceptible to a watching human.
+const PTY_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
 const UNDERLINE_THICKNESS: f32 = 1.5;
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
@@ -485,6 +492,12 @@ pub struct Renderer {
     /// a gone actor has no pane to inject).
     actor_auto: std::collections::HashMap<String, Instant>,
 
+    /// Pending floor-message Enters (when to send · pane). The text is typed
+    /// immediately; the Enter follows a beat later so the TUI doesn't swallow it
+    /// as paste content. Drained in `flush_pty_submits` on the WaitUntil tick.
+    /// Bounded by in-flight injections (≤ pending cap), one short Vec.
+    pty_submit_queue: Vec<(Instant, u64)>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -768,6 +781,7 @@ impl Renderer {
             last_human_input: std::collections::HashMap::new(),
             actor_status: std::collections::HashMap::new(),
             actor_auto: std::collections::HashMap::new(),
+            pty_submit_queue: Vec::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
@@ -865,6 +879,8 @@ impl Renderer {
         let pty_tick = self
             .has_pending_pty_work()
             .then(|| Instant::now() + PTY_RETRY);
+        // A deferred floor Enter waiting to fire.
+        let pty_submit = self.pty_submit_queue.iter().map(|(d, _)| *d).min();
         [
             self.bell_flash_until,
             self.next_blink_deadline,
@@ -873,6 +889,7 @@ impl Renderer {
             earliest_anim,
             earliest_stall,
             pty_tick,
+            pty_submit,
         ]
         .into_iter()
         .flatten()

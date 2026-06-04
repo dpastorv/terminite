@@ -333,6 +333,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
             r.check_stalls();
             r.notify_freed_waiters();
             r.try_pty_deliveries();
+            r.flush_pty_submits();
         }
         // Drive the renderer's pending deadlines via the native scheduler
         // instead of detached threads — the latter pinned the machine on
