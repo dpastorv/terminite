@@ -432,6 +432,14 @@ pub struct Renderer {
     /// and is accounted individually. Capped per actor (`PENDING_CAP`).
     pending: std::collections::HashMap<String, Vec<u64>>,
 
+    /// Loop-guard: recent delivery timestamps per actor (a small sliding window).
+    /// Caps the rate terminite will push to any one actor, so two idle agents
+    /// can't bounce messages into a runaway — the real danger isn't the chatter,
+    /// it's unbounded resource use ([[feedback-system-impact-pass]]). Over-cap
+    /// deliveries stay pending and catch up once the rate cools. Bounded: each
+    /// deque is pruned to the window, never larger than `DELIVERY_MAX`.
+    delivery_log: std::collections::HashMap<String, std::collections::VecDeque<u64>>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -708,6 +716,7 @@ impl Renderer {
             proto_subscriber: None,
             room_subscribers: std::collections::HashMap::new(),
             pending: std::collections::HashMap::new(),
+            delivery_log: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),

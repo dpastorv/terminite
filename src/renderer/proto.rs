@@ -6,6 +6,12 @@ use super::*;
 /// memory if a receiver never acks (system-impact); oldest are dropped first.
 const PENDING_CAP: usize = 64;
 
+/// Loop-guard window + cap: at most `DELIVERY_MAX` pushes to one actor per
+/// `DELIVERY_WINDOW_MS`. Over-cap deliveries defer (stay pending), so two idle
+/// agents bouncing replies run at a bounded rate instead of a runaway.
+const DELIVERY_WINDOW_MS: u64 = 10_000;
+const DELIVERY_MAX: usize = 8;
+
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
     /// client; the new one wins).
@@ -200,6 +206,24 @@ impl Renderer {
     /// A dead writer (receiver gone) is dropped. This is the delivery half of
     /// the comms base — `guide/comms-base.md`.
     fn push_room_message(&mut self, target: &str, message_id: u64, from: &str, text: &str) {
+        // The human's opt-out: delivery off → record-only (the message still
+        // queued as pending, so toggling back on catches up). The single choke
+        // point for both direct push and catch-up.
+        if !self.config.comms_delivery {
+            return;
+        }
+        // Loop-guard: prune the actor's delivery window, and if it's already at
+        // the cap, DON'T push — the message stays pending and catches up once the
+        // rate cools. Breaks a two-agent bounce from running unbounded.
+        let now = crate::presence::now_ms();
+        let log = self.delivery_log.entry(target.to_string()).or_default();
+        while log.front().is_some_and(|&t| now.saturating_sub(t) >= DELIVERY_WINDOW_MS) {
+            log.pop_front();
+        }
+        if log.len() >= DELIVERY_MAX {
+            return;
+        }
+        log.push_back(now);
         let dead = match self.room_subscribers.get(target) {
             Some((_, out)) => out
                 .try_send(crate::proto::OutMessage {

@@ -102,6 +102,11 @@ pub struct Config {
     /// Scrollback lines kept per shell. Applied to tabs created after a
     /// reload; existing tabs keep the size they were born with.
     pub scrollback: usize,
+    /// The comms base's delivery: when on (default), a directed room message is
+    /// PUSHED to its addressee's receiver (the room is alive — agents sharing a
+    /// window reach each other). Off = record-only (messages wait in the log
+    /// until read), the pre-comms behavior. The human's opt-out.
+    pub comms_delivery: bool,
 }
 
 /// One row of `schema()` — a known config key with its type, default,
@@ -184,6 +189,9 @@ pub fn schema() -> Vec<ConfigKey> {
           "How to handle \\a (bell). One of: visual, none."),
         k("scrollback", ConfigKind::Int, ConfigValue::Int(10_000), false,
           "Scrollback lines per shell. Applied to new tabs only."),
+        k("comms_delivery", ConfigKind::Bool, ConfigValue::Bool(true), true,
+          "Push directed room messages to their addressee (the room is alive). \
+           Off = record-only."),
     ]
 }
 
@@ -209,6 +217,7 @@ impl Default for Config {
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
+            comms_delivery: true,
         }
     }
 }
@@ -322,6 +331,11 @@ impl Config {
                 "cursor_blink" => {
                     if let Value::Bool(b) = val {
                         self.cursor_blink = b;
+                    }
+                }
+                "comms_delivery" => {
+                    if let Value::Bool(b) = val {
+                        self.comms_delivery = b;
                     }
                 }
                 "bell_style" => {
