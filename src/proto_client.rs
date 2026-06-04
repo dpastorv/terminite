@@ -95,6 +95,11 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
             // session as channel events. See guide/comms-base.md.
             Some(crate::mcp::run_channel())
         }
+        "codex-bridge" => {
+            // The codex comms-base receiver: a WebSocket client of codex's own
+            // app-server daemon, turn/start-ing it on a pushed room message.
+            Some(crate::codex_bridge::run_codex_bridge())
+        }
         "help" | "--help" | "-h" => {
             print_usage();
             Some(ExitCode::SUCCESS)

@@ -11,6 +11,7 @@ use winit::window::{Window, WindowId};
 
 mod activities;
 mod blocks;
+mod codex_bridge;
 mod config;
 mod config_io;
 mod fileclaims;
