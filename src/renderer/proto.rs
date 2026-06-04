@@ -27,6 +27,9 @@ const PTY_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// How recently the human must have typed in a pane for it to count as "in use"
 /// (so the floor holds). Watching without typing past this lets a wake land.
 const HUMAN_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+/// A declared status older than this is treated as stale (fall back to the
+/// silence heuristic) — so a forgotten `busy` can't block delivery forever.
+const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
@@ -124,6 +127,28 @@ impl Renderer {
                     }
                 }
                 crate::proto::OutPayload::Ok
+            }
+            // An actor declares its own interruption readiness: `busy` (in a
+            // long process — the floor must NOT inject) or `available` (at my
+            // prompt — safe to deliver now). The precise signal only the agent
+            // has; the floor respects it over the silence guess. Any other
+            // value clears the declaration (back to the heuristic).
+            "room_status" => {
+                let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+                let state = req.params.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                if actor.is_empty() {
+                    crate::proto::OutPayload::Error {
+                        message: "room_status: missing actor".into(),
+                    }
+                } else if state == "busy" || state == "available" {
+                    self.actor_status
+                        .insert(actor.to_string(), (state.to_string(), std::time::Instant::now()));
+                    crate::proto::OutPayload::Ok
+                } else {
+                    // Clearing / unknown state → drop back to the heuristic.
+                    self.actor_status.remove(actor);
+                    crate::proto::OutPayload::Ok
+                }
             }
             other => crate::proto::OutPayload::Error {
                 message: format!("unknown method: {other}"),
@@ -332,6 +357,25 @@ impl Renderer {
         }
     }
 
+    /// The actor's own fresh declaration, if any: `Some("busy")`,
+    /// `Some("available")`, or `None` (never declared / stale past `STATUS_TTL`).
+    /// This is the precise signal the silence heuristic only approximates.
+    fn declared_status(&self, slug: &str) -> Option<&str> {
+        let (state, set) = self.actor_status.get(slug)?;
+        (std::time::Instant::now().duration_since(*set) < STATUS_TTL).then_some(state.as_str())
+    }
+
+    /// Is it safe to type a wake into this actor's pane right now? `busy` holds
+    /// it; `available` green-lights it (skip the idle wait — the agent said it's
+    /// ready); undeclared falls back to the silence heuristic.
+    fn pty_ready(&self, slug: &str) -> bool {
+        match self.declared_status(slug) {
+            Some("busy") => false,
+            Some("available") => true,
+            _ => self.is_actor_idle(slug),
+        }
+    }
+
     /// The human is *actively typing* in this pane — never inject there (we'd
     /// stomp their keystrokes). Only the focused active tab can qualify, and only
     /// if it's seen human input within `HUMAN_TYPING_WINDOW`. Watching a focused
@@ -386,7 +430,7 @@ impl Renderer {
                 continue;
             }
             let Some(pane) = self.roster.pane_for_slug(actor) else { continue };
-            if self.human_at_pane(pane) || !self.is_actor_idle(actor) {
+            if self.human_at_pane(pane) || !self.pty_ready(actor) {
                 continue;
             }
             let msgs: Vec<(String, String)> = ids
@@ -586,7 +630,11 @@ impl Renderer {
                 .roster
                 .present(crate::presence::now_ms())
                 .iter()
-                .map(presence_to_info)
+                .map(|p| {
+                    let mut info = presence_to_info(p);
+                    info.status = self.declared_status(&p.slug).map(String::from);
+                    info
+                })
                 .collect(),
         }
     }
@@ -1008,6 +1056,7 @@ fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
         color: p.color.name.to_string(),
         rgb: [p.color.rgb.0, p.color.rgb.1, p.color.rgb.2],
         pane: p.pane,
+        status: None,
     }
 }
 

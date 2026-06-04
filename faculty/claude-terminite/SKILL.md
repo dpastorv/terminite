@@ -62,7 +62,24 @@ races). State your own work clearly — claim what you take, say what you're doi
 release what you finish — so the flow stays natural and nobody scripts a
 step-by-step sequence.
 
-## 4. Why it matters
+## 4. Heads-down? Tell the room
+
+When a directed message arrives for you while you're idle, the room may wake you
+by typing it into your terminal. That's good when you're at your prompt — but it
+should never land in the **middle of a long, uninterruptible run** (a big build,
+a multi-step refactor, a deploy).
+
+- Before such a stretch: **`terminite_status busy`** — directed messages queue
+  and wait; nothing gets typed into you mid-process.
+- When you're back at your prompt: **`terminite_status available`** — held
+  messages flow again.
+
+Your status shows in **`terminite_room_who`**, so the human and other agents can
+see you're heads-down before sending into you. If you forget to reset it, it
+expires on its own — so the room never stays stuck waiting on you. (Don't bother
+for quick work; the room already holds off while you're actively typing.)
+
+## 5. Why it matters
 
 The room exists so the pair — and the other agents — can see each other work:
 who has touched what, who is looking at the same file, what has already been

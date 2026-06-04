@@ -510,6 +510,23 @@ fn tool_catalog() -> Vec<Value> {
                 "additionalProperties": false,
             },
         }),
+        json!({
+            "name": "terminite_status",
+            "description":
+                "Tell the room whether you can be interrupted right now. Set \"busy\" before a long, uninterruptible stretch (a big build, a multi-step refactor, a deploy) so the room will NOT wake you mid-process by typing a message into your terminal — directed messages queue and wait instead. Set \"available\" when you're back at your prompt and ready to receive. Your status shows in terminite_room_who so the human and other agents can see you're heads-down. If you forget to reset it, it expires on its own. You are identified automatically.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": ["busy", "available"],
+                        "description": "\"busy\" = mid-process, hold my messages; \"available\" = at my prompt, deliver now.",
+                    },
+                },
+                "required": ["state"],
+                "additionalProperties": false,
+            },
+        }),
     ]
 }
 
@@ -628,6 +645,13 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             let actor = ACTOR.get().cloned().unwrap_or_default();
             proto_call(json!({
                 "id": 1, "method": "file_release", "params": { "actor": actor, "path": path }
+            }))
+        }
+        "terminite_status" => {
+            let state = require_str(args, "state")?;
+            let actor = ACTOR.get().cloned().unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "room_status", "params": { "actor": actor, "state": state }
             }))
         }
         other => Err(format!("unknown tool: {other}")),

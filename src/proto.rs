@@ -239,6 +239,12 @@ pub struct ActorInfo {
     /// carry the var through, which is the thing to check if a tint is missing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
+    /// Self-declared interruption status: `"busy"` (mid-process, don't wake) or
+    /// `"available"` (at the prompt, safe to wake). Absent ⇒ undeclared (the
+    /// floor falls back to its silence heuristic). Visible so the human and
+    /// peers can see who's heads-down before sending into them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 #[derive(Serialize, Debug)]

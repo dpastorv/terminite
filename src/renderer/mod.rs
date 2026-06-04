@@ -470,6 +470,13 @@ pub struct Renderer {
     /// pane you're actively typing in.
     last_human_input: std::collections::HashMap<u64, Instant>,
 
+    /// Self-declared interruption status per actor (slug → state + when set):
+    /// `"busy"` = in a long process, DON'T inject; `"available"` = at my prompt,
+    /// safe to deliver now. Absent ⇒ fall back to the silence heuristic. The
+    /// precise signal only the agent has — so the room never assaults a peer
+    /// mid-task. TTL-bounded so a forgotten `busy` doesn't block forever.
+    actor_status: std::collections::HashMap<String, (String, Instant)>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -751,6 +758,7 @@ impl Renderer {
             file_waiters: std::collections::HashMap::new(),
             last_activity: std::collections::HashMap::new(),
             last_human_input: std::collections::HashMap::new(),
+            actor_status: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
