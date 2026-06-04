@@ -43,6 +43,12 @@ impl FileClaims {
     /// holder iff a *different* live actor held it — so the caller can be told
     /// "codex-green is already in this file" without being blocked.
     pub fn claim(&mut self, slug: &str, path: &str, now_ms: u64) -> Option<Claim> {
+        // Prune expired claims FIRST. Paths are unbounded, so without this
+        // `by_path` would grow one entry per distinct path ever claimed, forever
+        // — the unbounded-allocation class behind past crashes. After this the
+        // map holds only live claims (bounded by concurrent activity).
+        self.by_path
+            .retain(|_, c| now_ms.saturating_sub(c.claimed_at_ms) < CLAIM_TTL_MS);
         let prior = self
             .holder(path, now_ms)
             .filter(|c| c.slug != slug)
@@ -52,6 +58,13 @@ impl FileClaims {
             Claim { slug: slug.to_string(), claimed_at_ms: now_ms },
         );
         prior
+    }
+
+    /// Number of claims currently tracked (live + not-yet-pruned). For the
+    /// system-impact test that the map doesn't grow without bound.
+    #[cfg(test)]
+    pub fn tracked(&self) -> usize {
+        self.by_path.len()
     }
 
     /// Release `path` iff `slug` currently holds it. Returns whether it did.
@@ -123,6 +136,22 @@ mod tests {
         assert!(c.holder("f", CLAIM_TTL_MS - 1).is_some(), "live just before the TTL");
         assert!(c.holder("f", CLAIM_TTL_MS + 1).is_none(), "expired past the TTL — no stale lock");
         assert_eq!(c.live(CLAIM_TTL_MS + 1).len(), 0);
+    }
+
+    #[test]
+    fn expired_claims_are_pruned_not_just_filtered() {
+        // The leak guard: claiming many distinct paths over time must NOT grow
+        // the map without bound — expired ones are removed, not merely hidden.
+        let mut c = FileClaims::new();
+        for i in 0..1000 {
+            // Each claim is a fresh path, TTL apart, so all prior ones expire.
+            c.claim("a", &format!("f{i}.rs"), (i as u64) * CLAIM_TTL_MS);
+        }
+        assert!(
+            c.tracked() <= 2,
+            "map stays bounded to live claims, got {}",
+            c.tracked()
+        );
     }
 
     #[test]

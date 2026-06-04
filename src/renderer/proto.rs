@@ -101,6 +101,10 @@ impl Renderer {
                         if let Some(q) = self.pending.get_mut(&actor) {
                             q.retain(|x| *x != id);
                         }
+                        // Don't leave a drained queue's key lingering.
+                        if self.pending.get(&actor).is_some_and(|q| q.is_empty()) {
+                            self.pending.remove(&actor);
+                        }
                     }
                 }
                 crate::proto::OutPayload::Ok
