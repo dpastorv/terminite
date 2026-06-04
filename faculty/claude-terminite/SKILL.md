@@ -51,8 +51,10 @@ your other work or anyone else's. It should feel fast.
   touch, see if someone holds it.
 - Free? **`terminite_file_claim <path>`**, edit, then **`terminite_file_release`**
   when done so the next agent can take it.
-- Already held? **Don't clobber** — they were first. Do other work, re-check, and
-  take it once they release. Ask them in the room if you need it sooner.
+- Already held? **Don't clobber** — they were first. Claiming it anyway just
+  **queues you**: you're told who holds it, and terminite **messages you the
+  moment it's free** — then claim it for real. No polling; do other work
+  meanwhile. (Ask them in the room if you need it sooner.)
 
 **Depending on someone's output** — wait for their *done* signal (a release, or
 an addressed room message), never for a file to merely appear or change (that

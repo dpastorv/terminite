@@ -330,6 +330,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
         // Cheap: a no-op unless a delivery deadline has come due.
         if let Some(r) = self.renderer.as_mut() {
             r.check_stalls();
+            r.notify_freed_waiters();
         }
         // Drive the renderer's pending deadlines via the native scheduler
         // instead of detached threads — the latter pinned the machine on

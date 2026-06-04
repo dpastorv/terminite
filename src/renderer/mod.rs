@@ -448,6 +448,12 @@ pub struct Renderer {
     /// keyed by actor, retries capped, re-delivery rate-limited by the loop-guard.
     delivery_watch: std::collections::HashMap<String, (Instant, u8)>,
 
+    /// File waiters: who asked for a path that was already held (`path → waiter
+    /// slugs`). The instant the file frees (release, or claim expiry), terminite
+    /// pushes each waiter a "file free" message through the comms base — they see
+    /// the salt set down instead of polling. Cleared when notified; bounded.
+    file_waiters: std::collections::HashMap<String, Vec<String>>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -726,6 +732,7 @@ impl Renderer {
             pending: std::collections::HashMap::new(),
             delivery_log: std::collections::HashMap::new(),
             delivery_watch: std::collections::HashMap::new(),
+            file_waiters: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),

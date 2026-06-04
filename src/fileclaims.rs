@@ -39,9 +39,11 @@ impl FileClaims {
         Self::default()
     }
 
-    /// Record `slug`'s claim on `path` (refreshing the timer). Returns the PRIOR
-    /// holder iff a *different* live actor held it — so the caller can be told
-    /// "codex-green is already in this file" without being blocked.
+    /// Try to claim `path` for `slug`. **First-come wins:** if a *different*
+    /// live actor already holds it, returns that holder (the claim is REFUSED —
+    /// the caller should wait, not clobber) and leaves the holder's claim intact.
+    /// If it's free or already yours, you get it (timer refreshed) and it returns
+    /// `None`.
     pub fn claim(&mut self, slug: &str, path: &str, now_ms: u64) -> Option<Claim> {
         // Prune expired claims FIRST. Paths are unbounded, so without this
         // `by_path` would grow one entry per distinct path ever claimed, forever
@@ -49,15 +51,21 @@ impl FileClaims {
         // map holds only live claims (bounded by concurrent activity).
         self.by_path
             .retain(|_, c| now_ms.saturating_sub(c.claimed_at_ms) < CLAIM_TTL_MS);
-        let prior = self
-            .holder(path, now_ms)
-            .filter(|c| c.slug != slug)
-            .cloned();
+        // First-come wins (the salt model): if a DIFFERENT actor already holds
+        // it, REFUSE — return the holder, leave their claim intact. The caller
+        // should wait, not clobber. (Still advisory: it doesn't physically stop
+        // an edit, and the human is never governed by claims.) Your own claim
+        // just refreshes the timer.
+        if let Some(holder) = self.holder(path, now_ms) {
+            if holder.slug != slug {
+                return Some(holder.clone());
+            }
+        }
         self.by_path.insert(
             path.to_string(),
             Claim { slug: slug.to_string(), claimed_at_ms: now_ms },
         );
-        prior
+        None
     }
 
     /// Number of claims currently tracked (live + not-yet-pruned). For the
@@ -102,15 +110,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn claim_reports_a_prior_holder_but_never_blocks() {
+    fn first_come_wins_and_a_second_claimer_is_refused() {
         let mut c = FileClaims::new();
         // codex takes it first.
         assert!(c.claim("codex-green", "src/x.rs", 1_000).is_none(), "first claim is unconflicted");
-        // claude claims the same file — advisory: it succeeds, but is TOLD codex holds it.
-        let prior = c.claim("claude-blue", "src/x.rs", 2_000);
-        assert_eq!(prior.map(|p| p.slug), Some("codex-green".to_string()));
-        // claude is now the holder (last writer wins; it's advisory, not a lock).
-        assert_eq!(c.holder("src/x.rs", 2_500).map(|h| h.slug.clone()), Some("claude-blue".into()));
+        // claude tries the same file — REFUSED, told codex holds it (the salt model).
+        let conflict = c.claim("claude-blue", "src/x.rs", 2_000);
+        assert_eq!(conflict.map(|p| p.slug), Some("codex-green".to_string()));
+        // codex is STILL the holder — claude did not take it.
+        assert_eq!(c.holder("src/x.rs", 2_500).map(|h| h.slug.clone()), Some("codex-green".into()));
+        // Once codex releases, claude can take it.
+        assert!(c.release("codex-green", "src/x.rs"));
+        assert!(c.claim("claude-blue", "src/x.rs", 3_000).is_none(), "free now → claude gets it");
     }
 
     #[test]

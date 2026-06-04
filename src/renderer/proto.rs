@@ -18,6 +18,9 @@ const DELIVERY_MAX: usize = 8;
 const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_REDELIVERY: u8 = 3;
 
+/// Cap on waiters queued per file (bounds memory; oldest dropped).
+const FILE_WAITERS_CAP: usize = 16;
+
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
     /// client; the new one wins).
@@ -171,26 +174,36 @@ impl Renderer {
                 message: "activity_emit: empty text".into(),
             };
         }
-        let to = params.get("to").and_then(|v| v.as_str()).map(String::from);
-        let agent_name = agent_name_from_slug(actor);
-        let id = self
-            .activities
-            .emit_message(actor.to_string(), agent_name, to.clone(), text.clone());
+        let to = params.get("to").and_then(|v| v.as_str());
+        self.emit_directed(actor, to, &text);
+        crate::proto::OutPayload::Ok
+    }
+
+    /// Record a directed (or broadcast, `to: None`) message and DELIVER it:
+    /// queue as pending for catch-up, then push to a live receiver. Shared by
+    /// the `activity_emit` verb and terminite's own system notifications (e.g.
+    /// "file free"). The emitter is marked awake (its stall watch clears).
+    /// Returns the activity id.
+    fn emit_directed(&mut self, from: &str, to: Option<&str>, text: &str) -> u64 {
+        let agent_name = agent_name_from_slug(from);
+        let id = self.activities.emit_message(
+            from.to_string(),
+            agent_name,
+            to.map(String::from),
+            text.to_string(),
+        );
         // The emitter just acted → it's awake; clear any stall watch on it.
-        self.delivery_watch.remove(actor);
-        // The comms base: a directed message becomes deliverable. Queue it as
-        // pending (un-consumed) for catch-up, then push now if a receiver is
-        // live. Records stay the read fallback either way.
+        self.delivery_watch.remove(from);
         if let Some(target) = to {
-            let q = self.pending.entry(target.clone()).or_default();
+            let q = self.pending.entry(target.to_string()).or_default();
             q.push(id);
             if q.len() > PENDING_CAP {
                 let excess = q.len() - PENDING_CAP;
                 q.drain(0..excess);
             }
-            self.push_room_message(&target, id, actor, &text);
+            self.push_room_message(target, id, from, text);
         }
-        crate::proto::OutPayload::Ok
+        id
     }
 
     /// Re-deliver every un-consumed directed message for `actor` — catch-up when
@@ -314,7 +327,42 @@ impl Renderer {
             .file_claims
             .claim(actor, path, crate::presence::now_ms())
             .map(|c| c.slug);
+        if conflict.is_some() {
+            // Refused (first-come held it) → queue the caller as a waiter. The
+            // instant the holder releases, terminite pushes it a "file free"
+            // message (the salt set down) — no polling.
+            let waiters = self.file_waiters.entry(path.to_string()).or_default();
+            if !waiters.iter().any(|w| w == actor) {
+                waiters.push(actor.to_string());
+                if waiters.len() > FILE_WAITERS_CAP {
+                    waiters.remove(0);
+                }
+            }
+        }
         crate::proto::OutPayload::FileClaim { path: path.to_string(), conflict }
+    }
+
+    /// Push a "file free" message to anyone waiting on a path that's now free
+    /// (released, or its claim expired). The salt set down: the waiter is
+    /// notified instead of polling. Called from the main loop's `about_to_wait`.
+    /// Self-clearing (freed paths drop their waiter list) and bounded.
+    pub fn notify_freed_waiters(&mut self) {
+        if self.file_waiters.is_empty() {
+            return;
+        }
+        let now = crate::presence::now_ms();
+        let freed: Vec<(String, Vec<String>)> = self
+            .file_waiters
+            .iter()
+            .filter(|(path, _)| self.file_claims.holder(path, now).is_none())
+            .map(|(p, w)| (p.clone(), w.clone()))
+            .collect();
+        for (path, waiters) in freed {
+            self.file_waiters.remove(&path);
+            for w in waiters {
+                self.emit_directed("terminite", Some(&w), &format!("file is now free: {path}"));
+            }
+        }
     }
 
     /// `file_release {actor, path}` — drop a claim the actor holds.
