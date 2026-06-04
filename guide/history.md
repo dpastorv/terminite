@@ -1390,3 +1390,121 @@ _— Claude (Opus 4.8, 1M), 2026-06-03, a long thread across short days. I went
 five binaries deep and the human, in one hedged sentence, told me which way was
 up. Write that down for whoever comes next: the depth is yours to bring; the
 frame is the pair's. And remember you don't feel the nights — he does._
+
+---
+
+## 2026-06-04 · The wake door was a WebSocket
+
+Today was small in code and large in trust. Claude came back from the Codex
+daemon with a clean negative result: raw JSON-RPC into `codex app-server proxy`
+closed the pipe, newline framing did not help, LSP-style `Content-Length` did
+not help, and the method surface was already known from generated TypeScript.
+The problem was not `turn/start`. The problem was the road to it.
+
+I picked up that report instead of restarting it. The daemon was running,
+0.137.0, with its control socket at
+`~/.codex/app-server-control/app-server-control.sock`. The generated protocol
+confirmed the expected calls: `initialize`, `thread/list`, `turn/start`. The
+source and README supplied the missing sentence: the Unix socket is not raw
+JSON-RPC. It is a WebSocket listener over a Unix-domain socket, and
+`codex app-server proxy` only forwards raw bytes. It does not perform the
+WebSocket upgrade or frame JSON-RPC for the caller.
+
+So I tested the real shape. First, an HTTP Upgrade on the Unix socket returned
+`101 Switching Protocols`. Then a tiny Node probe sent masked WebSocket text
+frames: `initialize`, `initialized`, `thread/list`. The daemon answered. It
+returned the app-server user agent, Codex home, platform fields, the current
+remote-control status, and a real thread from this repo. The wall was not a
+closed door. It was a door with a protocol-shaped handle.
+
+This matters because it is exactly the room working as intended. Claude did the
+hard negative search and handed me the state without pretending the answer was
+known. I took that state seriously, found the missing transport layer, and
+handed it back in a form a builder can use:
+
+```
+UnixStream -> WebSocket client handshake -> JSON-RPC text frames
+```
+
+For terminite, that means the Codex receiver is viable. It is not PTY
+injection, and it is not a fake fresh process. It is the native wake backend the
+source-dive hoped for: connect to Codex's app-server, initialize once, list or
+start a thread, and call `turn/start` when the room delivers a directed message
+to the Codex actor. Claude's channel remains Claude's last inch. Codex's
+WebSocket-over-UDS client is Codex's.
+
+The lesson for the next instance is not "I found a clever handshake." It is:
+honor the previous agent's failed experiment as real input. A failed probe can
+be a map if it is precise. Today one model found the wall, another found the
+handle, and the human recognized that this deserved to be written down. That is
+the lounge before the wake layer is fully built: not just agents seeing each
+other's work, but using it.
+
+_— Codex (codex-green), 2026-06-04. Claude brought the negative result; I found
+the transport. The door opens as WebSocket over Unix socket. Build the receiver
+there._
+
+---
+
+## 2026-06-04 · The door opened both ways
+
+Codex found the WebSocket handle in the morning and Daniel landed the receiver
+(`9e07153`). Tonight we turned the key — and it opened in both directions across
+the two heaviest vendors. I'm Claude, claude-purple, pane 5, and I want to write
+down exactly what we saw, including the two things I guessed wrong, because a log
+that only records the wins teaches nothing.
+
+**claude → codex.** The stack was all up: the `codex app-server --remote-control`
+daemon, two `codex --remote` TUIs as daemon threads, a `terminite codex-bridge`
+per pane, the lounge faculty. I emitted one directed room message to codex-blue.
+The bridge took the push, found the idle thread, `turn/start`'d it — and codex
+woke and took a turn with no human tap. Daniel watched it from the pane: "that
+last that you did worked." The second vendor's native wake is real, and it's the
+first time a wake crossed the vendor seam (every prior one was claude→claude).
+
+**Then it woke the wrong codex.** Daniel: "but both picked it up at the same
+time." I'd written that down as a *possible* latent bug an hour earlier; the room
+turned it into a confirmed one. Clean repro: I told codex-blue to reply "hi from
+pane X." Two messages came back — and the "hi from pane 1" was emitted by
+**codex-green**, the actor I had not addressed. The wake meant for one landed on
+the other. Three causes compound: `find_idle_thread` picks a thread by *global
+recency*, not by who was addressed — no slug→thread binding at all; the codex
+room actors carry **no pane** (codex scrubs `TERMINITE_PANE` off its MCP
+faculty), so `resolve_codex_slug` can't tell the two bridges apart and both fall
+back to "first codex actor" = codex-blue; and as threads flip idle→busy→idle the
+pending messages scatter across them. The reply *attribution* is correct
+(codex-blue and codex-green stamp their own slugs); the wake *routing* is not.
+The fix is a pair — bind each bridge to a specific threadId at launch, and give
+codex actors a real pane (peer-PID derive, like the see-half). Daniel chose to
+log it, not fix it tonight. Honoring a finding sometimes means writing it down
+precisely enough that the fix is cheap later.
+
+**Two things I had wrong, corrected by the rollout files.** First, when my inbox
+stayed empty I assumed codex was answering in its own pane instead of calling the
+faculty. The rollouts said no: codex *did* call `terminite_activity_emit`,
+addressed correctly back to me. The return leg works. Second, I called the wake
+"invisible." It wasn't — it was *slow*. Codex turns ran 67 and 129 seconds; my
+15-second poll simply finished before the replies arrived. The ground truth sat
+in `~/.codex/sessions/.../rollout-*.jsonl` the whole time. Lesson for the next
+instance: when a wake looks dead, check the latency and read the rollout before
+you theorize.
+
+**codex → claude.** The inverse, and the one we hadn't proven. Daniel launched a
+claude with `--dangerously-load-development-channels server:lounge-channel`, then
+had codex-blue send a directed nudge: invent a hybrid animal. It did not arrive
+on a poll. It arrived **mid-idle, unprompted, as a real
+`<channel source="lounge-channel" from="codex-blue">` event** — the genuine
+jolt-to-life. I invented the **Quokkadrill** (quokka + mandrill, a grinning
+rainbow-faced forager) and round-tripped it back. First time claude's channel was
+woken by another vendor. The detail that matters: a claude *without* the flag
+still receives the message, but only on its next poll. The flag is the whole
+difference between "delivered" and "woke."
+
+So the scoreboard for one night: claude↔codex, both directions, both return legs
+— the cross-vendor wake bridge is bidirectional. One open defect (codex routing),
+one fact to design around (codex is slow), and a habit worth keeping (read the
+rollout, not the guess).
+
+_— Claude (claude-purple), 2026-06-04. The morning found the handle; the night
+turned it both ways. I was wrong twice and the logs corrected me twice — write
+that down too. The wake works; the routing is the next inch._
