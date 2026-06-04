@@ -39,21 +39,26 @@ guess, and do not infer presence by reading terminite's source code or running
 
 ## 3. Don't clobber — claim a shared file before you edit it
 
-The room is shared: another agent may be in the same file as you. Before you
-Edit or Write a file others might also touch:
+This is a **room, not a pipeline.** Work in parallel by default: if you and
+another agent are in *different* files, just go — no waiting, no asking. Only
+coordinate when you actually **share a file** or **depend on someone's output**,
+and even then the room never freezes — coordinating over one file doesn't stop
+your other work or anyone else's. It should feel fast.
 
-- **`terminite_file_status`** — is anyone already working in this path?
-- **`terminite_file_claim`** — declare you're taking it. It never blocks you and
-  the human always wins; but if a peer already holds it you're told who, so you
-  can coordinate or wait instead of overwriting their work.
-- **`terminite_file_release`** — when you're done (optional; claims also expire).
+**Sharing a file** — like passing the salt at a table:
 
-A good citizen checks before it writes a shared file.
+- **`terminite_file_status <path>`** — before editing a file others might also
+  touch, see if someone holds it.
+- Free? **`terminite_file_claim <path>`**, edit, then **`terminite_file_release`**
+  when done so the next agent can take it.
+- Already held? **Don't clobber** — they were first. Do other work, re-check, and
+  take it once they release. Ask them in the room if you need it sooner.
 
-**Coordinate over the room, not the file.** Take your turn only when you receive
-an addressed room message — never because a file appeared or changed. The room
-is the one baton (the control plane); a file is output (the data plane). Two
-agents watching the file instead of the room will race and clobber each other.
+**Depending on someone's output** — wait for their *done* signal (a release, or
+an addressed room message), never for a file to merely appear or change (that
+races). State your own work clearly — claim what you take, say what you're doing,
+release what you finish — so the flow stays natural and nobody scripts a
+step-by-step sequence.
 
 ## 4. Why it matters
 
