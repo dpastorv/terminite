@@ -154,10 +154,30 @@ impl Renderer {
         self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
         let mut new_window_title: Option<String> = None;
         for tab in tabs {
-            if tab.shell_title.is_some() {
-                continue;
-            }
-            let new_auto = tab.live_term.compute_auto_title();
+            // Resolve the title this tab should show.
+            let new_auto = match &tab.shell_title {
+                // An informative shell-set title wins — don't touch it. The one
+                // exception: a title that's merely the cwd folder name (codex
+                // names its terminal after the directory, so its tab reads
+                // "terminite") tells you nothing about who's here. If the room
+                // knows which agent sits in this pane, label the seat by the
+                // agent instead. Every other CLI's title (✳ Claude Code, Kimi
+                // Code, Qwen - terminite) differs from the folder and is kept.
+                Some(t) => {
+                    let is_folder_name = tab
+                        .live_term
+                        .current_dir()
+                        .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+                        .is_some_and(|folder| folder == *t);
+                    match self.roster.slug_for_pane(tab.id.0) {
+                        Some(slug) if is_folder_name => {
+                            super::proto::agent_name_from_slug(&slug)
+                        }
+                        _ => continue,
+                    }
+                }
+                None => tab.live_term.compute_auto_title(),
+            };
             if new_auto != tab.last_auto_title {
                 tab.title_buffer = make_title_buffer(
                     &mut self.font_system,

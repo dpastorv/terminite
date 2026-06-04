@@ -1076,7 +1076,7 @@ fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
 }
 
 /// Cosmetic display name from a slug: `codex-1` → `Codex`.
-fn agent_name_from_slug(slug: &str) -> String {
+pub(super) fn agent_name_from_slug(slug: &str) -> String {
     let base = slug.split('-').next().unwrap_or(slug);
     let mut chars = base.chars();
     match chars.next() {
