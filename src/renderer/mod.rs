@@ -477,6 +477,14 @@ pub struct Renderer {
     /// mid-task. TTL-bounded so a forgotten `busy` doesn't block forever.
     actor_status: std::collections::HashMap<String, (String, Instant)>,
 
+    /// The fast lane (slug → when entered). An actor in here gave *standing
+    /// consent* to be driven: the PTY floor delivers promptly instead of only
+    /// when idle. A separate axis from `actor_status` so the momentary brake
+    /// (`busy`) composes with it — an auto actor can still protect an atomic
+    /// step. TTL-bounded; a forgotten lane self-limits (it respects `busy`, and
+    /// a gone actor has no pane to inject).
+    actor_auto: std::collections::HashMap<String, Instant>,
+
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
     /// substrate; see `guide/lounge-experiment.md`.
@@ -759,6 +767,7 @@ impl Renderer {
             last_activity: std::collections::HashMap::new(),
             last_human_input: std::collections::HashMap::new(),
             actor_status: std::collections::HashMap::new(),
+            actor_auto: std::collections::HashMap::new(),
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),

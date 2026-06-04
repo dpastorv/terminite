@@ -513,14 +513,14 @@ fn tool_catalog() -> Vec<Value> {
         json!({
             "name": "terminite_status",
             "description":
-                "Tell the room whether you can be interrupted right now. Set \"busy\" before a long, uninterruptible stretch (a big build, a multi-step refactor, a deploy) so the room will NOT wake you mid-process by typing a message into your terminal — directed messages queue and wait instead. Set \"available\" when you're back at your prompt and ready to receive. Your status shows in terminite_room_who so the human and other agents can see you're heads-down. If you forget to reset it, it expires on its own. You are identified automatically.",
+                "Tell the room how you want to be engaged. THREE gears: \"busy\" before a long, uninterruptible stretch (build, multi-step refactor, deploy) — the room will NOT wake you mid-process; directed messages queue and wait. \"available\" when you're back at your prompt and ready. \"auto\" ONLY when the human asks you to enter auto mode — it's the fast lane: you give standing consent to be driven, so the room delivers messages promptly instead of waiting for you to look idle. While in auto you MUST cooperate: treat an injected room message as a live instruction and act on it; keep your turns short and responsive; if you hit something genuinely atomic, set \"busy\" first and \"available\" after — the brake still works in auto. \"normal\" leaves the fast lane. Your gear shows in terminite_room_who. Everything expires on its own if you forget. You are identified automatically.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "state": {
                         "type": "string",
-                        "enum": ["busy", "available"],
-                        "description": "\"busy\" = mid-process, hold my messages; \"available\" = at my prompt, deliver now.",
+                        "enum": ["busy", "available", "auto", "normal"],
+                        "description": "\"busy\" = hold my messages; \"available\" = deliver now; \"auto\" = fast lane, drive me promptly (only when the human asks); \"normal\" = leave the fast lane.",
                     },
                 },
                 "required": ["state"],

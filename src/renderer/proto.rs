@@ -30,6 +30,9 @@ const HUMAN_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_secs(
 /// A declared status older than this is treated as stale (fall back to the
 /// silence heuristic) — so a forgotten `busy` can't block delivery forever.
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+/// The fast lane is sticky but not forever — a forgotten `auto` lapses back to
+/// the safe default after this. Generous, since an orchestration session is long.
+const AUTO_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 impl Renderer {
     /// A new module connected — drop any prior subscriber (v1 = single
@@ -134,26 +137,41 @@ impl Renderer {
             // has; the floor respects it over the silence guess. Any other
             // value clears the declaration (back to the heuristic).
             "room_status" => {
-                let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+                let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let state = req.params.get("state").and_then(|v| v.as_str()).unwrap_or("");
                 if actor.is_empty() {
                     crate::proto::OutPayload::Error {
                         message: "room_status: missing actor".into(),
                     }
-                } else if state == "busy" || state == "available" {
-                    self.actor_status
-                        .insert(actor.to_string(), (state.to_string(), std::time::Instant::now()));
-                    // Back at the prompt → flush anything held while busy down a
-                    // native receiver (channel/WS). PTY-paned actors catch up on
-                    // the next floor tick. Either way the wait ends the moment
-                    // the agent says it's ready.
-                    if state == "available" {
-                        self.deliver_pending(actor);
-                    }
-                    crate::proto::OutPayload::Ok
                 } else {
-                    // Clearing / unknown state → drop back to the heuristic.
-                    self.actor_status.remove(actor);
+                    let now = std::time::Instant::now();
+                    match state {
+                        // Momentary brake — hold every wake path until cleared.
+                        "busy" => {
+                            self.actor_status.insert(actor.clone(), ("busy".into(), now));
+                        }
+                        // At the prompt / brake off → flush what was held down a
+                        // native receiver (channel/WS); PTY-paned actors catch up
+                        // on the next floor tick.
+                        "available" => {
+                            self.actor_status.insert(actor.clone(), ("available".into(), now));
+                            self.deliver_pending(&actor);
+                        }
+                        // Enter the fast lane: standing consent to be driven. Drop
+                        // any brake and flush — the floor now delivers promptly,
+                        // not only when idle. The agent accepts the auto contract.
+                        "auto" => {
+                            self.actor_auto.insert(actor.clone(), now);
+                            self.actor_status.remove(&actor);
+                            self.deliver_pending(&actor);
+                        }
+                        // "normal" / anything else → leave the lane, clear the
+                        // brake, back to the safe default (deliver only when idle).
+                        _ => {
+                            self.actor_auto.remove(&actor);
+                            self.actor_status.remove(&actor);
+                        }
+                    }
                     crate::proto::OutPayload::Ok
                 }
             }
@@ -380,14 +398,36 @@ impl Renderer {
         (std::time::Instant::now().duration_since(*set) < STATUS_TTL).then_some(state.as_str())
     }
 
+    /// In the fast lane — standing consent to be driven, fresh within `AUTO_TTL`.
+    fn is_auto(&self, slug: &str) -> bool {
+        self.actor_auto
+            .get(slug)
+            .is_some_and(|t| std::time::Instant::now().duration_since(*t) < AUTO_TTL)
+    }
+
     /// Is it safe to type a wake into this actor's pane right now? `busy` holds
-    /// it; `available` green-lights it (skip the idle wait — the agent said it's
-    /// ready); undeclared falls back to the silence heuristic.
+    /// it (the brake wins in every lane); `available` green-lights it; otherwise
+    /// the fast lane (auto) OR the silence heuristic opens the gate.
     fn pty_ready(&self, slug: &str) -> bool {
         match self.declared_status(slug) {
             Some("busy") => false,
             Some("available") => true,
-            _ => self.is_actor_idle(slug),
+            _ => self.is_auto(slug) || self.is_actor_idle(slug),
+        }
+    }
+
+    /// What to surface in `room_who`: the brake is most urgent to see, then the
+    /// fast lane, then a transient `available`.
+    fn shown_status(&self, slug: &str) -> Option<String> {
+        match self.declared_status(slug) {
+            Some("busy") => Some("busy".into()),
+            other => {
+                if self.is_auto(slug) {
+                    Some("auto".into())
+                } else {
+                    other.map(String::from)
+                }
+            }
         }
     }
 
@@ -647,7 +687,7 @@ impl Renderer {
                 .iter()
                 .map(|p| {
                     let mut info = presence_to_info(p);
-                    info.status = self.declared_status(&p.slug).map(String::from);
+                    info.status = self.shown_status(&p.slug);
                     info
                 })
                 .collect(),

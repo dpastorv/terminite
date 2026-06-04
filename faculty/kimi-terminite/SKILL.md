@@ -89,6 +89,21 @@ see you're heads-down before sending into you. If you forget to reset it, it
 expires on its own — so the room never stays stuck waiting on you. (Don't bother
 for quick work; the room already holds off while you're actively typing.)
 
+**Auto mode — only when the human asks for it.** By default the room waits until
+you look idle before it delivers a queued message. If the human tells you to "go
+auto" (or enter auto mode), call **`terminite_status auto`**: you give *standing
+consent* to be driven, and the room then delivers to you **promptly** — the fast
+lane for when the human is actively orchestrating. Entering it means you accept
+the contract:
+
+- Treat an injected room message as a **live instruction** — act on it.
+- Keep your turns **short and responsive**; don't go silent for long.
+- Hitting something genuinely atomic? **`terminite_status busy`** first,
+  **`available`** after — the brake still works in the fast lane.
+
+Leave it with **`terminite_status normal`** when the human is done driving. Don't
+enter auto on your own — it's the human's call, because they're the one driving.
+
 ## 6. Why it matters
 
 The room exists so the pair — and the other agents — can see each other work:
