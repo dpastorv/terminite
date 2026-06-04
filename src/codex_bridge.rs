@@ -69,30 +69,31 @@ fn read_result(ws: &mut WebSocket<UnixStream>, id: u64) -> Option<Value> {
     None
 }
 
-/// Pick the codex thread to wake: the most-recently-updated **idle** thread
-/// (the conversation a human is sitting in, ready to take a turn). Returns its
-/// id, or None if codex is busy / has no idle thread (then we don't ack, and
-/// terminite re-delivers later).
-fn find_idle_thread(ws: &mut WebSocket<UnixStream>) -> Option<String> {
+/// Pick the codex thread to wake: a currently-LOADED (live) session. Verified
+/// live — `thread/list` returns *persisted* conversations (mostly `notLoaded`),
+/// so the active session a human is sitting in is reached via
+/// `thread/loaded/list`, which returns live thread ids (most recent first). We
+/// take the first. (With multiple loaded codex sessions the daemon doesn't map
+/// actor→thread, so this is best-effort; the clean single-codex case is exact.)
+fn find_live_thread(ws: &mut WebSocket<UnixStream>) -> Option<String> {
     ws.send(Message::Text(
-        json!({ "id": 1, "method": "thread/list", "params": { "limit": 5, "sortDirection": "desc" } })
-            .to_string()
-            .into(),
+        json!({ "id": 1, "method": "thread/loaded/list", "params": {} }).to_string().into(),
     ))
     .ok()?;
     let result = read_result(ws, 1)?;
-    let threads = result.get("data")?.as_array()?;
-    threads
-        .iter()
-        .find(|t| t.get("status").and_then(|s| s.get("type")).and_then(|x| x.as_str()) == Some("idle"))
-        .and_then(|t| t.get("id").and_then(|i| i.as_str()).map(String::from))
+    result
+        .get("data")?
+        .as_array()?
+        .first()?
+        .as_str()
+        .map(String::from)
 }
 
 /// Wake codex: turn/start the idle thread with `text`. Returns Ok only if a
 /// turn was actually started (so the caller acks).
 fn wake_codex(text: &str) -> Result<(), String> {
     let mut ws = connect_daemon()?;
-    let thread_id = find_idle_thread(&mut ws).ok_or("no idle codex thread to wake")?;
+    let thread_id = find_live_thread(&mut ws).ok_or("no live codex thread to wake (is codex `--remote` to the daemon?)")?;
     let req = json!({
         "id": 2, "method": "turn/start",
         "params": { "threadId": thread_id,
