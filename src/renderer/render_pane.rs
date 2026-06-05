@@ -207,6 +207,7 @@ impl Renderer {
                 // leave the user's wheel position alone when the
                 // target is already on screen.
                 if let Some(line) = tab.pending_ensure_visible.take() {
+                    let line = line as usize;
                     // Map the LOGICAL line to its real VISUAL top by counting
                     // wrapped rows — long rows wrap to several visual lines, so
                     // `line * line_height` under-shoots and the target lands
