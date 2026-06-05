@@ -93,7 +93,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "channel" => {
             // The claude comms-base receiver: spawned by `claude --channels
             // server:lounge`, it pushes directed room messages into the running
-            // session as channel events. See guide/comms-base.md.
+            // session as channel events.
             Some(crate::mcp::run_channel())
         }
         "codex-bridge" => {

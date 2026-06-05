@@ -288,7 +288,7 @@ impl Renderer {
 
     /// Push a directed message down a subscribed actor's receiver connection.
     /// A dead writer (receiver gone) is dropped. This is the delivery half of
-    /// the comms base — `guide/comms-base.md`.
+    /// the comms base.
     fn push_room_message(&mut self, target: &str, message_id: u64, from: &str, text: &str) {
         // The human's opt-out: delivery off → record-only (the message still
         // queued as pending, so toggling back on catches up). The single choke
@@ -378,7 +378,7 @@ impl Renderer {
     // The fallback when an actor has no native receiver: type a held room
     // message into its pane, but only when the human isn't there (window
     // unfocused or a different tab) and the actor is idle (at its prompt). Per
-    // the residents' decision (guide/codex-wake-decision.md): the base bounds the
+    // the residents' decision: the base bounds the
     // crudeness; identity stays in the pane.
 
     /// Silent past `PTY_IDLE` ⇒ treated as idle (at its prompt). No record ⇒

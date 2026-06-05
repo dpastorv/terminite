@@ -136,7 +136,7 @@ pub enum OutPayload {
         claims: Vec<FileClaimInfo>,
     },
     /// A directed room message PUSHED to a subscribed actor (the comms base's
-    /// delivery — see `guide/comms-base.md`). Arrives unsolicited on a
+    /// delivery). Arrives unsolicited on a
     /// `room_subscribe` connection; the receiver surfaces it into the agent and
     /// acks with `room_ack {message_id}`.
     RoomMessage {

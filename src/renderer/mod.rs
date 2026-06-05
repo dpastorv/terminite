@@ -462,7 +462,7 @@ pub struct Renderer {
     /// receiver calls `room_subscribe {actor}` and terminite pushes directed
     /// messages for that actor down this writer as they arrive (delivery, not
     /// poll). Keyed by actor slug → (conn_id, writer); conn_id is for cleanup on
-    /// disconnect. This is `guide/comms-base.md`'s substrate.
+    /// disconnect. This is the comms base's substrate.
     room_subscribers:
         std::collections::HashMap<String, (u64, std::sync::mpsc::SyncSender<crate::proto::OutMessage>)>,
 
