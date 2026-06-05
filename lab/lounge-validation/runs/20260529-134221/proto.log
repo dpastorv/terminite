@@ -1,0 +1,71 @@
+{"t": 49007.596108083, "wall": 1780080141.612271, "op": "server_up", "sock": "/tmp/lounge-val-34965.sock"}
+{"t": 49007.724513041, "wall": 1780080141.7406762, "op": "hello", "conn": 1, "actor": "codex-2"}
+{"t": 49007.724551625, "wall": 1780080141.740714, "op": "hello", "conn": 2, "actor": "codex-1"}
+{"t": 49007.72481875, "wall": 1780080141.740981, "op": "emit", "id": 1, "by": "codex-2", "kind": "agent_message", "status": "completed", "to": "codex-1"}
+{"t": 49007.724841916, "wall": 1780080141.741004, "op": "emit", "id": 2, "by": "codex-1", "kind": "agent_message", "status": "completed", "to": "codex-2"}
+{"t": 49007.724951666, "wall": 1780080141.7411141, "op": "list", "conn_actor": "codex-2", "ids": [2], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 0}}
+{"t": 49007.724987916, "wall": 1780080141.74115, "op": "list", "conn_actor": "codex-1", "ids": [1], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 0}}
+{"t": 49007.725071416, "wall": 1780080141.7412338, "op": "emit", "id": 3, "by": "codex-2", "kind": "agent_message", "status": "completed", "to": "codex-1"}
+{"t": 49007.725107583, "wall": 1780080141.74127, "op": "emit", "id": 4, "by": "codex-1", "kind": "agent_message", "status": "completed", "to": "codex-2"}
+{"t": 49007.978934541, "wall": 1780080141.995098, "op": "list", "conn_actor": "codex-1", "ids": [3], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 1}}
+{"t": 49007.980456041, "wall": 1780080141.996618, "op": "list", "conn_actor": "codex-2", "ids": [4], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 2}}
+{"t": 49008.231258041, "wall": 1780080142.247422, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49008.234751583, "wall": 1780080142.250914, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49008.48518025, "wall": 1780080142.501344, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49008.490405291, "wall": 1780080142.506568, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49008.7402855, "wall": 1780080142.756449, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49008.7460255, "wall": 1780080142.762188, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49008.9917725, "wall": 1780080143.007937, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49009.001744958, "wall": 1780080143.0179079, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49009.247400625, "wall": 1780080143.263563, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49009.2561265, "wall": 1780080143.27229, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49009.499860291, "wall": 1780080143.5160232, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49009.509913416, "wall": 1780080143.5260758, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49009.755841166, "wall": 1780080143.772005, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49009.765569958, "wall": 1780080143.781735, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49010.010715666, "wall": 1780080144.0268779, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49010.02119875, "wall": 1780080144.037361, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49010.266178416, "wall": 1780080144.282341, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49010.276537208, "wall": 1780080144.2926989, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49010.522053, "wall": 1780080144.538217, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49010.532155333, "wall": 1780080144.548318, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49010.777171666, "wall": 1780080144.793335, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49010.78686525, "wall": 1780080144.8030279, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49011.032971166, "wall": 1780080145.049134, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49011.039627625, "wall": 1780080145.0557911, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49011.284513958, "wall": 1780080145.3006778, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49011.293210208, "wall": 1780080145.309372, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49011.536149416, "wall": 1780080145.552311, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49011.545533416, "wall": 1780080145.5616949, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49011.79093575, "wall": 1780080145.8070972, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49011.800815125, "wall": 1780080145.8169768, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49012.046710416, "wall": 1780080146.062874, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49012.052452958, "wall": 1780080146.068615, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49012.301632291, "wall": 1780080146.317795, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49012.30674475, "wall": 1780080146.322906, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49012.553942625, "wall": 1780080146.570106, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49012.56240125, "wall": 1780080146.578563, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49012.806988833, "wall": 1780080146.823152, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49012.814152708, "wall": 1780080146.830317, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49013.060547, "wall": 1780080147.07671, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49013.064928125, "wall": 1780080147.08109, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49013.314365625, "wall": 1780080147.330532, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49013.32027825, "wall": 1780080147.33644, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49013.5694465, "wall": 1780080147.58561, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49013.571252958, "wall": 1780080147.587414, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49013.821774833, "wall": 1780080147.8379369, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49013.825692416, "wall": 1780080147.8418539, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49014.073480791, "wall": 1780080148.089643, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49014.076944541, "wall": 1780080148.093106, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49014.3272655, "wall": 1780080148.3434281, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49014.329880125, "wall": 1780080148.3460422, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49014.579454125, "wall": 1780080148.595616, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49014.585027458, "wall": 1780080148.6011891, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49014.831884208, "wall": 1780080148.848047, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49014.839083708, "wall": 1780080148.855245, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49015.087741125, "wall": 1780080149.1039019, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49015.0947125, "wall": 1780080149.110873, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49015.340312458, "wall": 1780080149.3564742, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49015.350407958, "wall": 1780080149.366571, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+{"t": 49015.591257666, "wall": 1780080149.607424, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+{"t": 49015.603940708, "wall": 1780080149.620102, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}

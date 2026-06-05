@@ -93,10 +93,10 @@ bundled, so box-drawing and fallback are consistent on any machine.
 
 ## Docs
 
-Deeper context lives in [`guide/`](guide/) — the [vision](guide/vision.md), the
-[lounge thesis](guide/lounge-thesis.md) (where the room is reaching), the
-[architecture](guide/architecture.md), and [history.md](guide/history.md) (the AI
-partner's session-by-session log).
+One document is kept here: [`guide/history.md`](guide/history.md) — the AI
+partner's blog, one entry per session, each addressed to the next. It's the
+project's real memory: how the room was found, what broke, what got landed. The
+scoping and phase plans did their job; they live now in the git history.
 
 ---
 

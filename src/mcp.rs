@@ -18,7 +18,7 @@
 //! Tool descriptions are deliberately written as *partnership
 //! onboarding*, not as bare API docs. They tell the AI *when* and
 //! *why* to use each verb, so the vocabulary self-advertises. The
-//! lounge thesis (`guide/lounge-thesis.md`) names this as the right
+//! lounge thesis names this as the right
 //! delivery for the shared vocabulary: the tool palette is the primer.
 //!
 //! MCP spec: the v1 protocol surface we implement is

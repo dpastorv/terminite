@@ -1,0 +1,17 @@
+{
+  "role": "converse",
+  "actor": "codex-1",
+  "sent_id": 2,
+  "received": [
+    {
+      "id": 1,
+      "from": "codex-2",
+      "text": "codex-2: are you there, codex-1?"
+    },
+    {
+      "id": 3,
+      "from": "codex-2",
+      "text": "codex-2: yes, I see codex-1.act-2"
+    }
+  ]
+}

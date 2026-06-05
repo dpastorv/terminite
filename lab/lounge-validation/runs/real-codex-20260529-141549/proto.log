@@ -1,0 +1,10 @@
+{"t": 51015.9778495, "wall": 1780082149.977082, "op": "server_up", "sock": "/tmp/lounge-realcodex-36484.sock"}
+{"t": 51016.052851583, "wall": 1780082150.052084, "op": "hello", "conn": 1, "actor": "codex-1"}
+{"t": 51016.053110041, "wall": 1780082150.052342, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51016.108408458, "wall": 1780082150.10764, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51016.161369291, "wall": 1780082150.1606011, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51016.216773958, "wall": 1780082150.216005, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51016.272132416, "wall": 1780082150.2713642, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51016.327794208, "wall": 1780082150.327026, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 51017.544961375, "wall": 1780082151.544188, "op": "hello", "conn": 2, "actor": "codex-2"}
+{"t": 51027.541679291, "wall": 1780082161.540874, "op": "list", "conn_actor": "codex-2", "ids": [1, 2, 3, 4, 5, 6], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}

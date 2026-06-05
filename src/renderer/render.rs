@@ -1112,7 +1112,7 @@ pick Shell from the dropdown to drop into a real shell.
 two halves of the pair share one surface here. blocks (B1, B2, …)
 in the left gutter are command + output units the pair can name.
 the AI partner connects to ~/.terminite/socket and gets the same
-coordinates you do. see guide/getting-started.md for more."
+coordinates you do. see the README for more."
             .to_string(),
         TabContentKind::Module(id) => match registry.find(id) {
             Some(m) => format!(

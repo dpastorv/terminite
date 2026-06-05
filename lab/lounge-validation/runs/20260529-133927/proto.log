@@ -1,0 +1,7 @@
+{"t": 48893.000539041, "wall": 1780080027.0167308, "op": "server_up", "sock": "/tmp/lounge-val-34782.sock"}
+{"t": 48893.123303958, "wall": 1780080027.1394958, "op": "hello", "conn": 1, "actor": "B1"}
+{"t": 48893.123627833, "wall": 1780080027.139819, "op": "emit", "id": 1, "by": "B1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48893.123764666, "wall": 1780080027.139956, "op": "emit", "id": 2, "by": "B1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48893.123859791, "wall": 1780080027.140051, "op": "emit", "id": 3, "by": "B1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48893.123939208, "wall": 1780080027.14013, "op": "emit", "id": 4, "by": "B1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48893.124007708, "wall": 1780080027.140199, "op": "emit", "id": 5, "by": "B1", "kind": "agent_message", "status": "completed", "to": null}

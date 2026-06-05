@@ -9,7 +9,7 @@
 //! Identity rides on the visible coordinate: `actor` is the host-assigned
 //! session slug (`codex-1`, ...), never self-declared. Ids are global and
 //! monotonic (`act-N`). This module is the substrate for the lounge router
-//! (see `guide/lounge-experiment.md`); it knows nothing about routing — it
+//!; it knows nothing about routing — it
 //! just records and queries.
 
 // The message path (emit_message / list / get) is wired and live. The

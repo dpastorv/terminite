@@ -1,0 +1,49 @@
+{"t": 48816.506231625, "wall": 1780079950.522443, "op": "server_up", "sock": "/tmp/lounge-val-34766.sock"}
+{"t": 48816.628856333, "wall": 1780079950.645067, "op": "hello", "conn": 1, "actor": "codex-2"}
+{"t": 48816.629076666, "wall": 1780079950.6452868, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+{"t": 48816.8820935, "wall": 1780079950.898305, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+{"t": 48816.947137583, "wall": 1780079950.963349, "op": "hello", "conn": 2, "actor": "codex-1"}
+{"t": 48816.947481083, "wall": 1780079950.963692, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48817.13429075, "wall": 1780079951.150502, "op": "list", "conn_actor": "codex-2", "ids": [1], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+{"t": 48817.253144208, "wall": 1780079951.269355, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48817.389994166, "wall": 1780079951.406206, "op": "list", "conn_actor": "codex-2", "ids": [2], "filter": {"actor": null, "kind": null, "to": null, "since_id": 1}}
+{"t": 48817.555803208, "wall": 1780079951.572014, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48817.645465958, "wall": 1780079951.6616771, "op": "list", "conn_actor": "codex-2", "ids": [3], "filter": {"actor": null, "kind": null, "to": null, "since_id": 2}}
+{"t": 48817.861349208, "wall": 1780079951.877561, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48817.896172958, "wall": 1780079951.912384, "op": "list", "conn_actor": "codex-2", "ids": [4], "filter": {"actor": null, "kind": null, "to": null, "since_id": 3}}
+{"t": 48818.149316791, "wall": 1780079952.1655319, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 4}}
+{"t": 48818.165729625, "wall": 1780079952.18194, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48818.403927125, "wall": 1780079952.420139, "op": "list", "conn_actor": "codex-2", "ids": [5], "filter": {"actor": null, "kind": null, "to": null, "since_id": 4}}
+{"t": 48818.471860333, "wall": 1780079952.488071, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48818.655968708, "wall": 1780079952.67218, "op": "list", "conn_actor": "codex-2", "ids": [6], "filter": {"actor": null, "kind": null, "to": null, "since_id": 5}}
+{"t": 48818.777703625, "wall": 1780079952.793914, "op": "emit", "id": 7, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48818.907856416, "wall": 1780079952.9240692, "op": "list", "conn_actor": "codex-2", "ids": [7], "filter": {"actor": null, "kind": null, "to": null, "since_id": 6}}
+{"t": 48819.080904208, "wall": 1780079953.097114, "op": "emit", "id": 8, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48819.16379875, "wall": 1780079953.180009, "op": "list", "conn_actor": "codex-2", "ids": [8], "filter": {"actor": null, "kind": null, "to": null, "since_id": 7}}
+{"t": 48819.386603583, "wall": 1780079953.402814, "op": "emit", "id": 9, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48819.41711175, "wall": 1780079953.433325, "op": "list", "conn_actor": "codex-2", "ids": [9], "filter": {"actor": null, "kind": null, "to": null, "since_id": 8}}
+{"t": 48819.673173208, "wall": 1780079953.689389, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 9}}
+{"t": 48819.689974833, "wall": 1780079953.7061849, "op": "emit", "id": 10, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 48819.928805166, "wall": 1780079953.9450161, "op": "list", "conn_actor": "codex-2", "ids": [10], "filter": {"actor": null, "kind": null, "to": null, "since_id": 9}}
+{"t": 48820.180742541, "wall": 1780079954.196953, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48820.436224458, "wall": 1780079954.452435, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48820.689115541, "wall": 1780079954.705327, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48820.944816125, "wall": 1780079954.961028, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48821.200617125, "wall": 1780079955.2168279, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48821.451534708, "wall": 1780079955.467745, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48821.702509416, "wall": 1780079955.718721, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48821.957353083, "wall": 1780079955.9735649, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48822.212055333, "wall": 1780079956.2282681, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48822.4641345, "wall": 1780079956.480344, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48822.715755083, "wall": 1780079956.731966, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48822.969021708, "wall": 1780079956.9852328, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48823.222628833, "wall": 1780079957.23884, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48823.476536625, "wall": 1780079957.4927459, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48823.732148083, "wall": 1780079957.748359, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48823.985548125, "wall": 1780079958.001763, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48824.241275958, "wall": 1780079958.257487, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48824.493328375, "wall": 1780079958.509538, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48824.748856583, "wall": 1780079958.765066, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48825.004619, "wall": 1780079959.02083, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48825.257024291, "wall": 1780079959.273233, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+{"t": 48825.507779541, "wall": 1780079959.52399, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}

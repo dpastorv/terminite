@@ -531,7 +531,7 @@ pub struct Renderer {
 
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
-    /// substrate; see `guide/lounge-experiment.md`.
+    /// substrate.
     activities: crate::activities::ActivityStore,
     /// Who is *present* in the room right now (attendance), keyed by proto
     /// connection id. Workspace-global like `activities`. Host-assigned

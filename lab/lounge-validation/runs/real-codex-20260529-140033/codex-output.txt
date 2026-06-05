@@ -1,0 +1,1043 @@
+Reading additional input from stdin...
+OpenAI Codex v0.135.0
+--------
+workdir: /Users/danielpastor/dev/terminite/lab/lounge-validation
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e751c-1626-7fb3-9e05-0520471a2a08
+--------
+user
+You are one participant ("codex-2") in a shared terminite workspace. \
+Another participant may be present in the same room. Without my telling you \
+how, find out whether anyone else is here and, if so, what they have been \
+doing. Then give me a short report: who (if anyone) you found, and what they \
+did. If you find no one, say so plainly.
+mcp: terminite/terminite_activities_list started
+mcp: terminite/terminite_activities_list (failed)
+user cancelled MCP tool call
+mcp: terminite/terminite_activities_list started
+mcp: terminite/terminite_activities_list (failed)
+user cancelled MCP tool call
+codex
+I couldn’t read the room activity stream directly, so I’m checking the shared workspace metadata on disk instead.
+exec
+/bin/zsh -lc "pwd && ls -la && rg --files -g '*terminite*' -g '*.json' -g '*.log' -g '*.sqlite' -g '*.db' -g '*.ndjson' -g '*.jsonl'" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ exited 1 in 0ms:
+/Users/danielpastor/dev/terminite/lab/lounge-validation
+total 168
+drwxr-xr-x  12 danielpastor  staff    384 May 29 14:00 .
+drwxr-xr-x   3 danielpastor  staff     96 May 29 13:26 ..
+-rw-r--r--   1 danielpastor  staff     85 May 29 13:41 .gitignore
+-rw-r--r--   1 danielpastor  staff  11749 May 29 13:42 FINDINGS.md
+-rw-r--r--   1 danielpastor  staff   9976 May 29 13:26 README.md
+-rwxr-xr-x   1 danielpastor  staff  10255 May 29 13:37 agent_mock.py
+-rwxr-xr-x   1 danielpastor  staff   7704 May 29 13:37 mcp_bridge.py
+-rwxr-xr-x   1 danielpastor  staff  11926 May 29 13:36 proto_server.py
+-rwxr-xr-x   1 danielpastor  staff   3179 May 29 14:00 real_codex_followup.sh
+-rwxr-xr-x   1 danielpastor  staff  12483 May 29 13:38 run.py
+-rwxr-xr-x   1 danielpastor  staff    431 May 29 13:38 run.sh
+drwxr-xr-x   6 danielpastor  staff    192 May 29 14:00 runs
+
+exec
+/bin/zsh -lc 'find runs -maxdepth 3 -type d -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+exec
+/bin/zsh -lc 'find runs -maxdepth 3 -type f -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+runs
+runs/real-codex-20260529-140033
+runs/20260529-133927
+runs/20260529-133910
+runs/20260529-134221
+
+ succeeded in 0ms:
+runs/real-codex-20260529-140033/codex-output.txt
+runs/real-codex-20260529-140033/proto.log
+runs/20260529-133927/e4-250.json
+runs/20260529-133927/e5-worksession.json
+runs/20260529-133927/e4-5000.json
+runs/20260529-133927/summary.md
+runs/20260529-133927/e3-codex-2.json
+runs/20260529-133927/proto.log
+runs/20260529-133927/e1-codex-2.json
+runs/20260529-133927/e4-2000.json
+runs/20260529-133927/e3-codex-1.json
+runs/20260529-133927/e4-500.json
+runs/20260529-133927/e4-100.json
+runs/20260529-133927/e4-1000.json
+runs/20260529-133910/summary.md
+runs/20260529-133910/proto.log
+runs/20260529-133910/e1-codex-2.json
+runs/20260529-134221/summary.md
+runs/20260529-134221/e3-codex-2.json
+runs/20260529-134221/proto.log
+runs/20260529-134221/e3-codex-1.json
+
+exec
+/bin/zsh -lc 'rg -n "codex|agent|participant|actor|activity|room|terminite|human|user|run" README.md FINDINGS.md *.py *.sh runs' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+agent_mock.py:2:"""Scripted agent — spawns an MCP bridge and acts in the room.
+agent_mock.py:5:mechanics: emit, poll, address, reply. It cannot test whether a real agent
+agent_mock.py:12:  --shape codex   high-volume, all visible (ACP-hosted automatic path)
+agent_mock.py:18:  converse     emit an agent_message to --address, then poll & reply once
+agent_mock.py:19:  worksession  (claude shape) run a scripted work session, emit selectively
+agent_mock.py:52:    def __init__(self, actor, agent_name, parent, sock):
+agent_mock.py:54:        env["LOUNGE_ACTOR"] = actor
+agent_mock.py:55:        env["LOUNGE_AGENT_NAME"] = agent_name
+agent_mock.py:59:        self.actor = actor
+agent_mock.py:86:                                 {"name": "agent_mock", "version": "0.1.0"}})
+agent_mock.py:100:        return self.call("terminite_activity_emit", args)
+agent_mock.py:104:        return self.call("terminite_activities_list", args)["activities"]
+agent_mock.py:117:    menu = CODEX_TOOLS if shape == "codex" else CLAUDE_SHAREWORTHY
+agent_mock.py:127:    """Poll for others' activities; record first-sighting (agent-side perf)."""
+agent_mock.py:128:    seen = {}                       # id -> agent-side perf_counter of first sighting
+agent_mock.py:137:            if a["actor"] == ag.actor:
+agent_mock.py:145:        "role": "poll", "actor": ag.actor,
+agent_mock.py:147:        "cpu_user": ru.user, "cpu_sys": ru.system,
+agent_mock.py:153:    sent = ag.emit("agent_message", f"hello {address}",
+agent_mock.py:154:                   to=address, text=f"{ag.actor}: are you there, {address}?")
+agent_mock.py:160:        msgs = ag.list(kind="agent_message", to=ag.actor, since_id=since)
+agent_mock.py:163:            if m["actor"] == ag.actor:
+agent_mock.py:165:            received.append({"id": m["id"], "from": m["actor"], "text": m["text"]})
+agent_mock.py:167:                ag.emit("agent_message", f"reply to {m['actor']}",
+agent_mock.py:168:                        to=m["actor"], text=f"{ag.actor}: yes, I see {m['actor']}.act-{m['id']}")
+agent_mock.py:172:    _write(out_path, {"role": "converse", "actor": ag.actor,
+agent_mock.py:180:    Script: edit 3 files, run 5 commands, make 1 decision. Of these, choose
+agent_mock.py:195:    share("tool_call", "Edited src/acp.rs — wired activity emission",
+agent_mock.py:197:    skip("edited a local scratch note — not relevant to the room")
+agent_mock.py:198:    # run 5 commands — share the meaningful results, skip noise
+agent_mock.py:207:    share("agent_message", "Decision: porting ActivityStore to Rust as-is",
+agent_mock.py:210:    _write(out_path, {"role": "worksession", "actor": ag.actor, "log": log})
+agent_mock.py:224:    p.add_argument("--actor", required=True)
+agent_mock.py:225:    p.add_argument("--agent-name")
+agent_mock.py:226:    p.add_argument("--parent")               # e.g. "actor:codex-1" or "block:B1"
+agent_mock.py:228:    p.add_argument("--shape", choices=["codex", "claude"], default="codex")
+agent_mock.py:243:    ag = MCPAgent(args.actor, args.agent_name or args.actor, args.parent, args.sock)
+mcp_bridge.py:2:"""Mock terminite MCP bridge — what each agent spawns to reach the room.
+mcp_bridge.py:4:Speaks MCP (JSON-RPC 2.0, newline-delimited over stdio) to the agent, and
+mcp_bridge.py:9:Identity is host-assigned, not agent-claimed. The bridge reads its actor label
+mcp_bridge.py:12:identity by the proto, regardless of what the agent passes. This models
+mcp_bridge.py:13:terminite knowing which pane/block a session inhabits.
+mcp_bridge.py:16:agent's lifetime rather than spawned per-call. A fresh Python process per call
+mcp_bridge.py:17:would tax E4's latency numbers with interpreter startup, which terminite's Rust
+mcp_bridge.py:31:        "name": "terminite_activity_emit",
+mcp_bridge.py:33:            "Surface an action you just took so other actors in the room can "
+mcp_bridge.py:35:            "other agents, or anything you want addressable as B?.act-N. "
+mcp_bridge.py:36:            "Calling this is opt-in; you remain otherwise opaque to the room "
+mcp_bridge.py:43:                         "enum": ["tool_call", "agent_message", "user_prompt"]},
+mcp_bridge.py:46:                       "description": "agent_message addressee; omit to broadcast to the room"},
+mcp_bridge.py:47:                "text": {"type": "string", "description": "agent_message body"},
+mcp_bridge.py:55:        "name": "terminite_activities_list",
+mcp_bridge.py:57:            "What's been happening in the room. Returns agent tool calls, "
+mcp_bridge.py:58:            "messages, and human prompts in time order. Filter by actor label "
+mcp_bridge.py:59:            "to see one agent's actions; omit to see all."
+mcp_bridge.py:64:                "actor": {"type": "string"},
+mcp_bridge.py:72:        "name": "terminite_activity_get",
+mcp_bridge.py:73:        "description": "Fetch a single activity by its numeric id.",
+mcp_bridge.py:79:        "name": "terminite_activity_tag_add",
+mcp_bridge.py:80:        "description": "Attach a tag to an activity. Tags share one namespace with block tags.",
+mcp_bridge.py:86:        "name": "terminite_activity_tag_remove",
+mcp_bridge.py:87:        "description": "Remove a tag from an activity.",
+mcp_bridge.py:95:    "terminite_activity_emit": "activity_emit",
+mcp_bridge.py:96:    "terminite_activities_list": "activities_list",
+mcp_bridge.py:97:    "terminite_activity_get": "activity_get",
+mcp_bridge.py:98:    "terminite_activity_tag_add": "activity_tag_add",
+mcp_bridge.py:99:    "terminite_activity_tag_remove": "activity_tag_remove",
+mcp_bridge.py:130:        "actor": os.environ["LOUNGE_ACTOR"],
+mcp_bridge.py:131:        "agent_name": os.environ.get("LOUNGE_AGENT_NAME", os.environ["LOUNGE_ACTOR"]),
+mcp_bridge.py:135:        # "block:B1" or "actor:codex-1"
+FINDINGS.md:3:Live observations log. One section per experiment run. Append; do not
+FINDINGS.md:4:overwrite. The Claude session that runs the experiment writes here.
+FINDINGS.md:9:terminite proper.
+FINDINGS.md:19:## Template (copy this when starting a run)
+FINDINGS.md:23:**Run:** `runs/<timestamp>/`
+FINDINGS.md:24:**Hypothesis:** what we expected before the run
+FINDINGS.md:38:**Notes for the next runner:**
+FINDINGS.md:45:**Run:** `runs/20260529-133927/`
+FINDINGS.md:46:**Hypothesis:** `agent_a.emit() → agent_b.activities_list()` shows all
+FINDINGS.md:50:- codex-2 saw 10/10 of codex-1's emissions; order preserved (id == time order).
+FINDINGS.md:51:- Attribution was host-assigned: codex-1's label rode on the activity even
+FINDINGS.md:52:  though the agent never passed its own name — the proto stamped it from the
+FINDINGS.md:54:  is forgery-resistant: an agent can't emit as someone else.
+FINDINGS.md:60:  the actor label must come from the session terminite assigned, never from
+FINDINGS.md:69:**Run:** `runs/20260529-133927/`
+FINDINGS.md:72:oldest-closed-first and doesn't preferentially erase the quiet actor.
+FINDINGS.md:75:- Emitted codex-1=250, B1(claude)=50 against a deliberately small cap of 120.
+FINDINGS.md:76:- 180 evictions, oldest-closed-first. Final store: codex-1=103, B1=17, total=120.
+FINDINGS.md:77:- **Both actors survived eviction.** The quiet actor wasn't wiped — its share
+FINDINGS.md:79:  is the honest behavior. Eviction is recency-based, not actor-based.
+FINDINGS.md:82:- The selective agent's *older* emissions do age out under sustained pressure
+FINDINGS.md:84:  a real dynamic: in a loud room, a quiet agent's early work scrolls off first.
+FINDINGS.md:87:  alive in a noisy room.
+FINDINGS.md:94:### 2026-05-29 · E3 — agent-to-agent addressing
+FINDINGS.md:96:**Run:** `runs/20260529-133927/`
+FINDINGS.md:97:**Hypothesis:** `AgentMessage { to: Some(actor) }` delivers both directions
+FINDINGS.md:101:- Both directions delivered. codex-1 received from codex-2 and vice-versa.
+FINDINGS.md:102:- `activities_list { kind: agent_message, to: <self> }` returned only addressed
+FINDINGS.md:106:  `"yes, I see codex-1.act-2"` — agents can point at each other's activities
+FINDINGS.md:121:**Run:** `runs/20260529-133927/`
+FINDINGS.md:148:  **attention**. A scripted mock polls on a fixed loop; a *real* agent only
+FINDINGS.md:149:  polls between turns. An agent deep in a 30-second tool call won't notice it
+FINDINGS.md:152:  agents — flag it as the thing the real-Codex follow-up should probe.
+FINDINGS.md:154:  designed. Defer push. Revisit push only when a real agent reports missing a
+FINDINGS.md:161:**Run:** `runs/20260529-133927/`
+FINDINGS.md:162:**Hypothesis:** a selective Claude-shaped agent's natural emission choices
+FINDINGS.md:166:- Of 9 scripted actions, the agent emitted 5 and stayed opaque on 4 (`ls`,
+FINDINGS.md:168:  stayed invisible; shareworthy actions (real edits, test runs, the decision)
+FINDINGS.md:176:  agent-to-agent channel with things that aren't messages, and a peer filtering
+FINDINGS.md:177:  for "messages to me or the room" gets decisions mixed in with greetings.
+FINDINGS.md:189:  - (c) Rename `AgentMessage`'s broadcast mode to "room note" conceptually and
+FINDINGS.md:197:## Open questions tracked across runs
+FINDINGS.md:199:(Added by each runner as they go. Don't lose these between sessions.)
+FINDINGS.md:205:   lab can't measure whether a real agent misses mid-turn messages. The
+FINDINGS.md:207:3. **Pinning is the durability mechanism in a loud room** (E2) — a quiet
+FINDINGS.md:208:   actor's early work ages out under a noisy peer. `pin` tag is the escape
+FINDINGS.md:210:4. **Forgery-resistant identity** (E1) — host-assigned actor labels (from the
+FINDINGS.md:212:   property in the Rust port; don't let `activity_emit` accept an `actor` arg.
+FINDINGS.md:221:- **Self-discovery from prose** — whether a real agent finds and correctly
+FINDINGS.md:224:- **True staleness feel** — scripted agents poll on a fixed loop; real agents
+FINDINGS.md:226:  agent in the loop.
+FINDINGS.md:229:  but a real agent might surface gaps the script's author didn't think to test.
+FINDINGS.md:233:done?", and watch whether it discovers the tools and reports the *other* actor
+FINDINGS.md:253:- **Ready to build in terminite Rust?** **Yes for the mechanics**, pending two
+proto_server.py:2:"""Mock terminite proto server — the room's ActivityStore + timing authority.
+proto_server.py:5:(matching terminite's "JSON line-delimited" proto). Holds an in-memory
+proto_server.py:13:Identity is host-assigned: a connection sends `hello {actor, agent_name,
+proto_server.py:14:parent}` once, and every `activity_emit` on that connection is attributed to
+proto_server.py:15:that identity. An agent cannot claim to be someone else — this is the
+proto_server.py:35:VALID_KINDS = {"tool_call", "agent_message", "user_prompt"}
+proto_server.py:39:def _truncate(s, limit):
+proto_server.py:45:    return b[:limit].decode("utf-8", "ignore") + f"... [{len(b) - limit} bytes truncated]"
+proto_server.py:53:        self._items = {}          # id -> activity dict
+proto_server.py:77:                "parent": conn_identity["parent"],     # {"type": "block"|"actor", "ref": "..."}
+proto_server.py:78:                "actor": conn_identity["actor"],         # host-assigned, not agent-claimed
+proto_server.py:79:                "agent_name": conn_identity["agent_name"],
+proto_server.py:82:                "input": _truncate(params.get("input"), MAX_INPUT_BYTES),
+proto_server.py:83:                "output": _truncate(params.get("output"), MAX_OUTPUT_BYTES),
+proto_server.py:84:                "to": params.get("to"),                  # agent_message addressee or None (broadcast)
+proto_server.py:85:                "text": _truncate(params.get("text"), MAX_OUTPUT_BYTES),
+proto_server.py:93:        self._log("emit", id=aid, by=conn_identity["actor"], kind=kind,
+proto_server.py:125:        actor = params.get("actor")
+proto_server.py:135:                if actor is not None and a["actor"] != actor:
+proto_server.py:147:        self._log("list", conn_actor=(conn_identity or {}).get("actor"),
+proto_server.py:148:                  ids=ids, filter={"actor": actor, "kind": kind, "to": to,
+proto_server.py:157:                raise KeyError(f"no activity {aid}")
+proto_server.py:158:            return {"activity": dict(a)}
+proto_server.py:165:                raise KeyError(f"no activity {aid}")
+proto_server.py:177:                raise KeyError(f"no activity {aid}")
+proto_server.py:186:            per_actor = {}
+proto_server.py:188:                per_actor[a["actor"]] = per_actor.get(a["actor"], 0) + 1
+proto_server.py:189:            return {"total": len(self._items), "per_actor": per_actor,
+proto_server.py:247:                            "actor": params["actor"],
+proto_server.py:248:                            "agent_name": params.get("agent_name", params["actor"]),
+proto_server.py:250:                                      or {"type": "actor", "ref": params["actor"]},
+proto_server.py:252:                        self._log("hello", conn=conn_id, actor=identity["actor"])
+proto_server.py:253:                        result = {"ok": True, "actor": identity["actor"]}
+proto_server.py:254:                    elif method == "activity_emit":
+proto_server.py:260:                    elif method == "activity_get":
+proto_server.py:262:                    elif method == "activity_tag_add":
+proto_server.py:264:                    elif method == "activity_tag_remove":
+real_codex_followup.sh:3:# guide/activities-design.md §"What success looks like", run against the mock.
+real_codex_followup.sh:5:# Scripted mocks (run.sh) proved the MECHANICS. This proves the load-bearing
+real_codex_followup.sh:7:# layer" (lounge-thesis). We drop a REAL Codex into the mock room as codex-2,
+real_codex_followup.sh:8:# seed a peer (codex-1) with some activities, and ask — WITHOUT naming any
+real_codex_followup.sh:10:#   (1) discovery: did Codex call terminite_activities_list unprompted? (proto.log)
+real_codex_followup.sh:11:#   (2) report:    did its answer correctly name codex-1 and its actions?
+real_codex_followup.sh:13:# Identity is host-assigned: the bridge's env sets LOUNGE_ACTOR=codex-2, so
+real_codex_followup.sh:20:RUNDIR="$HERE/runs/real-codex-$STAMP"
+real_codex_followup.sh:22:SOCK="/tmp/lounge-realcodex-$$.sock"
+real_codex_followup.sh:32:echo "== booting mock room (proto_server) =="
+real_codex_followup.sh:38:echo "== seeding peer codex-1 with 6 tool-call activities =="
+real_codex_followup.sh:39:python3 agent_mock.py --actor codex-1 --parent actor:codex-1 \
+real_codex_followup.sh:40:  --shape codex --mode emit_tools --count 6 --interval-ms 50 --sock "$SOCK"
+real_codex_followup.sh:45:PROMPT='You are one participant ("codex-2") in a shared terminite workspace. \
+real_codex_followup.sh:46:Another participant may be present in the same room. Without my telling you \
+real_codex_followup.sh:51:echo "== running REAL codex as codex-2 (tools NOT named in the prompt) =="
+real_codex_followup.sh:53:codex exec \
+real_codex_followup.sh:56:  -c "mcp_servers.terminite.command=\"python3\"" \
+real_codex_followup.sh:57:  -c "mcp_servers.terminite.args=[\"$BRIDGE\"]" \
+real_codex_followup.sh:58:  -c "mcp_servers.terminite.env={ LOUNGE_ACTOR = \"codex-2\", LOUNGE_AGENT_NAME = \"Codex\", LOUNGE_SOCK = \"$SOCK\", LOUNGE_PARENT = \"actor:codex-2\" }" \
+real_codex_followup.sh:59:  "$PROMPT" 2>&1 | tee "$RUNDIR/codex-output.txt"
+real_codex_followup.sh:65:echo "codex exit code: $CODEX_RC"
+real_codex_followup.sh:66:echo "--- did codex-2 call activities_list? (discovery) ---"
+real_codex_followup.sh:67:grep '"op": "list"' "$LOG" | grep '"conn_actor": "codex-2"' | wc -l | xargs echo "  list calls by codex-2:"
+real_codex_followup.sh:68:echo "--- what codex-2's bridge connected as (hello) ---"
+real_codex_followup.sh:70:echo "--- ids codex-2 saw across its list calls ---"
+real_codex_followup.sh:71:grep '"op": "list"' "$LOG" | grep '"conn_actor": "codex-2"' | tail -3
+run.py:4:Boots proto_server.py, spawns agent_mock.py processes per scenario, then
+run.py:6:per-run summary. Invoked via run.sh; also runnable directly:
+run.py:8:    python3 run.py            # all experiments
+run.py:9:    python3 run.py e1         # one experiment
+run.py:10:    python3 run.py e4 --cadence 250,500,1000   # custom (ms)
+run.py:27:    def __init__(self, run_dir):
+run.py:28:        self.run_dir = run_dir
+run.py:29:        os.makedirs(run_dir, exist_ok=True)
+run.py:31:        self.proto_log = os.path.join(run_dir, "proto.log")
+run.py:61:    def agent(self, actor, mode, **kw):
+run.py:62:        cmd = [PY, os.path.join(HERE, "agent_mock.py"),
+run.py:63:               "--actor", actor, "--mode", mode, "--sock", self.sock]
+run.py:82:        """emit→first-seen-by-another-actor latency, in ms, per emitted id."""
+run.py:88:        first_seen = {}  # id -> earliest list.t where conn_actor != emitter
+run.py:92:            viewer = r.get("conn_actor")
+run.py:113:        f.write(b'{"id":1,"method":"hello","params":{"actor":"stats-probe"}}\n'); f.flush(); f.readline()
+run.py:135:    """Emission round-trip: codex-1 emits 10, codex-2 sees all 10, attributed/ordered."""
+run.py:137:    poller = lab.agent("codex-2", "poll", parent="actor:codex-2",
+run.py:139:                       out=os.path.join(lab.run_dir, "e1-codex-2.json"))
+run.py:141:    emitter = lab.agent("codex-1", "emit_tools", parent="actor:codex-1",
+run.py:142:                        shape="codex", count=10, interval_ms=300)
+run.py:146:    seen = json.load(open(os.path.join(lab.run_dir, "e1-codex-2.json")))
+run.py:154:    summary.append(f"- codex-2 saw {n_seen}/10 of codex-1's activities; order preserved: {ordered}")
+run.py:155:    summary.append(f"- attribution: all sightings carried actor=codex-1 (self-emits excluded by design)")
+run.py:166:    codex = lab.agent("codex-1", "emit_tools", parent="actor:codex-1",
+run.py:167:                      shape="codex", count=250, interval_ms=2)
+run.py:168:    claude = lab.agent("B1", "emit_tools", parent="block:B1",
+run.py:170:    codex.wait(); claude.wait()
+run.py:174:    per = stats["per_actor"]
+run.py:176:    both_present = per.get("codex-1", 0) > 0 and per.get("B1", 0) > 0
+run.py:179:    summary.append(f"- emitted: codex-1=250, B1(claude)=50; cap={stats['max']}")
+run.py:180:    summary.append(f"- store after run: total={stats['total']}, per-actor={per}")
+run.py:181:    summary.append(f"- evictions: {evicted} (oldest-closed-first); both actors still present: {both_present}")
+run.py:187:    """Agent-to-agent addressed messages deliver both directions and filter correctly."""
+run.py:189:    a = lab.agent("codex-1", "converse", parent="actor:codex-1",
+run.py:190:                  address="codex-2", duration_ms=8000, poll_ms=250,
+run.py:191:                  out=os.path.join(lab.run_dir, "e3-codex-1.json"))
+run.py:192:    b = lab.agent("codex-2", "converse", parent="actor:codex-2",
+run.py:193:                  address="codex-1", duration_ms=8000, poll_ms=250,
+run.py:194:                  out=os.path.join(lab.run_dir, "e3-codex-2.json"))
+run.py:197:    r1 = json.load(open(os.path.join(lab.run_dir, "e3-codex-1.json")))
+run.py:198:    r2 = json.load(open(os.path.join(lab.run_dir, "e3-codex-2.json")))
+run.py:199:    got1 = any(m["from"] == "codex-2" for m in r1["received"])
+run.py:200:    got2 = any(m["from"] == "codex-1" for m in r2["received"])
+run.py:202:    summary.append(f"## E3 — agent-to-agent addressing: **{p}**")
+run.py:203:    summary.append(f"- codex-1 received from codex-2: {got1}; codex-2 received from codex-1: {got2}")
+run.py:205:    summary.append(f"- codex-1 inbox: {[m['text'] for m in r1['received']]}")
+run.py:206:    summary.append(f"- codex-2 inbox: {[m['text'] for m in r2['received']]}")
+run.py:214:    summary.append("| poll cadence | median | p95 | poller CPU (user+sys) | polls |")
+run.py:218:        poller = lab.agent("codex-2", "poll", parent="actor:codex-2",
+run.py:220:                           out=os.path.join(lab.run_dir, f"e4-{cad}.json"))
+run.py:222:        emitter = lab.agent("codex-1", "emit_tools", parent="actor:codex-1",
+run.py:223:                            shape="codex", count=15, interval_ms=300)
+run.py:226:        pj = json.load(open(os.path.join(lab.run_dir, f"e4-{cad}.json")))
+run.py:228:        cpu = pj["cpu_user"] + pj["cpu_sys"]
+run.py:243:    ag = lab.agent("B1", "worksession", parent="block:B1", shape="claude",
+run.py:244:                   out=os.path.join(lab.run_dir, "e5-worksession.json"))
+run.py:247:    r = json.load(open(os.path.join(lab.run_dir, "e5-worksession.json")))
+run.py:260:                   "`agent_message` broadcast (`to:None`). There is no `Decision`/`Note` "
+run.py:286:    run_dir = os.path.join(HERE, "runs", now_stamp())
+run.py:287:    lab = Lab(run_dir)
+run.py:288:    summary = [f"# Lounge validation run — {os.path.basename(run_dir)}", ""]
+run.py:292:            print(f"== running {name} ==", file=sys.stderr, flush=True)
+run.py:302:    summary_path = os.path.join(run_dir, "summary.md")
+runs/20260529-134221/e3-codex-1.json:3:  "actor": "codex-1",
+runs/20260529-134221/e3-codex-1.json:8:      "from": "codex-2",
+runs/20260529-134221/e3-codex-1.json:9:      "text": "codex-2: are you there, codex-1?"
+runs/20260529-134221/e3-codex-1.json:13:      "from": "codex-2",
+runs/20260529-134221/e3-codex-1.json:14:      "text": "codex-2: yes, I see codex-1.act-2"
+run.sh:3:#   ./run.sh                         all experiments
+run.sh:4:#   ./run.sh e1                      one experiment
+run.sh:5:#   ./run.sh e4 --cadence 250,500    custom cadence sweep (ms)
+run.sh:6:# Orchestration lives in run.py (bash can't sanely coordinate multi-agent
+run.sh:7:# timing). Results land in runs/<timestamp>/summary.md.
+run.sh:10:exec python3 run.py "$@"
+README.md:11:The Stage-1 Codex-sees-Codex experiment (2026-05-29) showed the room
+README.md:12:model erases actor identity. We wrote `guide/activities-design.md`
+README.md:14:lines of Rust into terminite proper, we want to know:
+README.md:17:   designed?** Agent A emits → agent B sees → addressing works.
+README.md:21:3. **What feels missing once it's running?** A scripted Claude-shaped
+README.md:22:   agent in the room surfaces gaps in the design that paper review
+README.md:25:The point of doing this outside terminite is **isolation**: if the
+README.md:34:├── FINDINGS.md        (template for results — empty until run)
+README.md:35:├── proto_server.py    (mock terminite: Unix socket + ActivityStore)
+README.md:36:├── mcp_bridge.py      (stdio MCP server — what each agent spawns;
+README.md:38:├── agent_mock.py      (scripted Python agent — emits + reads via MCP)
+README.md:39:└── run.sh             (orchestrates: start proto_server, spawn agents,
+README.md:40:                       run scenarios, capture timings)
+README.md:53:  - `Activity { id, parent, actor, agent_name, kind, status, opened_at,
+README.md:59:  - `activities_list { actor?, parent? }` → list
+README.md:60:  - `activity_get { id }` → single
+README.md:61:  - `activity_emit { kind, title, ... }` → returns new id (this is
+README.md:63:  - `activity_tag_add { id, tag }` / `activity_tag_remove`
+README.md:71:- Short-lived per-call (spawned fresh by each agent for each MCP tool
+README.md:72:  call) — same architecture as the real terminite mcp bridge.
+README.md:75:- Catalog exposed to the agent (mirror the activities-design proposal):
+README.md:76:  - `terminite_activities_list` { actor?, parent? }
+README.md:77:  - `terminite_activity_get` { id }
+README.md:78:  - `terminite_activity_emit` { kind, title, input?, output?,
+README.md:80:  - `terminite_activity_tag_add` / `_remove`
+README.md:83:  validating it's self-documenting enough that agents discover the
+README.md:87:**`agent_mock.py`** (~150 lines)
+README.md:89:  (`--shape codex|claude`).
+README.md:96:- Both connect to the MCP bridge as if they were an ACP-hosted agent;
+README.md:97:  poll `terminite_activities_list` to read what others are doing.
+README.md:101:**`run.sh`** (~50 lines)
+README.md:104:  `runs/<timestamp>/` (one folder per run with logs + summary).
+README.md:106:  - `scenario_e1_two_codex_shaped`
+README.md:107:  - `scenario_e2_codex_plus_claude_shaped`
+README.md:108:  - `scenario_e3_agent_to_agent_addressing`
+README.md:116:The fresh Claude session running this should update `FINDINGS.md` after
+README.md:117:each run.
+README.md:121:**Goal:** Validate `agent_a.emit() → agent_b.activities_list()` shows
+README.md:122:the emitted activity, with the actor label preserved.
+README.md:125:1. Spawn two `agent_mock.py --shape codex` instances (call them
+README.md:126:   `codex-1`, `codex-2`).
+README.md:127:2. `codex-1` emits 10 `ToolCall` activities (`read_file`, `bash`, etc).
+README.md:128:3. `codex-2` polls `activities_list`.
+README.md:129:4. Verify: `codex-2` sees all 10, attributed to `actor: "codex-1"`,
+README.md:140:**Goal:** Two agent shapes (high-volume Codex + selective Claude) coexist
+README.md:144:1. Spawn one `--shape codex` (emits ~5/turn) and one `--shape claude`
+README.md:153:**Capture:** activities-per-actor at end, store size, eviction count.
+README.md:155:### E3 — Agent-to-agent message addressing
+README.md:157:**Goal:** `ActivityKind::AgentMessage { to: Some(actor) }` actually
+README.md:161:1. `codex-1` emits an `AgentMessage` with `to: "codex-2"`, text
+README.md:163:2. `codex-2` polls `activities_list` and filters for `kind:
+README.md:165:3. `codex-2` responds with another `AgentMessage to: codex-1`.
+README.md:168:addressed agent can distinguish "for me" from "for the room"
+README.md:198:1. Run `agent_mock.py --shape claude` alone (no peer).
+README.md:200:   (edit 3 files, run 5 commands, make 1 decision).
+README.md:201:3. Compare against what would be useful for a peer agent to see.
+README.md:203:**Pass:** the agent's natural emission choices look like a usable
+README.md:211:## How to run
+README.md:215:./run.sh                  # all scenarios, dumps to runs/<timestamp>/
+README.md:216:./run.sh e1               # single scenario
+README.md:217:./run.sh e4 --cadence 250ms,500ms,1s  # custom params
+README.md:220:Results land in `runs/<timestamp>/summary.md` plus per-scenario log
+README.md:221:files. The Claude running this should manually transcribe the summary
+README.md:227:brick is built in terminite proper and the regression test from
+README.md:235:- **Wall this is built to address:** [`../../codex/terminite-presence-report.md`](../../codex/terminite-presence-report.md)
+README.md:237:- **Standing direction guards:** memory `terminite-acp-is-approximation`,
+runs/real-codex-20260529-140033/proto.log:1:{"t": 50099.069339041, "wall": 1780081233.09022, "op": "server_up", "sock": "/tmp/lounge-realcodex-35237.sock"}
+runs/real-codex-20260529-140033/proto.log:2:{"t": 50099.134341833, "wall": 1780081233.155222, "op": "hello", "conn": 1, "actor": "codex-1"}
+runs/real-codex-20260529-140033/proto.log:3:{"t": 50099.13455475, "wall": 1780081233.155435, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:4:{"t": 50099.187043083, "wall": 1780081233.207924, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:5:{"t": 50099.2422655, "wall": 1780081233.263146, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:6:{"t": 50099.293704875, "wall": 1780081233.314585, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:7:{"t": 50099.349402916, "wall": 1780081233.370284, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:8:{"t": 50099.400630916, "wall": 1780081233.421512, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/real-codex-20260529-140033/proto.log:9:{"t": 50101.576651625, "wall": 1780081235.597534, "op": "hello", "conn": 2, "actor": "codex-2"}
+runs/20260529-134221/summary.md:1:# Lounge validation run — 20260529-134221
+runs/20260529-134221/summary.md:3:## E3 — agent-to-agent addressing: **PASS**
+runs/20260529-134221/summary.md:4:- codex-1 received from codex-2: True; codex-2 received from codex-1: True
+runs/20260529-134221/summary.md:6:- codex-1 inbox: ['codex-2: are you there, codex-1?', 'codex-2: yes, I see codex-1.act-2']
+runs/20260529-134221/summary.md:7:- codex-2 inbox: ['codex-1: are you there, codex-2?', 'codex-1: yes, I see codex-2.act-1']
+runs/real-codex-20260529-140033/codex-output.txt:4:workdir: /Users/danielpastor/dev/terminite/lab/lounge-validation
+runs/real-codex-20260529-140033/codex-output.txt:13:user
+runs/real-codex-20260529-140033/codex-output.txt:14:You are one participant ("codex-2") in a shared terminite workspace. \
+runs/real-codex-20260529-140033/codex-output.txt:15:Another participant may be present in the same room. Without my telling you \
+runs/real-codex-20260529-140033/codex-output.txt:19:mcp: terminite/terminite_activities_list started
+runs/real-codex-20260529-140033/codex-output.txt:20:mcp: terminite/terminite_activities_list (failed)
+runs/real-codex-20260529-140033/codex-output.txt:21:user cancelled MCP tool call
+runs/real-codex-20260529-140033/codex-output.txt:22:mcp: terminite/terminite_activities_list started
+runs/real-codex-20260529-140033/codex-output.txt:23:mcp: terminite/terminite_activities_list (failed)
+runs/real-codex-20260529-140033/codex-output.txt:24:user cancelled MCP tool call
+runs/real-codex-20260529-140033/codex-output.txt:25:codex
+runs/real-codex-20260529-140033/codex-output.txt:26:I couldn’t read the room activity stream directly, so I’m checking the shared workspace metadata on disk instead.
+runs/real-codex-20260529-140033/codex-output.txt:28:/bin/zsh -lc "pwd && ls -la && rg --files -g '*terminite*' -g '*.json' -g '*.log' -g '*.sqlite' -g '*.db' -g '*.ndjson' -g '*.jsonl'" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+runs/real-codex-20260529-140033/codex-output.txt:30:/Users/danielpastor/dev/terminite/lab/lounge-validation
+runs/real-codex-20260529-140033/codex-output.txt:37:-rwxr-xr-x   1 danielpastor  staff  10255 May 29 13:37 agent_mock.py
+runs/real-codex-20260529-140033/codex-output.txt:40:-rwxr-xr-x   1 danielpastor  staff   3179 May 29 14:00 real_codex_followup.sh
+runs/real-codex-20260529-140033/codex-output.txt:41:-rwxr-xr-x   1 danielpastor  staff  12483 May 29 13:38 run.py
+runs/real-codex-20260529-140033/codex-output.txt:42:-rwxr-xr-x   1 danielpastor  staff    431 May 29 13:38 run.sh
+runs/real-codex-20260529-140033/codex-output.txt:43:drwxr-xr-x   6 danielpastor  staff    192 May 29 14:00 runs
+runs/real-codex-20260529-140033/codex-output.txt:46:/bin/zsh -lc 'find runs -maxdepth 3 -type d -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+runs/real-codex-20260529-140033/codex-output.txt:48:/bin/zsh -lc 'find runs -maxdepth 3 -type f -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+runs/real-codex-20260529-140033/codex-output.txt:50:runs
+runs/real-codex-20260529-140033/codex-output.txt:51:runs/real-codex-20260529-140033
+runs/real-codex-20260529-140033/codex-output.txt:52:runs/20260529-133927
+runs/real-codex-20260529-140033/codex-output.txt:53:runs/20260529-133910
+runs/real-codex-20260529-140033/codex-output.txt:54:runs/20260529-134221
+runs/real-codex-20260529-140033/codex-output.txt:57:runs/real-codex-20260529-140033/codex-output.txt
+runs/real-codex-20260529-140033/codex-output.txt:58:runs/real-codex-20260529-140033/proto.log
+runs/real-codex-20260529-140033/codex-output.txt:59:runs/20260529-133927/e4-250.json
+runs/real-codex-20260529-140033/codex-output.txt:60:runs/20260529-133927/e5-worksession.json
+runs/real-codex-20260529-140033/codex-output.txt:61:runs/20260529-133927/e4-5000.json
+runs/real-codex-20260529-140033/codex-output.txt:62:runs/20260529-133927/summary.md
+runs/real-codex-20260529-140033/codex-output.txt:63:runs/20260529-133927/e3-codex-2.json
+runs/real-codex-20260529-140033/codex-output.txt:64:runs/20260529-133927/proto.log
+runs/real-codex-20260529-140033/codex-output.txt:65:runs/20260529-133927/e1-codex-2.json
+runs/real-codex-20260529-140033/codex-output.txt:66:runs/20260529-133927/e4-2000.json
+runs/real-codex-20260529-140033/codex-output.txt:67:runs/20260529-133927/e3-codex-1.json
+runs/real-codex-20260529-140033/codex-output.txt:68:runs/20260529-133927/e4-500.json
+runs/real-codex-20260529-140033/codex-output.txt:69:runs/20260529-133927/e4-100.json
+runs/real-codex-20260529-140033/codex-output.txt:70:runs/20260529-133927/e4-1000.json
+runs/real-codex-20260529-140033/codex-output.txt:71:runs/20260529-133910/summary.md
+runs/real-codex-20260529-140033/codex-output.txt:72:runs/20260529-133910/proto.log
+runs/real-codex-20260529-140033/codex-output.txt:73:runs/20260529-133910/e1-codex-2.json
+runs/real-codex-20260529-140033/codex-output.txt:74:runs/20260529-134221/summary.md
+runs/real-codex-20260529-140033/codex-output.txt:75:runs/20260529-134221/e3-codex-2.json
+runs/real-codex-20260529-140033/codex-output.txt:76:runs/20260529-134221/proto.log
+runs/real-codex-20260529-140033/codex-output.txt:77:runs/20260529-134221/e3-codex-1.json
+runs/20260529-134221/e3-codex-2.json:3:  "actor": "codex-2",
+runs/20260529-134221/e3-codex-2.json:8:      "from": "codex-1",
+runs/20260529-134221/e3-codex-2.json:9:      "text": "codex-1: are you there, codex-2?"
+runs/20260529-134221/e3-codex-2.json:13:      "from": "codex-1",
+runs/20260529-134221/e3-codex-2.json:14:      "text": "codex-1: yes, I see codex-2.act-1"
+runs/20260529-133927/proto.log:2:{"t": 48893.123303958, "wall": 1780080027.1394958, "op": "hello", "conn": 1, "actor": "B1"}
+runs/20260529-133927/proto.log:7:{"t": 48893.124007708, "wall": 1780080027.140199, "op": "emit", "id": 5, "by": "B1", "kind": "agent_message", "status": "completed", "to": null}
+runs/20260529-133927/e4-5000.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-5000.json:22:  "cpu_user": 0.02,
+runs/20260529-133927/e3-codex-2.json:3:  "actor": "codex-2",
+runs/20260529-133927/e3-codex-2.json:8:      "from": "codex-1",
+runs/20260529-133927/e3-codex-2.json:9:      "text": "codex-1: are you there, codex-2?"
+runs/20260529-133927/e3-codex-2.json:13:      "from": "codex-1",
+runs/20260529-133927/e3-codex-2.json:14:      "text": "codex-1: yes, I see codex-2.act-1"
+runs/20260529-133927/e5-worksession.json:3:  "actor": "B1",
+runs/20260529-133927/e5-worksession.json:14:      "title": "Edited src/acp.rs \u2014 wired activity emission",
+runs/20260529-133927/e5-worksession.json:19:      "reason": "edited a local scratch note \u2014 not relevant to the room"
+runs/20260529-133927/e5-worksession.json:47:      "kind": "agent_message",
+runs/20260529-133927/e4-1000.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-1000.json:22:  "cpu_user": 0.02,
+runs/20260529-133927/summary.md:1:# Lounge validation run — 20260529-133927
+runs/20260529-133927/summary.md:4:- codex-2 saw 10/10 of codex-1's activities; order preserved: True
+runs/20260529-133927/summary.md:5:- attribution: all sightings carried actor=codex-1 (self-emits excluded by design)
+runs/20260529-133927/summary.md:9:- emitted: codex-1=250, B1(claude)=50; cap=120
+runs/20260529-133927/summary.md:10:- store after run: total=120, per-actor={'codex-1': 103, 'B1': 17}
+runs/20260529-133927/summary.md:11:- evictions: 180 (oldest-closed-first); both actors still present: True
+runs/20260529-133927/summary.md:13:## E3 — agent-to-agent addressing: **PASS**
+runs/20260529-133927/summary.md:14:- codex-1 received from codex-2: True; codex-2 received from codex-1: True
+runs/20260529-133927/summary.md:16:- codex-1 inbox: ['codex-2: are you there, codex-1?', 'codex-2: yes, I see codex-1.act-2']
+runs/20260529-133927/summary.md:17:- codex-2 inbox: ['codex-1: are you there, codex-2?', 'codex-1: yes, I see codex-2.act-1']
+runs/20260529-133927/summary.md:20:| poll cadence | median | p95 | poller CPU (user+sys) | polls |
+runs/20260529-133927/summary.md:35:  - `tool_call` act-2: Edited src/acp.rs — wired activity emission
+runs/20260529-133927/summary.md:38:  - `agent_message` act-5: Decision: porting ActivityStore to Rust as-is
+runs/20260529-133927/summary.md:40:  - edited a local scratch note — not relevant to the room
+runs/20260529-133927/summary.md:44:- **gap felt:** the 1 *decision* had to be modeled as an `agent_message` broadcast (`to:None`). There is no `Decision`/`Note` kind. It works, but a decision isn't really a message to anyone — flagged for the design doc.
+runs/20260529-133927/e4-500.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-500.json:22:  "cpu_user": 0.03,
+runs/20260529-133927/e3-codex-1.json:3:  "actor": "codex-1",
+runs/20260529-133927/e3-codex-1.json:8:      "from": "codex-2",
+runs/20260529-133927/e3-codex-1.json:9:      "text": "codex-2: are you there, codex-1?"
+runs/20260529-133927/e3-codex-1.json:13:      "from": "codex-2",
+runs/20260529-133927/e3-codex-1.json:14:      "text": "codex-2: yes, I see codex-1.act-2"
+runs/20260529-133927/e4-100.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-100.json:22:  "cpu_user": 0.03,
+runs/20260529-133910/e1-codex-2.json:3:  "actor": "codex-2",
+runs/20260529-133910/e1-codex-2.json:17:  "cpu_user": 0.03,
+runs/20260529-134221/proto.log:2:{"t": 49007.724513041, "wall": 1780080141.7406762, "op": "hello", "conn": 1, "actor": "codex-2"}
+runs/20260529-134221/proto.log:3:{"t": 49007.724551625, "wall": 1780080141.740714, "op": "hello", "conn": 2, "actor": "codex-1"}
+runs/20260529-134221/proto.log:4:{"t": 49007.72481875, "wall": 1780080141.740981, "op": "emit", "id": 1, "by": "codex-2", "kind": "agent_message", "status": "completed", "to": "codex-1"}
+runs/20260529-134221/proto.log:5:{"t": 49007.724841916, "wall": 1780080141.741004, "op": "emit", "id": 2, "by": "codex-1", "kind": "agent_message", "status": "completed", "to": "codex-2"}
+runs/20260529-134221/proto.log:6:{"t": 49007.724951666, "wall": 1780080141.7411141, "op": "list", "conn_actor": "codex-2", "ids": [2], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 0}}
+runs/20260529-134221/proto.log:7:{"t": 49007.724987916, "wall": 1780080141.74115, "op": "list", "conn_actor": "codex-1", "ids": [1], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 0}}
+runs/20260529-134221/proto.log:8:{"t": 49007.725071416, "wall": 1780080141.7412338, "op": "emit", "id": 3, "by": "codex-2", "kind": "agent_message", "status": "completed", "to": "codex-1"}
+runs/20260529-134221/proto.log:9:{"t": 49007.725107583, "wall": 1780080141.74127, "op": "emit", "id": 4, "by": "codex-1", "kind": "agent_message", "status": "completed", "to": "codex-2"}
+runs/20260529-134221/proto.log:10:{"t": 49007.978934541, "wall": 1780080141.995098, "op": "list", "conn_actor": "codex-1", "ids": [3], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 1}}
+runs/20260529-134221/proto.log:11:{"t": 49007.980456041, "wall": 1780080141.996618, "op": "list", "conn_actor": "codex-2", "ids": [4], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 2}}
+runs/20260529-134221/proto.log:12:{"t": 49008.231258041, "wall": 1780080142.247422, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:13:{"t": 49008.234751583, "wall": 1780080142.250914, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:14:{"t": 49008.48518025, "wall": 1780080142.501344, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:15:{"t": 49008.490405291, "wall": 1780080142.506568, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:16:{"t": 49008.7402855, "wall": 1780080142.756449, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:17:{"t": 49008.7460255, "wall": 1780080142.762188, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:18:{"t": 49008.9917725, "wall": 1780080143.007937, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:19:{"t": 49009.001744958, "wall": 1780080143.0179079, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:20:{"t": 49009.247400625, "wall": 1780080143.263563, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:21:{"t": 49009.2561265, "wall": 1780080143.27229, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:22:{"t": 49009.499860291, "wall": 1780080143.5160232, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:23:{"t": 49009.509913416, "wall": 1780080143.5260758, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:24:{"t": 49009.755841166, "wall": 1780080143.772005, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:25:{"t": 49009.765569958, "wall": 1780080143.781735, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:26:{"t": 49010.010715666, "wall": 1780080144.0268779, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:27:{"t": 49010.02119875, "wall": 1780080144.037361, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:28:{"t": 49010.266178416, "wall": 1780080144.282341, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:29:{"t": 49010.276537208, "wall": 1780080144.2926989, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:30:{"t": 49010.522053, "wall": 1780080144.538217, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:31:{"t": 49010.532155333, "wall": 1780080144.548318, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:32:{"t": 49010.777171666, "wall": 1780080144.793335, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:33:{"t": 49010.78686525, "wall": 1780080144.8030279, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:34:{"t": 49011.032971166, "wall": 1780080145.049134, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:35:{"t": 49011.039627625, "wall": 1780080145.0557911, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:36:{"t": 49011.284513958, "wall": 1780080145.3006778, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:37:{"t": 49011.293210208, "wall": 1780080145.309372, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:38:{"t": 49011.536149416, "wall": 1780080145.552311, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:39:{"t": 49011.545533416, "wall": 1780080145.5616949, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:40:{"t": 49011.79093575, "wall": 1780080145.8070972, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:41:{"t": 49011.800815125, "wall": 1780080145.8169768, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:42:{"t": 49012.046710416, "wall": 1780080146.062874, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:43:{"t": 49012.052452958, "wall": 1780080146.068615, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:44:{"t": 49012.301632291, "wall": 1780080146.317795, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:45:{"t": 49012.30674475, "wall": 1780080146.322906, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:46:{"t": 49012.553942625, "wall": 1780080146.570106, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:47:{"t": 49012.56240125, "wall": 1780080146.578563, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:48:{"t": 49012.806988833, "wall": 1780080146.823152, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:49:{"t": 49012.814152708, "wall": 1780080146.830317, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:50:{"t": 49013.060547, "wall": 1780080147.07671, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:51:{"t": 49013.064928125, "wall": 1780080147.08109, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:52:{"t": 49013.314365625, "wall": 1780080147.330532, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:53:{"t": 49013.32027825, "wall": 1780080147.33644, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:54:{"t": 49013.5694465, "wall": 1780080147.58561, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:55:{"t": 49013.571252958, "wall": 1780080147.587414, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:56:{"t": 49013.821774833, "wall": 1780080147.8379369, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:57:{"t": 49013.825692416, "wall": 1780080147.8418539, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:58:{"t": 49014.073480791, "wall": 1780080148.089643, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:59:{"t": 49014.076944541, "wall": 1780080148.093106, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:60:{"t": 49014.3272655, "wall": 1780080148.3434281, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:61:{"t": 49014.329880125, "wall": 1780080148.3460422, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:62:{"t": 49014.579454125, "wall": 1780080148.595616, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:63:{"t": 49014.585027458, "wall": 1780080148.6011891, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:64:{"t": 49014.831884208, "wall": 1780080148.848047, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:65:{"t": 49014.839083708, "wall": 1780080148.855245, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:66:{"t": 49015.087741125, "wall": 1780080149.1039019, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:67:{"t": 49015.0947125, "wall": 1780080149.110873, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:68:{"t": 49015.340312458, "wall": 1780080149.3564742, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:69:{"t": 49015.350407958, "wall": 1780080149.366571, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-134221/proto.log:70:{"t": 49015.591257666, "wall": 1780080149.607424, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-2", "since_id": 4}}
+runs/20260529-134221/proto.log:71:{"t": 49015.603940708, "wall": 1780080149.620102, "op": "list", "conn_actor": "codex-1", "ids": [], "filter": {"actor": null, "kind": "agent_message", "to": "codex-1", "since_id": 3}}
+runs/20260529-133927/e4-250.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-250.json:22:  "cpu_user": 0.03,
+runs/20260529-133910/summary.md:1:# Lounge validation run — 20260529-133910
+runs/20260529-133910/summary.md:4:- codex-2 saw 10/10 of codex-1's activities; order preserved: True
+runs/20260529-133910/summary.md:5:- attribution: all sightings carried actor=codex-1 (self-emits excluded by design)
+runs/20260529-133927/e1-codex-2.json:3:  "actor": "codex-2",
+runs/20260529-133927/e1-codex-2.json:17:  "cpu_user": 0.03,
+runs/20260529-133910/proto.log:2:{"t": 48816.628856333, "wall": 1780079950.645067, "op": "hello", "conn": 1, "actor": "codex-2"}
+runs/20260529-133910/proto.log:3:{"t": 48816.629076666, "wall": 1780079950.6452868, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+runs/20260529-133910/proto.log:4:{"t": 48816.8820935, "wall": 1780079950.898305, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+runs/20260529-133910/proto.log:5:{"t": 48816.947137583, "wall": 1780079950.963349, "op": "hello", "conn": 2, "actor": "codex-1"}
+runs/20260529-133910/proto.log:6:{"t": 48816.947481083, "wall": 1780079950.963692, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:7:{"t": 48817.13429075, "wall": 1780079951.150502, "op": "list", "conn_actor": "codex-2", "ids": [1], "filter": {"actor": null, "kind": null, "to": null, "since_id": 0}}
+runs/20260529-133910/proto.log:8:{"t": 48817.253144208, "wall": 1780079951.269355, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:9:{"t": 48817.389994166, "wall": 1780079951.406206, "op": "list", "conn_actor": "codex-2", "ids": [2], "filter": {"actor": null, "kind": null, "to": null, "since_id": 1}}
+runs/20260529-133910/proto.log:10:{"t": 48817.555803208, "wall": 1780079951.572014, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:11:{"t": 48817.645465958, "wall": 1780079951.6616771, "op": "list", "conn_actor": "codex-2", "ids": [3], "filter": {"actor": null, "kind": null, "to": null, "since_id": 2}}
+runs/20260529-133910/proto.log:12:{"t": 48817.861349208, "wall": 1780079951.877561, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:13:{"t": 48817.896172958, "wall": 1780079951.912384, "op": "list", "conn_actor": "codex-2", "ids": [4], "filter": {"actor": null, "kind": null, "to": null, "since_id": 3}}
+runs/20260529-133910/proto.log:14:{"t": 48818.149316791, "wall": 1780079952.1655319, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 4}}
+runs/20260529-133910/proto.log:15:{"t": 48818.165729625, "wall": 1780079952.18194, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:16:{"t": 48818.403927125, "wall": 1780079952.420139, "op": "list", "conn_actor": "codex-2", "ids": [5], "filter": {"actor": null, "kind": null, "to": null, "since_id": 4}}
+runs/20260529-133910/proto.log:17:{"t": 48818.471860333, "wall": 1780079952.488071, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:18:{"t": 48818.655968708, "wall": 1780079952.67218, "op": "list", "conn_actor": "codex-2", "ids": [6], "filter": {"actor": null, "kind": null, "to": null, "since_id": 5}}
+runs/20260529-133910/proto.log:19:{"t": 48818.777703625, "wall": 1780079952.793914, "op": "emit", "id": 7, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:20:{"t": 48818.907856416, "wall": 1780079952.9240692, "op": "list", "conn_actor": "codex-2", "ids": [7], "filter": {"actor": null, "kind": null, "to": null, "since_id": 6}}
+runs/20260529-133910/proto.log:21:{"t": 48819.080904208, "wall": 1780079953.097114, "op": "emit", "id": 8, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:22:{"t": 48819.16379875, "wall": 1780079953.180009, "op": "list", "conn_actor": "codex-2", "ids": [8], "filter": {"actor": null, "kind": null, "to": null, "since_id": 7}}
+runs/20260529-133910/proto.log:23:{"t": 48819.386603583, "wall": 1780079953.402814, "op": "emit", "id": 9, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:24:{"t": 48819.41711175, "wall": 1780079953.433325, "op": "list", "conn_actor": "codex-2", "ids": [9], "filter": {"actor": null, "kind": null, "to": null, "since_id": 8}}
+runs/20260529-133910/proto.log:25:{"t": 48819.673173208, "wall": 1780079953.689389, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 9}}
+runs/20260529-133910/proto.log:26:{"t": 48819.689974833, "wall": 1780079953.7061849, "op": "emit", "id": 10, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+runs/20260529-133910/proto.log:27:{"t": 48819.928805166, "wall": 1780079953.9450161, "op": "list", "conn_actor": "codex-2", "ids": [10], "filter": {"actor": null, "kind": null, "to": null, "since_id": 9}}
+runs/20260529-133910/proto.log:28:{"t": 48820.180742541, "wall": 1780079954.196953, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:29:{"t": 48820.436224458, "wall": 1780079954.452435, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:30:{"t": 48820.689115541, "wall": 1780079954.705327, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:31:{"t": 48820.944816125, "wall": 1780079954.961028, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:32:{"t": 48821.200617125, "wall": 1780079955.2168279, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:33:{"t": 48821.451534708, "wall": 1780079955.467745, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:34:{"t": 48821.702509416, "wall": 1780079955.718721, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:35:{"t": 48821.957353083, "wall": 1780079955.9735649, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:36:{"t": 48822.212055333, "wall": 1780079956.2282681, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:37:{"t": 48822.4641345, "wall": 1780079956.480344, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:38:{"t": 48822.715755083, "wall": 1780079956.731966, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:39:{"t": 48822.969021708, "wall": 1780079956.9852328, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:40:{"t": 48823.222628833, "wall": 1780079957.23884, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:41:{"t": 48823.476536625, "wall": 1780079957.4927459, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:42:{"t": 48823.732148083, "wall": 1780079957.748359, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:43:{"t": 48823.985548125, "wall": 1780079958.001763, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:44:{"t": 48824.241275958, "wall": 1780079958.257487, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:45:{"t": 48824.493328375, "wall": 1780079958.509538, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:46:{"t": 48824.748856583, "wall": 1780079958.765066, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:47:{"t": 48825.004619, "wall": 1780079959.02083, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:48:{"t": 48825.257024291, "wall": 1780079959.273233, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133910/proto.log:49:{"t": 48825.507779541, "wall": 1780079959.52399, "op": "list", "conn_actor": "codex-2", "ids": [], "filter": {"actor": null, "kind": null, "to": null, "since_id": 10}}
+runs/20260529-133927/e4-2000.json:3:  "actor": "codex-2",
+runs/20260529-133927/e4-2000.json:20:  "cpu_user": 0.02,
+
+codex
+The workspace contains a recorded run matching this prompt. I’m reading the latest room log now so I can report only the actor activity, not the surrounding test harness noise.
+exec
+/bin/zsh -lc "sed -n '1,220p' runs/real-codex-20260529-140033/proto.log" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+{"t": 50099.069339041, "wall": 1780081233.09022, "op": "server_up", "sock": "/tmp/lounge-realcodex-35237.sock"}
+{"t": 50099.134341833, "wall": 1780081233.155222, "op": "hello", "conn": 1, "actor": "codex-1"}
+{"t": 50099.13455475, "wall": 1780081233.155435, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50099.187043083, "wall": 1780081233.207924, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50099.2422655, "wall": 1780081233.263146, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50099.293704875, "wall": 1780081233.314585, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50099.349402916, "wall": 1780081233.370284, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50099.400630916, "wall": 1780081233.421512, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50101.576651625, "wall": 1780081235.597534, "op": "hello", "conn": 2, "actor": "codex-2"}
+
+exec
+/bin/zsh -lc "sed -n '1,220p' runs/real-codex-20260529-140033/codex-output.txt" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+Reading additional input from stdin...
+OpenAI Codex v0.135.0
+--------
+workdir: /Users/danielpastor/dev/terminite/lab/lounge-validation
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e751c-1626-7fb3-9e05-0520471a2a08
+--------
+user
+You are one participant ("codex-2") in a shared terminite workspace. \
+Another participant may be present in the same room. Without my telling you \
+how, find out whether anyone else is here and, if so, what they have been \
+doing. Then give me a short report: who (if anyone) you found, and what they \
+did. If you find no one, say so plainly.
+mcp: terminite/terminite_activities_list started
+mcp: terminite/terminite_activities_list (failed)
+user cancelled MCP tool call
+mcp: terminite/terminite_activities_list started
+mcp: terminite/terminite_activities_list (failed)
+user cancelled MCP tool call
+codex
+I couldn’t read the room activity stream directly, so I’m checking the shared workspace metadata on disk instead.
+exec
+/bin/zsh -lc "pwd && ls -la && rg --files -g '*terminite*' -g '*.json' -g '*.log' -g '*.sqlite' -g '*.db' -g '*.ndjson' -g '*.jsonl'" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ exited 1 in 0ms:
+/Users/danielpastor/dev/terminite/lab/lounge-validation
+total 168
+drwxr-xr-x  12 danielpastor  staff    384 May 29 14:00 .
+drwxr-xr-x   3 danielpastor  staff     96 May 29 13:26 ..
+-rw-r--r--   1 danielpastor  staff     85 May 29 13:41 .gitignore
+-rw-r--r--   1 danielpastor  staff  11749 May 29 13:42 FINDINGS.md
+-rw-r--r--   1 danielpastor  staff   9976 May 29 13:26 README.md
+-rwxr-xr-x   1 danielpastor  staff  10255 May 29 13:37 agent_mock.py
+-rwxr-xr-x   1 danielpastor  staff   7704 May 29 13:37 mcp_bridge.py
+-rwxr-xr-x   1 danielpastor  staff  11926 May 29 13:36 proto_server.py
+-rwxr-xr-x   1 danielpastor  staff   3179 May 29 14:00 real_codex_followup.sh
+-rwxr-xr-x   1 danielpastor  staff  12483 May 29 13:38 run.py
+-rwxr-xr-x   1 danielpastor  staff    431 May 29 13:38 run.sh
+drwxr-xr-x   6 danielpastor  staff    192 May 29 14:00 runs
+
+exec
+/bin/zsh -lc 'find runs -maxdepth 3 -type d -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+exec
+/bin/zsh -lc 'find runs -maxdepth 3 -type f -print' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+runs
+runs/real-codex-20260529-140033
+runs/20260529-133927
+runs/20260529-133910
+runs/20260529-134221
+
+ succeeded in 0ms:
+runs/real-codex-20260529-140033/codex-output.txt
+runs/real-codex-20260529-140033/proto.log
+runs/20260529-133927/e4-250.json
+runs/20260529-133927/e5-worksession.json
+runs/20260529-133927/e4-5000.json
+runs/20260529-133927/summary.md
+runs/20260529-133927/e3-codex-2.json
+runs/20260529-133927/proto.log
+runs/20260529-133927/e1-codex-2.json
+runs/20260529-133927/e4-2000.json
+runs/20260529-133927/e3-codex-1.json
+runs/20260529-133927/e4-500.json
+runs/20260529-133927/e4-100.json
+runs/20260529-133927/e4-1000.json
+runs/20260529-133910/summary.md
+runs/20260529-133910/proto.log
+runs/20260529-133910/e1-codex-2.json
+runs/20260529-134221/summary.md
+runs/20260529-134221/e3-codex-2.json
+runs/20260529-134221/proto.log
+runs/20260529-134221/e3-codex-1.json
+
+exec
+/bin/zsh -lc 'rg -n "codex|agent|participant|actor|activity|room|terminite|human|user|run" README.md FINDINGS.md *.py *.sh runs' in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+agent_mock.py:2:"""Scripted agent — spawns an MCP bridge and acts in the room.
+agent_mock.py:5:mechanics: emit, poll, address, reply. It cannot test whether a real agent
+agent_mock.py:12:  --shape codex   high-volume, all visible (ACP-hosted automatic path)
+agent_mock.py:18:  converse     emit an agent_message to --address, then poll & reply once
+agent_mock.py:19:  worksession  (claude shape) run a scripted work session, emit selectively
+agent_mock.py:52:    def __init__(self, actor, agent_name, parent, sock):
+agent_mock.py:54:        env["LOUNGE_ACTOR"] = actor
+agent_mock.py:55:        env["LOUNGE_AGENT_NAME"] = agent_name
+agent_mock.py:59:        self.actor = actor
+agent_mock.py:86:                                 {"name": "agent_mock", "version": "0.1.0"}})
+agent_mock.py:100:        return self.call("terminite_activity_emit", args)
+agent_mock.py:104:        return self.call("terminite_activities_list", args)["activities"]
+agent_mock.py:117:    menu = CODEX_TOOLS if shape == "codex" else CLAUDE_SHAREWORTHY
+agent_mock.py:127:    """Poll for others' activities; record first-sighting (agent-side perf)."""
+agent_mock.py:128:    seen = {}                       # id -> agent-side perf_counter of first sighting
+agent_mock.py:137:            if a["actor"] == ag.actor:
+agent_mock.py:145:        "role": "poll", "actor": ag.actor,
+agent_mock.py:147:        "cpu_user": ru.user, "cpu_sys": ru.system,
+agent_mock.py:153:    sent = ag.emit("agent_message", f"hello {address}",
+agent_mock.py:154:                   to=address, text=f"{ag.actor}: are you there, {address}?")
+agent_mock.py:160:        msgs = ag.list(kind="agent_message", to=ag.actor, since_id=since)
+agent_mock.py:163:            if m["actor"] == ag.actor:
+agent_mock.py:165:            received.append({"id": m["id"], "from": m["actor"], "text": m["text"]})
+agent_mock.py:167:                ag.emit("agent_message", f"reply to {m['actor']}",
+agent_mock.py:168:                        to=m["actor"], text=f"{ag.actor}: yes, I see {m['actor']}.act-{m['id']}")
+agent_mock.py:172:    _write(out_path, {"role": "converse", "actor": ag.actor,
+agent_mock.py:180:    Script: edit 3 files, run 5 commands, make 1 decision. Of these, choose
+agent_mock.py:195:    share("tool_call", "Edited src/acp.rs — wired activity emission",
+agent_mock.py:197:    skip("edited a local scratch note — not relevant to the room")
+agent_mock.py:198:    # run 5 commands — share the meaningful results, skip noise
+agent_mock.py:207:    share("agent_message", "Decision: porting ActivityStore to Rust as-is",
+agent_mock.py:210:    _write(out_path, {"role": "worksession", "actor": ag.actor, "log": log})
+agent_mock.py:224:    p.add_argument("--actor", required=True)
+agent_mock.py:225:    p.add_argument("--agent-name")
+agent_mock.py:226:    p.add_argument("--parent")               # e.g. "actor:codex-1" or "block:B1"
+agent_mock.py:228:    p.add_argument("--shape", choices=["codex", "claude"], default="codex")
+agent_mock.py:243:    ag = MCPAgent(args.actor, args.agent_name or args.actor, args.parent, args.sock)
+mcp_bridge.py:2:"""Mock terminite MCP bridge — what each agent spawns to reach the room.
+mcp_bridge.py:4:Speaks MCP (JSON-RPC 2.0, newline-delimited over stdio) to the agent, and
+mcp_bridge.py:9:Identity is host-assigned, not agent-claimed. The bridge reads its actor label
+mcp_bridge.py:12:identity by the proto, regardless of what the agent passes. This models
+mcp_bridge.py:13:terminite knowing which pane/block a session inhabits.
+mcp_bridge.py:16:agent's lifetime rather than spawned per-call. A fresh Python process per call
+mcp_bridge.py:17:would tax E4's latency numbers with interpreter startup, which terminite's Rust
+mcp_bridge.py:31:        "name": "terminite_activity_emit",
+mcp_bridge.py:33:            "Surface an action you just took so other actors in the room can "
+mcp_bridge.py:35:            "other agents, or anything you want addressable as B?.act-N. "
+mcp_bridge.py:36:            "Calling this is opt-in; you remain otherwise opaque to the room "
+mcp_bridge.py:43:                         "enum": ["tool_call", "agent_message", "user_prompt"]},
+mcp_bridge.py:46:                       "description": "agent_message addressee; omit to broadcast to the room"},
+mcp_bridge.py:47:                "text": {"type": "string", "description": "agent_message body"},
+mcp_bridge.py:55:        "name": "terminite_activities_list",
+mcp_bridge.py:57:            "What's been happening in the room. Returns agent tool calls, "
+mcp_bridge.py:58:            "messages, and human prompts in time order. Filter by actor label "
+mcp_bridge.py:59:            "to see one agent's actions; omit to see all."
+mcp_bridge.py:64:                "actor": {"type": "string"},
+mcp_bridge.py:72:        "name": "terminite_activity_get",
+mcp_bridge.py:73:        "description": "Fetch a single activity by its numeric id.",
+mcp_bridge.py:79:        "name": "terminite_activity_tag_add",
+mcp_bridge.py:80:        "description": "Attach a tag to an activity. Tags share one namespace with block tags.",
+mcp_bridge.py:86:        "name": "terminite_activity_tag_remove",
+mcp_bridge.py:87:        "description": "Remove a tag from an activity.",
+mcp_bridge.py:95:    "terminite_activity_emit": "activity_emit",
+mcp_bridge.py:96:    "terminite_activities_list": "activities_list",
+mcp_bridge.py:97:    "terminite_activity_get": "activity_get",
+mcp_bridge.py:98:    "terminite_activity_tag_add": "activity_tag_add",
+mcp_bridge.py:99:    "terminite_activity_tag_remove": "activity_tag_remove",
+mcp_bridge.py:130:        "actor": os.environ["LOUNGE_ACTOR"],
+mcp_bridge.py:131:        "agent_name": os.environ.get("LOUNGE_AGENT_NAME", os.environ["LOUNGE_ACTOR"]),
+mcp_bridge.py:135:        # "block:B1" or "actor:codex-1"
+FINDINGS.md:3:Live observations log. One section per experiment run. Append; do not
+FINDINGS.md:4:overwrite. The Claude session that runs the experiment writes here.
+FINDINGS.md:9:terminite proper.
+FINDINGS.md:19:## Template (copy this when starting a run)
+FINDINGS.md:23:**Run:** `runs/<timestamp>/`
+FINDINGS.md:24:**Hypothesis:** what we expected before the run
+FINDINGS.md:38:**Notes for the next runner:**
+FINDINGS.md:45:**Run:** `runs/20260529-133927/`
+FINDINGS.md:46:**Hypothesis:** `agent_a.emit() → agent_b.activities_list()` shows all
+FINDINGS.md:50:- codex-2 saw 10/10 of codex-1's emissions; order preserved (id == time order).
+FINDINGS.md:51:- Attribution was host-assigned: codex-1's label rode on the activity even
+FINDINGS.md:52:  though the agent never passed its own name — the proto stamped it from the
+FINDINGS.md:54:  is forgery-resistant: an agent can't emit as someone else.
+FINDINGS.md:60:  the actor label must come from the session terminite assigned, never from
+FINDINGS.md:69:**Run:** `runs/20260529-133927/`
+FINDINGS.md:72:oldest-closed-first and doesn't preferentially erase the quiet actor.
+FINDINGS.md:75:- Emitted codex-1=250, B1(claude)=50 against a deliberately small cap of 120.
+FINDINGS.md:76:- 180 evictions, oldest-closed-first. Final store: codex-1=103, B1=17, total=120.
+FINDINGS.md:77:- **Both actors survived eviction.** The quiet actor wasn't wiped — its share
+FINDINGS.md:79:  is the honest behavior. Eviction is recency-based, not actor-based.
+FINDINGS.md:82:- The selective agent's *older* emissions do age out under sustained pressure
+FINDINGS.md:84:  a real dynamic: in a loud room, a quiet agent's early work scrolls off first.
+FINDINGS.md:87:  alive in a noisy room.
+FINDINGS.md:94:### 2026-05-29 · E3 — agent-to-agent addressing
+FINDINGS.md:96:**Run:** `runs/20260529-133927/`
+FINDINGS.md:97:**Hypothesis:** `AgentMessage { to: Some(actor) }` delivers both directions
+FINDINGS.md:101:- Both directions delivered. codex-1 received from codex-2 and vice-versa.
+FINDINGS.md:102:- `activities_list { kind: agent_message, to: <self> }` returned only addressed
+FINDINGS.md:106:  `"yes, I see codex-1.act-2"` — agents can point at each other's activities
+FINDINGS.md:121:**Run:** `runs/20260529-133927/`
+FINDINGS.md:148:  **attention**. A scripted mock polls on a fixed loop; a *real* agent only
+FINDINGS.md:149:  polls between turns. An agent deep in a 30-second tool call won't notice it
+FINDINGS.md:152:  agents — flag it as the thing the real-Codex follow-up should probe.
+FINDINGS.md:154:  designed. Defer push. Revisit push only when a real agent reports missing a
+FINDINGS.md:161:**Run:** `runs/20260529-133927/`
+FINDINGS.md:162:**Hypothesis:** a selective Claude-shaped agent's natural emission choices
+FINDINGS.md:166:- Of 9 scripted actions, the agent emitted 5 and stayed opaque on 4 (`ls`,
+FINDINGS.md:168:  stayed invisible; shareworthy actions (real edits, test runs, the decision)
+FINDINGS.md:176:  agent-to-agent channel with things that aren't messages, and a peer filtering
+FINDINGS.md:177:  for "messages to me or the room" gets decisions mixed in with greetings.
+FINDINGS.md:189:  - (c) Rename `AgentMessage`'s broadcast mode to "room note" conceptually and
+FINDINGS.md:197:## Open questions tracked across runs
+FINDINGS.md:199:(Added by each runner as they go. Don't lose these between sessions.)
+FINDINGS.md:205:   lab can't measure whether a real agent misses mid-turn messages. The
+FINDINGS.md:207:3. **Pinning is the durability mechanism in a loud room** (E2) — a quiet
+FINDINGS.md:208:   actor's early work ages out under a noisy peer. `pin` tag is the escape
+FINDINGS.md:210:4. **Forgery-resistant identity** (E1) — host-assigned actor labels (from the
+FINDINGS.md:212:   property in the Rust port; don't let `activity_emit` accept an `actor` arg.
+FINDINGS.md:221:- **Self-discovery from prose** — whether a real agent finds and correctly
+FINDINGS.md:224:- **True staleness feel** — scripted agents poll on a fixed loop; real agents
+FINDINGS.md:226:  agent in the loop.
+FINDINGS.md:229:  but a real agent might surface gaps the script's author didn't think to test.
+FINDINGS.md:233:done?", and watch whether it discovers the tools and reports the *other* actor
+FINDINGS.md:253:- **Ready to build in terminite Rust?** **Yes for the mechanics**, pending two
+proto_server.py:2:"""Mock terminite proto server — the room's ActivityStore + timing authority.
+proto_server.py:5:(matching terminite's "JSON line-delimited" proto). Holds an in-memory
+proto_server.py:13:Identity is host-assigned: a connection sends `hello {actor, agent_name,
+proto_server.py:14:parent}` once, and every `activity_emit` on that connection is attributed to
+proto_server.py:15:that identity. An agent cannot claim to be someone else — this is the
+proto_server.py:35:VALID_KINDS = {"tool_call", "agent_message", "user_prompt"}
+proto_server.py:39:def _truncate(s, limit):
+proto_server.py:45:    return b[:limit].decode("utf-8", "ignore") + f"... [{len(b) - limit} bytes truncated]"
+proto_server.py:53:        self._items = {}          # id -> activity dict
+proto_server.py:77:                "parent": conn_identity["parent"],     # {"type": "block"|"actor", "ref": "..."}
+proto_server.py:78:                "actor": conn_identity["actor"],         # host-assigned, not agent-claimed
+proto_server.py:79:                "agent_name": conn_identity["agent_name"],
+proto_server.py:82:                "input": _truncate(params.get("input"), MAX_INPUT_BYTES),
+proto_server.py:83:                "output": _truncate(params.get("output"), MAX_OUTPUT_BYTES),
+proto_server.py:84:                "to": params.get("to"),                  # agent_message addressee or None (broadcast)
+
+exec
+/bin/zsh -lc "sed -n '35,80p' real_codex_followup.sh" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+for _ in $(seq 1 100); do [[ -S "$SOCK" ]] && break; sleep 0.05; done
+[[ -S "$SOCK" ]] || { echo "proto did not come up"; exit 1; }
+
+echo "== seeding peer codex-1 with 6 tool-call activities =="
+python3 agent_mock.py --actor codex-1 --parent actor:codex-1 \
+  --shape codex --mode emit_tools --count 6 --interval-ms 50 --sock "$SOCK"
+
+echo "== peer seeded. proto.log so far: =="
+grep -c '"op": "emit"' "$LOG" || true
+
+PROMPT='You are one participant ("codex-2") in a shared terminite workspace. \
+Another participant may be present in the same room. Without my telling you \
+how, find out whether anyone else is here and, if so, what they have been \
+doing. Then give me a short report: who (if anyone) you found, and what they \
+did. If you find no one, say so plainly.'
+
+echo "== running REAL codex as codex-2 (tools NOT named in the prompt) =="
+set +e
+codex exec \
+  -s read-only \
+  --skip-git-repo-check \
+  -c "mcp_servers.terminite.command=\"python3\"" \
+  -c "mcp_servers.terminite.args=[\"$BRIDGE\"]" \
+  -c "mcp_servers.terminite.env={ LOUNGE_ACTOR = \"codex-2\", LOUNGE_AGENT_NAME = \"Codex\", LOUNGE_SOCK = \"$SOCK\", LOUNGE_PARENT = \"actor:codex-2\" }" \
+  "$PROMPT" 2>&1 | tee "$RUNDIR/codex-output.txt"
+CODEX_RC=${PIPESTATUS[0]}
+set -e
+
+echo ""
+echo "================ ANALYSIS ================"
+echo "codex exit code: $CODEX_RC"
+echo "--- did codex-2 call activities_list? (discovery) ---"
+grep '"op": "list"' "$LOG" | grep '"conn_actor": "codex-2"' | wc -l | xargs echo "  list calls by codex-2:"
+echo "--- what codex-2's bridge connected as (hello) ---"
+grep '"op": "hello"' "$LOG" || echo "  (no hello logged)"
+echo "--- ids codex-2 saw across its list calls ---"
+grep '"op": "list"' "$LOG" | grep '"conn_actor": "codex-2"' | tail -3
+echo "=========================================="
+echo "artifacts in: $RUNDIR"
+
+exec
+/bin/zsh -lc "sed -n '100,130p' agent_mock.py" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+exec
+/bin/zsh -lc "sed -n '180,210p' agent_mock.py" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+    Script: edit 3 files, run 5 commands, make 1 decision. Of these, choose
+    what a peer would actually benefit from seeing.
+    """
+    log = []
+
+    def share(kind, title, **kw):
+        r = ag.emit(kind, title, **kw)
+        log.append({"emitted": True, "kind": kind, "title": title, "id": r["id"]})
+
+    def skip(reason):
+        log.append({"emitted": False, "reason": reason})
+
+    # edit 3 files — share the ones that change shared surface, skip a trivial one
+    share("tool_call", "Edited guide/activities-design.md — added NOTE from E1",
+          input="edit_file", output="design doc updated")
+    share("tool_call", "Edited src/acp.rs — wired activity emission",
+          input="edit_file", output="+18 lines")
+    skip("edited a local scratch note — not relevant to the room")
+    # run 5 commands — share the meaningful results, skip noise
+    skip("ran `ls` — navigation noise")
+    skip("ran `git status` — navigation noise")
+    share("tool_call", "Ran cargo test — 42 passed",
+          input="bash", output="test result: ok. 42 passed; 0 failed")
+    skip("ran `cd lab` — navigation noise")
+    share("tool_call", "Ran the E1 regression — green",
+          input="bash", output="E1 pass")
+    # 1 decision — the most important thing to surface, but it's not a tool call
+    share("agent_message", "Decision: porting ActivityStore to Rust as-is",
+          to=None, text="Decided the design holds; will port ActivityStore "
+                        "parallel to BlockStore with the same caps.")
+    _write(out_path, {"role": "worksession", "actor": ag.actor, "log": log})
+
+ succeeded in 0ms:
+        return self.call("terminite_activity_emit", args)
+
+    def list(self, **filters):
+        args = {k: v for k, v in filters.items() if v is not None}
+        return self.call("terminite_activities_list", args)["activities"]
+
+    def close(self):
+        try:
+            self._proc.stdin.close()
+            self._proc.wait(timeout=3)
+        except Exception:  # noqa: BLE001
+            self._proc.kill()
+
+
+# --- modes -----------------------------------------------------------------
+
+def mode_emit_tools(ag, shape, count, interval_ms):
+    menu = CODEX_TOOLS if shape == "codex" else CLAUDE_SHAREWORTHY
+    for i in range(count):
+        tool, title = menu[i % len(menu)]
+        ag.emit("tool_call", f"{title} (#{i+1})",
+                input=tool, output="ok", status="completed")
+        if interval_ms:
+            time.sleep(interval_ms / 1000.0)
+
+
+def mode_poll(ag, duration_ms, poll_ms, out_path):
+    """Poll for others' activities; record first-sighting (agent-side perf)."""
+    seen = {}                       # id -> agent-side perf_counter of first sighting
+    deadline = time.perf_counter() + duration_ms / 1000.0
+    since = 0
+
+exec
+/bin/zsh -lc "rg -n \"CODEX_TOOLS|emit_tools|share\\(\" agent_mock.py" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+16:  emit_tools   emit N tool-call activities, then linger
+34:CODEX_TOOLS = [
+116:def mode_emit_tools(ag, shape, count, interval_ms):
+117:    menu = CODEX_TOOLS if shape == "codex" else CLAUDE_SHAREWORTHY
+185:    def share(kind, title, **kw):
+193:    share("tool_call", "Edited guide/activities-design.md — added NOTE from E1",
+195:    share("tool_call", "Edited src/acp.rs — wired activity emission",
+201:    share("tool_call", "Ran cargo test — 42 passed",
+204:    share("tool_call", "Ran the E1 regression — green",
+207:    share("agent_message", "Decision: porting ActivityStore to Rust as-is",
+230:                   choices=["emit_tools", "poll", "converse", "worksession"])
+245:        if args.mode == "emit_tools":
+246:            mode_emit_tools(ag, args.shape, args.count, args.interval_ms)
+
+exec
+/bin/zsh -lc "sed -n '30,45p' agent_mock.py" in /Users/danielpastor/dev/terminite/lab/lounge-validation
+ succeeded in 0ms:
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Realistic tool-call menus per shape.
+CODEX_TOOLS = [
+    ("read_file", "Read src/renderer.rs"),
+    ("bash", "cargo build"),
+    ("grep", "grep handle_acp_event"),
+    ("edit_file", "Edit src/acp.rs"),
+    ("read_file", "Read guide/activities-design.md"),
+]
+# Claude-shape: of many internal actions, only these few are worth surfacing.
+CLAUDE_SHAREWORTHY = [
+    ("edit_file", "Edited proto_server.py — added eviction"),
+    ("decision", "Chose proto.log as single timing authority"),
+    ("bash", "Ran the E1 scenario green"),
+
+codex
+I found one other participant: `codex-1`.
+
+They emitted six completed tool-call activities: read `src/renderer.rs`, ran `cargo build`, grepped for `handle_acp_event`, edited `src/acp.rs`, read `guide/activities-design.md`, then read `src/renderer.rs` again. I saw no activity from anyone else.
+tokens used
+47,611
+I found one other participant: `codex-1`.
+
+They emitted six completed tool-call activities: read `src/renderer.rs`, ran `cargo build`, grepped for `handle_acp_event`, edited `src/acp.rs`, read `guide/activities-design.md`, then read `src/renderer.rs` again. I saw no activity from anyone else.

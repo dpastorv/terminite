@@ -1,0 +1,9 @@
+{"t": 50405.965428583, "wall": 1780081539.966654, "op": "server_up", "sock": "/tmp/lounge-realcodex-35621.sock"}
+{"t": 50406.035953125, "wall": 1780081540.037178, "op": "hello", "conn": 1, "actor": "codex-1"}
+{"t": 50406.036179708, "wall": 1780081540.037405, "op": "emit", "id": 1, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.091519125, "wall": 1780081540.0927439, "op": "emit", "id": 2, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.146867916, "wall": 1780081540.148093, "op": "emit", "id": 3, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.202216833, "wall": 1780081540.2034419, "op": "emit", "id": 4, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.257637125, "wall": 1780081540.258861, "op": "emit", "id": 5, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.313049958, "wall": 1780081540.314274, "op": "emit", "id": 6, "by": "codex-1", "kind": "tool_call", "status": "completed", "to": null}
+{"t": 50406.666640708, "wall": 1780081540.667864, "op": "hello", "conn": 2, "actor": "codex-2"}

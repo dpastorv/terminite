@@ -1,0 +1,52 @@
+{
+  "role": "worksession",
+  "actor": "B1",
+  "log": [
+    {
+      "emitted": true,
+      "kind": "tool_call",
+      "title": "Edited guide/activities-design.md \u2014 added NOTE from E1",
+      "id": 1
+    },
+    {
+      "emitted": true,
+      "kind": "tool_call",
+      "title": "Edited src/acp.rs \u2014 wired activity emission",
+      "id": 2
+    },
+    {
+      "emitted": false,
+      "reason": "edited a local scratch note \u2014 not relevant to the room"
+    },
+    {
+      "emitted": false,
+      "reason": "ran `ls` \u2014 navigation noise"
+    },
+    {
+      "emitted": false,
+      "reason": "ran `git status` \u2014 navigation noise"
+    },
+    {
+      "emitted": true,
+      "kind": "tool_call",
+      "title": "Ran cargo test \u2014 42 passed",
+      "id": 3
+    },
+    {
+      "emitted": false,
+      "reason": "ran `cd lab` \u2014 navigation noise"
+    },
+    {
+      "emitted": true,
+      "kind": "tool_call",
+      "title": "Ran the E1 regression \u2014 green",
+      "id": 4
+    },
+    {
+      "emitted": true,
+      "kind": "agent_message",
+      "title": "Decision: porting ActivityStore to Rust as-is",
+      "id": 5
+    }
+  ]
+}
