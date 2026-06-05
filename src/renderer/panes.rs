@@ -558,13 +558,6 @@ pub(super) struct PaneMetrics {
     pub(super) line_height: f32,
 }
 
-pub(super) fn next_pane_scale(current: f32) -> f32 {
-    let idx = PANE_SCALE_PRESETS
-        .iter()
-        .position(|s| (s - current).abs() < 0.01)
-        .unwrap_or(0);
-    PANE_SCALE_PRESETS[(idx + 1) % PANE_SCALE_PRESETS.len()]
-}
 
 impl Pane {
     pub(super) fn single(tab: Tab) -> Self {

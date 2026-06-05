@@ -208,11 +208,6 @@ pub enum SplitDir {
     Horizontal,
 }
 
-/// Cycle the palette index forward by one, wrapping.
-fn next_color_idx(idx: u8) -> u8 {
-    ((idx as usize + 1) % COLOR_PALETTE.len()) as u8
-}
-
 /// Look up `[r, g, b, a]` from the palette at the given index. Out-of-
 /// range falls back to the "none" entry — defensive against stale data.
 fn palette_color(idx: u8) -> [f32; 4] {

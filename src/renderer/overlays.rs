@@ -62,23 +62,27 @@ impl Renderer {
             label_buf: make_modal_buffer(&mut self.font_system, "Copy"),
             action: MenuAction::Copy,
             enabled: has_selection,
+            swatch: None,
         });
         items.push(MenuItem {
             label_buf: make_modal_buffer(&mut self.font_system, "Paste"),
             action: MenuAction::Paste,
             enabled: true,
+            swatch: None,
         });
         if let Some(uri) = link {
             items.push(MenuItem {
                 label_buf: make_modal_buffer(&mut self.font_system, "Open Link"),
                 action: MenuAction::OpenLink(uri),
                 enabled: true,
+                swatch: None,
             });
         }
         items.push(MenuItem {
             label_buf: make_modal_buffer(&mut self.font_system, "Select All"),
             action: MenuAction::SelectAll,
             enabled: true,
+            swatch: None,
         });
 
         // Color items — apply to the active tab + active pane. Each
@@ -92,27 +96,30 @@ impl Renderer {
         items.push(MenuItem {
             label_buf: make_modal_buffer(
                 &mut self.font_system,
-                &format!("Tab color: {tab_color_name}"),
+                &format!("Tab color: {tab_color_name}  ▸"),
             ),
-            action: MenuAction::CycleTabColor,
+            action: MenuAction::SubmenuTabColor,
             enabled: true,
+            swatch: None,
         });
         items.push(MenuItem {
             label_buf: make_modal_buffer(
                 &mut self.font_system,
-                &format!("Pane bg: {pane_bg_name}"),
+                &format!("Pane bg: {pane_bg_name}  ▸"),
             ),
-            action: MenuAction::CyclePaneBg,
+            action: MenuAction::SubmenuPaneBg,
             enabled: true,
+            swatch: None,
         });
         let pane_scale_pct = (self.active_pane_ref().font_scale * 100.0).round() as i32;
         items.push(MenuItem {
             label_buf: make_modal_buffer(
                 &mut self.font_system,
-                &format!("Pane scale: {pane_scale_pct}%"),
+                &format!("Pane scale: {pane_scale_pct}%  ▸"),
             ),
-            action: MenuAction::CyclePaneScale,
+            action: MenuAction::SubmenuPaneScale,
             enabled: true,
+            swatch: None,
         });
 
         // Keep the menu fully on-screen.
@@ -129,6 +136,56 @@ impl Renderer {
             items,
             hovered: None,
         });
+        self.window.request_redraw();
+    }
+
+    /// Color-picker submenu — the palette as swatches, click sets directly
+    /// (drilled into from "Tab color" / "Pane bg"). `pane_bg` picks the target.
+    fn open_color_picker(&mut self, x: f32, y: f32, pane_bg: bool) {
+        let mut items: Vec<MenuItem> = Vec::new();
+        for (idx, (name, color)) in COLOR_PALETTE.iter().enumerate() {
+            let action = if pane_bg {
+                MenuAction::SetPaneBg(idx as u8)
+            } else {
+                MenuAction::SetTabColor(idx as u8)
+            };
+            // Index 0 is the transparent "none" entry — no swatch to draw.
+            let swatch = if idx == 0 { None } else { Some(*color) };
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, &format!("   {name}")),
+                action,
+                enabled: true,
+                swatch,
+            });
+        }
+        self.place_menu(items, x, y);
+    }
+
+    /// Pane-scale (zoom) submenu — the presets as a list, click sets directly.
+    fn open_scale_picker(&mut self, x: f32, y: f32) {
+        let mut items: Vec<MenuItem> = Vec::new();
+        for scale in PANE_SCALE_PRESETS {
+            let pct = (scale * 100.0).round() as i32;
+            items.push(MenuItem {
+                label_buf: make_modal_buffer(&mut self.font_system, &format!("   {pct}%")),
+                action: MenuAction::SetPaneScale(*scale),
+                enabled: true,
+                swatch: None,
+            });
+        }
+        self.place_menu(items, x, y);
+    }
+
+    /// Anchor a freshly-built menu on-screen and show it.
+    fn place_menu(&mut self, items: Vec<MenuItem>, x: f32, y: f32) {
+        let h = items.len() as f32 * MENU_ITEM_H;
+        let mx = x
+            .min(self.surface_config.width as f32 - MENU_WIDTH - 4.0)
+            .max(0.0);
+        let my = y
+            .min(self.surface_config.height as f32 - h - 4.0)
+            .max(0.0);
+        self.context_menu = Some(ContextMenu { x: mx, y: my, items, hovered: None });
         self.window.request_redraw();
     }
 
@@ -164,6 +221,7 @@ impl Renderer {
                     label_buf: make_modal_buffer(&mut self.font_system, &label),
                     action: MenuAction::SetTabKind { pane: pid, kind },
                     enabled: true,
+                    swatch: None,
                 }
             })
             .collect();
@@ -178,6 +236,7 @@ impl Renderer {
             ),
             action: MenuAction::OpenModulesFolder,
             enabled: crate::modules::modules_dir().is_some(),
+            swatch: None,
         });
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = prect.x.max(0.0);
@@ -242,25 +301,22 @@ impl Renderer {
                 let kind = kind.clone();
                 self.set_tab_kind(pane, kind);
             }
-            MenuAction::CycleTabColor => {
-                let tab = self.active_tab_mut();
-                tab.color_idx = next_color_idx(tab.color_idx);
+            // Parents drill into a picker submenu (don't close the menu).
+            MenuAction::SubmenuTabColor => self.open_color_picker(menu.x, menu.y, false),
+            MenuAction::SubmenuPaneBg => self.open_color_picker(menu.x, menu.y, true),
+            MenuAction::SubmenuPaneScale => self.open_scale_picker(menu.x, menu.y),
+            // Leaves set the value directly.
+            MenuAction::SetTabColor(idx) => {
+                self.active_tab_mut().color_idx = *idx;
                 self.window.request_redraw();
             }
-            MenuAction::CyclePaneBg => {
-                let pane = self.active_pane_mut();
-                pane.bg_idx = next_color_idx(pane.bg_idx);
+            MenuAction::SetPaneBg(idx) => {
+                self.active_pane_mut().bg_idx = *idx;
                 self.window.request_redraw();
             }
-            MenuAction::CyclePaneScale => {
+            MenuAction::SetPaneScale(scale) => {
                 let pid = self.active_pane;
-                let current = self
-                    .root_ref()
-                    .find(pid)
-                    .map(|p| p.font_scale)
-                    .unwrap_or(1.0);
-                let next = next_pane_scale(current);
-                self.apply_pane_scale(pid, next);
+                self.apply_pane_scale(pid, *scale);
             }
             MenuAction::OpenModulesFolder => {
                 if let Some(dir) = crate::modules::modules_dir() {
@@ -310,6 +366,17 @@ impl Renderer {
                         MENU_ITEM_H,
                     ],
                     color: MENU_HOVER_BG,
+                });
+            }
+        }
+        // Colour swatches for the picker submenu — drawn at the row's left
+        // edge; the rows' leading spaces keep the label clear of it.
+        for (i, item) in menu.items.iter().enumerate() {
+            if let Some(color) = item.swatch {
+                let row_y = menu.y + i as f32 * MENU_ITEM_H;
+                rects.push(RectInstance {
+                    rect: [menu.x + 14.0, row_y + (MENU_ITEM_H - 18.0) * 0.5, 18.0, 18.0],
+                    color,
                 });
             }
         }
@@ -472,13 +539,15 @@ pub(super) enum MenuAction {
         pane: PaneId,
         kind: TabContentKind,
     },
-    /// Advance the active tab's color band one step through the palette.
-    CycleTabColor,
-    /// Advance the active pane's background tint one step.
-    CyclePaneBg,
-    /// Cycle the active pane's font scale (100% / 80% / 65% / 125% / 150%).
-    /// Triggers a per-pane buffer-metrics rebuild + grid resize.
-    CyclePaneScale,
+    /// Open a picker submenu (a list of swatches / values) instead of
+    /// cycling — drilled into from the parent row.
+    SubmenuTabColor,
+    SubmenuPaneBg,
+    SubmenuPaneScale,
+    /// Leaf picks from those submenus — set directly, no cycling.
+    SetTabColor(u8),
+    SetPaneBg(u8),
+    SetPaneScale(f32),
     /// Reveal `~/.terminite/modules/` in Finder so the user can
     /// drop a new module in. fs-watch picks it up automatically;
     /// no CLI dance needed.
@@ -490,6 +559,9 @@ pub(super) struct MenuItem {
     pub(super) label_buf: Buffer,
     pub(super) action: MenuAction,
     pub(super) enabled: bool,
+    /// A colour swatch drawn at the row's left edge (the color-picker
+    /// submenus). `None` for ordinary text rows.
+    pub(super) swatch: Option<[f32; 4]>,
 }
 
 /// Right-click context menu — a small overlay anchored at the cursor.
