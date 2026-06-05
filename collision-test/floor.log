@@ -1,0 +1,4 @@
+    Finished `dev` profile [optimized + debuginfo] target(s) in 0.29s
+     Running `target/debug/terminite`
+[pty-floor] typed 105 chars → pane 2; Enter in 120ms
+[pty-floor] Enter → pane 2
