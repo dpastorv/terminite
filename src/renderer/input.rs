@@ -482,11 +482,12 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
-        // Ctrl+wheel zooms the font instead of scrolling. We round to whole
-        // pixels, and set_font_size early-returns when the size is unchanged —
-        // so trackpad pixel-deltas (tiny per event) only relayout when they
-        // actually cross an integer, no SIGWINCH storm.
-        if modifiers.control_key() {
+        // Cmd+wheel zooms the font instead of scrolling. (Cmd, not Ctrl —
+        // macOS reserves Ctrl+scroll for its own screen zoom, so it never
+        // reaches us.) We round to whole pixels, and set_font_size early-returns
+        // when the size is unchanged — so trackpad pixel-deltas (tiny per event)
+        // only relayout when they actually cross an integer, no SIGWINCH storm.
+        if modifiers.super_key() {
             let dy = match delta {
                 MouseScrollDelta::LineDelta(_, y) => y * 2.0, // ~2px per wheel notch
                 MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.05, // trackpad: gentle
