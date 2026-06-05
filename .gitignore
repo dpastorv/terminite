@@ -26,3 +26,7 @@ __pycache__/
 # already existing elements were commented out
 
 #/target
+
+# Design / scoping docs — kept on disk locally, not published. history.md stays.
+/guide/*
+!/guide/history.md
