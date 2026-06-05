@@ -38,6 +38,21 @@ pub struct SpanStyle {
     pub italic: bool,
 }
 
+/// One renderable cell: a grapheme placed at an exact grid position. The
+/// per-cell render path draws each of these at `col * cell_advance` so
+/// box-drawing tiles perfectly — alignment comes from the position, not the
+/// shaper. `row` is the 0-based buffer row (snapshot `line - start_vis`), so
+/// screen-Y = `text_top + row * line_height`, matching deco/cursor placement.
+#[derive(Clone, PartialEq)]
+pub struct CellGlyph {
+    pub row: u16,
+    pub col: u16,
+    pub text: String,
+    pub color: Color,
+    pub bold: bool,
+    pub italic: bool,
+}
+
 /// A horizontal run of cells sharing a background color, in cell coordinates.
 /// `line` is signed so -1 can represent the "extra row above the viewport"
 /// used for pixel-smooth scrolling.
@@ -78,6 +93,8 @@ pub struct LinkRun {
 /// One frame's worth of rendering data extracted from the cell grid.
 pub struct Snapshot {
     pub text_runs: Vec<(String, SpanStyle)>,
+    /// Per-cell glyphs for the grid-aligned render path (see `CellGlyph`).
+    pub glyphs: Vec<CellGlyph>,
     pub bg_runs: Vec<BgRun>,
     pub deco_runs: Vec<DecorationRun>,
     pub link_runs: Vec<LinkRun>,
@@ -764,6 +781,7 @@ impl LiveTerm {
         let start_vis: i32 = if has_extra_row { -1 } else { 0 };
 
         let mut text_runs: Vec<(String, SpanStyle)> = Vec::new();
+        let mut glyphs: Vec<CellGlyph> = Vec::new();
         let mut bg_runs: Vec<BgRun> = Vec::new();
         let mut deco_runs: Vec<DecorationRun> = Vec::new();
         let mut link_runs: Vec<LinkRun> = Vec::new();
@@ -922,6 +940,27 @@ impl LiveTerm {
                         current_text.push(*ch);
                     }
                 }
+
+                // Per-cell glyph for the grid-aligned render path. Skip a blank
+                // cell with no combining marks — nothing to draw, and it keeps
+                // the per-frame glyph list to the visible characters only.
+                if cell.c != ' ' || cell.zerowidth().is_some() {
+                    let mut text = String::with_capacity(1);
+                    text.push(cell.c);
+                    if let Some(zw) = cell.zerowidth() {
+                        for ch in zw {
+                            text.push(*ch);
+                        }
+                    }
+                    glyphs.push(CellGlyph {
+                        row: (line - start_vis) as u16,
+                        col: col as u16,
+                        text,
+                        color: text_style.color,
+                        bold: text_style.bold,
+                        italic: text_style.italic,
+                    });
+                }
             }
 
             // Flush open runs at end-of-row.
@@ -971,6 +1010,7 @@ impl LiveTerm {
 
         Snapshot {
             text_runs,
+            glyphs,
             bg_runs,
             deco_runs,
             link_runs,

@@ -478,6 +478,7 @@ impl Renderer {
         // ── Snapshot the pane's active tab ──
         let Snapshot {
             text_runs,
+            glyphs,
             bg_runs,
             deco_runs,
             link_runs,
@@ -506,6 +507,9 @@ impl Renderer {
                 .find_mut(pid)
                 .expect("pane present")
                 .active_tab_mut();
+            // Per-cell glyphs for the grid-aligned render path — store this
+            // frame's placement (shaping is cached in the renderer glyph cache).
+            tab.cell_glyphs = glyphs;
             let stale = tab.buffer_dirty || text_runs != tab.last_text_runs;
             if stale {
                 let default_attrs =

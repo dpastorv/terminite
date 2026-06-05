@@ -17,6 +17,10 @@ pub(super) struct Tab {
     pub(super) live_term: LiveTerm,
     /// This tab's own cosmic-text content buffer.
     pub(super) text_buffer: Buffer,
+    /// Per-cell glyphs from the last snapshot, for the grid-aligned render path.
+    /// Rebuilt each frame the active tab is drawn; cheap (the shaping is cached
+    /// in the renderer's glyph cache, this is just placement data).
+    pub(super) cell_glyphs: Vec<crate::term::CellGlyph>,
     /// Grid size this tab's PTY is currently sized to.
     pub(super) cols: usize,
     pub(super) rows: usize,
@@ -230,6 +234,7 @@ impl Tab {
             dragging: false,
             last_drag_mouse_pos: (0.0, 0.0),
             last_click: None,
+            cell_glyphs: Vec::new(),
             last_text_runs: Vec::new(),
             buffer_dirty: true,
             autoscroll_dir: None,

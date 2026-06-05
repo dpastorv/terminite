@@ -344,6 +344,54 @@ impl Renderer {
         let mut texture_instances: Vec<TextureInstance> = Vec::new();
         let mut texture_bgs: Vec<wgpu::BindGroup> = Vec::new();
 
+        // ── Per-cell glyph cache: every visible shell cell needs a shaped
+        //    single-grapheme buffer (keyed by grapheme + style + size) before
+        //    we can place it at its exact column. Shape any missing ones now;
+        //    a glyph shaped in isolation has no kerning to nudge it off-grid.
+        {
+            let mut needed: std::collections::HashSet<(String, bool, bool, u32)> =
+                std::collections::HashSet::new();
+            {
+                let root = self.root.as_ref().expect("pane tree present");
+                for d in &draws {
+                    let Some(pane) = root.find(d.pid) else { continue };
+                    let tab = pane.active_tab_ref();
+                    if !matches!(tab.kind, TabContentKind::Shell) {
+                        continue;
+                    }
+                    let fs_bits = (self.font_size * pane.font_scale).to_bits();
+                    for g in &tab.cell_glyphs {
+                        let key = (g.text.clone(), g.bold, g.italic, fs_bits);
+                        if !self.glyph_cache.contains_key(&key) {
+                            needed.insert(key);
+                        }
+                    }
+                }
+            }
+            for (text, bold, italic, fs_bits) in needed {
+                // Blunt bound: when the distinct-glyph set explodes, drop it all
+                // and re-warm. Cheap vs. tracking LRU, and re-warm is one frame.
+                if self.glyph_cache.len() >= GLYPH_CACHE_CAP {
+                    self.glyph_cache.clear();
+                }
+                let font_size = f32::from_bits(fs_bits);
+                let scale = font_size / self.font_size;
+                let cell_advance = self.cell_advance * scale;
+                let line_height = (self.line_height * scale).round().max(1.0);
+                let buf = make_glyph_buffer(
+                    &mut self.font_system,
+                    &text,
+                    bold,
+                    italic,
+                    font_size,
+                    line_height,
+                    cell_advance,
+                    &self.font_family,
+                );
+                self.glyph_cache.insert((text, bold, italic, fs_bits), buf);
+            }
+        }
+
         // Content text + per-pane tab-bar labels. Phase 2: every pane's
         // buffers are already refreshed, so we can take the immutable
         // borrows the TextAreas need. Content goes through `text_renderer`,
@@ -420,15 +468,37 @@ impl Renderer {
                         left: (body_left as i32).max(d.bounds.left),
                         ..d.bounds
                     };
-                    content_areas.push(TextArea {
-                        buffer: body_buffer,
-                        left: body_left,
-                        top: d.text_top - scroll_y,
-                        scale: 1.0,
-                        bounds: body_bounds,
-                        default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
-                        custom_glyphs: &[],
-                    });
+                    if matches!(tab_ref.kind, TabContentKind::Shell) {
+                        // Per-cell placement: each grapheme drawn at its exact
+                        // grid position (col*cell_advance, row*line_height) from
+                        // the cached single-glyph buffer, colour applied here.
+                        // This is what makes box-drawing tile perfectly while
+                        // keeping fallback. Position matches the cursor/deco math.
+                        let fs_bits = metrics.font_size.to_bits();
+                        for g in &tab_ref.cell_glyphs {
+                            let key = (g.text.clone(), g.bold, g.italic, fs_bits);
+                            let Some(buf) = self.glyph_cache.get(&key) else { continue };
+                            content_areas.push(TextArea {
+                                buffer: buf,
+                                left: body_left + g.col as f32 * metrics.cell_advance,
+                                top: d.text_top + g.row as f32 * metrics.line_height,
+                                scale: 1.0,
+                                bounds: body_bounds,
+                                default_color: g.color,
+                                custom_glyphs: &[],
+                            });
+                        }
+                    } else {
+                        content_areas.push(TextArea {
+                            buffer: body_buffer,
+                            left: body_left,
+                            top: d.text_top - scroll_y,
+                            scale: 1.0,
+                            bounds: body_bounds,
+                            default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+                            custom_glyphs: &[],
+                        });
+                    }
                     // Gutter labels — one TextArea per first-run of
                     // each source line that has a label. We walk
                     // body's layout_runs (so wrap continuations
@@ -1070,6 +1140,38 @@ pub(super) fn make_content_buffer(
         Shaping::Advanced,
         None,
     );
+    buf.shape_until_scroll(font_system, false);
+    buf
+}
+
+/// Build a single-grapheme buffer for the per-cell render path. Shaped in
+/// isolation (Advanced, so fallback still applies) — no neighbours means no
+/// inter-glyph kerning to knock it off the cell, and `monospace_width` keeps a
+/// wide glyph at a 2-cell advance. Colour is applied per-cell at render via the
+/// TextArea, so one buffer serves every colour.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn make_glyph_buffer(
+    font_system: &mut FontSystem,
+    text: &str,
+    bold: bool,
+    italic: bool,
+    font_size: f32,
+    line_height: f32,
+    cell_advance: f32,
+    family: &str,
+) -> Buffer {
+    let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
+    // Room for a double-width glyph so it isn't wrapped/clipped during shaping.
+    buf.set_size(font_system, Some(cell_advance * 2.0 + 2.0), Some(line_height));
+    buf.set_monospace_width(font_system, Some(cell_advance));
+    let mut attrs = Attrs::new().family(font_family(family));
+    if bold {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if italic {
+        attrs = attrs.style(Style::Italic);
+    }
+    buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
     buf
 }

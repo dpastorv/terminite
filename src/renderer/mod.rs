@@ -59,6 +59,9 @@ const PTY_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
 const PTY_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
 const UNDERLINE_THICKNESS: f32 = 1.5;
+/// Max distinct glyph buffers cached for the per-cell render path before a
+/// wholesale clear — bounds memory (system-impact discipline).
+const GLYPH_CACHE_CAP: usize = 8192;
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
 
@@ -263,6 +266,12 @@ pub struct Renderer {
     queue: wgpu::Queue,
 
     font_system: FontSystem,
+    /// Single-glyph shaped buffers for the per-cell render path, keyed by
+    /// (grapheme, bold, italic, font_size bits). A glyph shaped in isolation has
+    /// no inter-glyph kerning, so placing it at `col * cell_advance` tiles
+    /// box-drawing perfectly while Advanced shaping keeps fallback. Bounded —
+    /// cleared wholesale on overflow (a blunt but allocation-safe cap).
+    glyph_cache: std::collections::HashMap<(String, bool, bool, u32), Buffer>,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
@@ -716,6 +725,7 @@ impl Renderer {
             device,
             queue,
             font_system,
+            glyph_cache: std::collections::HashMap::new(),
             swash_cache,
             viewport,
             atlas,
