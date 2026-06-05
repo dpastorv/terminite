@@ -15,6 +15,7 @@ mod codex_bridge;
 mod config;
 mod config_io;
 mod fileclaims;
+mod fonts;
 mod highlight;
 mod images;
 mod layout;

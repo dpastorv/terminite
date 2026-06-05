@@ -578,6 +578,9 @@ impl Renderer {
         surface.configure(&device, &surface_config);
 
         let mut font_system = FontSystem::new();
+        // Embed terminite's own fixed-pitch fonts so a configured family always
+        // resolves, regardless of the host's installed fonts.
+        crate::fonts::load_bundled(&mut font_system);
 
         // Layout metrics from the config, locked for this run. line_height
         // derives from font_size; cell_advance is measured from the font.

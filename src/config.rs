@@ -151,8 +151,9 @@ pub fn schema() -> Vec<ConfigKey> {
         name, kind, default, hot_reload, doc,
     };
     vec![
-        k("font_family", ConfigKind::String, ConfigValue::String(""), false,
-          "Monospace family. Empty = platform default."),
+        k("font_family", ConfigKind::String,
+          ConfigValue::String(crate::fonts::DEFAULT_FAMILY), false,
+          "Monospace family. Bundled: JetBrains Mono, Fira Code, DM Mono, PT Mono, Roboto Mono. Empty = platform default."),
         k("font_size", ConfigKind::Float, ConfigValue::Float(28.0), false,
           "Content font size in pixels. Startup-applied."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
@@ -198,7 +199,7 @@ pub fn schema() -> Vec<ConfigKey> {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            font_family: String::new(),
+            font_family: crate::fonts::DEFAULT_FAMILY.to_string(),
             font_size: 28.0,
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
