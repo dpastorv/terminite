@@ -62,6 +62,10 @@ pub struct Config {
     /// Window background colour (RGB). Hot-reloaded on focus-gain — set it as a
     /// hex string in config (`background = "#1a1b26"`), click back in, it applies.
     pub background: (u8, u8, u8),
+    /// Draw the `Bn` block-ID labels in the left gutter. Off by default — the
+    /// block model is still tracked from OSC 133, but nothing references blocks
+    /// yet and the labels' anchors can desync across reflow/focus. Hot-reloaded.
+    pub show_block_labels: bool,
     /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
     /// on focus-gain: edit the config in a side pane, click back into
     /// terminite, the new pad takes effect immediately.
@@ -161,6 +165,8 @@ pub fn schema() -> Vec<ConfigKey> {
           "Content font size in pixels. Startup-applied."),
         k("background", ConfigKind::String, ConfigValue::String("#0a0a0f"), true,
           "Window background colour, hex (#rrggbb). Hot-reloaded."),
+        k("show_block_labels", ConfigKind::Bool, ConfigValue::Bool(false), true,
+          "Draw the Bn block-ID labels in the left gutter. Hot-reloaded."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
           "Inset between the pane edge and content (left)."),
         k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
@@ -207,6 +213,7 @@ impl Default for Config {
             font_family: crate::fonts::DEFAULT_FAMILY.to_string(),
             font_size: 28.0,
             background: crate::palette::BACKGROUND_RGB,
+            show_block_labels: false,
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
             // and a noticeable gap between the block label and the line.
@@ -345,6 +352,11 @@ impl Config {
                 "cursor_blink" => {
                     if let Value::Bool(b) = val {
                         self.cursor_blink = b;
+                    }
+                }
+                "show_block_labels" => {
+                    if let Value::Bool(b) = val {
+                        self.show_block_labels = b;
                     }
                 }
                 "comms_delivery" => {

@@ -645,7 +645,13 @@ impl Renderer {
                     });
                     texture_bgs.push(tex.bind_group().clone());
                 }
-                // Block IDs (`Bn`) in the pane's left-gutter strip.
+                // Block IDs (`Bn`) gutter labels — OFF by default. The block
+                // model is still tracked from OSC 133; we just don't draw the
+                // labels, because their anchors can desync from content across
+                // reflow/focus and a wrong label is worse than none. Nothing
+                // references blocks yet, so this is foundation, not surface.
+                // Re-enable with `show_block_labels = true`.
+                if self.config.show_block_labels {
                 // Coords are session-absolute (`abs = history + cursor.line`
                 // at fire time); to find the current screen vl, unwind
                 // both the rows that have since scrolled into history and
@@ -749,6 +755,7 @@ impl Renderer {
                         custom_glyphs: &[],
                     });
                 }
+                } // end if show_block_labels
             }
             // The find bar's text rides in the tab text renderer.
             if let (Some(find), Some((bx, by))) = (self.find.as_ref(), find_bar_origin) {
