@@ -16,8 +16,8 @@ use std::path::PathBuf;
 // multiply into the per-shell `Term` allocation. One unbounded value there
 // is a single multi-gigabyte allocation that OOMs the machine before the
 // per-frame RSS kill switch can react. Every numeric field is clamped.
-const MIN_FONT_SIZE: f32 = 6.0;
-const MAX_FONT_SIZE: f32 = 200.0;
+pub(crate) const MIN_FONT_SIZE: f32 = 6.0;
+pub(crate) const MAX_FONT_SIZE: f32 = 200.0;
 const MAX_PADDING: f32 = 400.0;
 const MAX_SCROLLBACK: i64 = 50_000;
 const MIN_LINE_HEIGHT: f32 = 0.7;

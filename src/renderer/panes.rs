@@ -215,6 +215,65 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Live font-size change — Cmd +/-/0 and Ctrl+wheel zoom. Re-measures the
+    /// cell for the new size, updates every buffer's metrics, regrids + resizes
+    /// the PTYs (`relayout`), and drops the per-cell glyph cache so it re-warms
+    /// at the new size. Clamped to the same bounds as the config field.
+    pub fn set_font_size(&mut self, new_size: f32) {
+        let new_size = new_size.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE);
+        if (new_size - self.font_size).abs() < 0.05 {
+            return;
+        }
+        self.font_size = new_size;
+        self.cell_advance = measure_cell_advance(&mut self.font_system, new_size, &self.font_family);
+        self.line_height = (new_size * LINE_H_RATIO * self.config.line_height).round();
+        let metrics = Metrics::new(self.font_size, self.line_height);
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        for tab in tabs {
+            tab.text_buffer.set_metrics(&mut self.font_system, metrics);
+            tab.buffer_dirty = true;
+        }
+        self.glyph_cache.clear();
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+    }
+
+    /// Nudge the font size by `delta` px (rounded to whole pixels for crisp
+    /// cells). Used by the zoom keys and Ctrl+wheel.
+    pub fn zoom_by(&mut self, delta: f32) {
+        self.set_font_size((self.font_size + delta).round());
+    }
+
+    /// Reset the font size to the configured default.
+    pub fn zoom_reset(&mut self) {
+        self.set_font_size(self.config.font_size);
+    }
+
+    /// Cycle to the next/previous bundled font, live. Re-measures the cell (each
+    /// family has its own advance), drops the glyph cache (keyed by size, not
+    /// family) so glyphs re-shape in the new face, and regrids.
+    pub fn cycle_font(&mut self, forward: bool) {
+        let fams = crate::fonts::families();
+        let n = fams.len();
+        let cur = fams.iter().position(|f| *f == self.font_family).unwrap_or(0);
+        let next = if forward { (cur + 1) % n } else { (cur + n - 1) % n };
+        self.font_family = fams[next].to_string();
+        self.cell_advance =
+            measure_cell_advance(&mut self.font_system, self.font_size, &self.font_family);
+        self.glyph_cache.clear();
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        for tab in tabs {
+            tab.buffer_dirty = true;
+        }
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+        eprintln!("[font] {}", self.font_family);
+    }
+
     /// Mirror the active tab's grid into `grid_cols` / `grid_rows`, which the
     /// mouse / autoscroll paths read.
     pub(super) fn sync_active_grid(&mut self) {

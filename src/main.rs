@@ -579,11 +579,37 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                     }
                                     return;
                                 }
+                                // Cmd+Shift+F: cycle through the bundled fonts.
+                                Some('f') => {
+                                    if let Some(r) = self.renderer.as_mut() {
+                                        r.cycle_font(true);
+                                    }
+                                    return;
+                                }
                                 _ => {}
                             }
                         }
 
                         match ch {
+                            // Zoom: Cmd+= / Cmd++ in, Cmd+- out, Cmd+0 reset.
+                            Some('=') | Some('+') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.zoom_by(2.0);
+                                }
+                                return;
+                            }
+                            Some('-') | Some('_') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.zoom_by(-2.0);
+                                }
+                                return;
+                            }
+                            Some('0') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.zoom_reset();
+                                }
+                                return;
+                            }
                             Some('c') => {
                                 if let Some(r) = self.renderer.as_mut() {
                                     r.copy_selection();

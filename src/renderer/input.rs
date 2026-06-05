@@ -482,6 +482,21 @@ impl Renderer {
     }
 
     pub fn mouse_wheel(&mut self, delta: MouseScrollDelta, modifiers: ModifiersState) {
+        // Ctrl+wheel zooms the font instead of scrolling. We round to whole
+        // pixels, and set_font_size early-returns when the size is unchanged —
+        // so trackpad pixel-deltas (tiny per event) only relayout when they
+        // actually cross an integer, no SIGWINCH storm.
+        if modifiers.control_key() {
+            let dy = match delta {
+                MouseScrollDelta::LineDelta(_, y) => y * 2.0, // ~2px per wheel notch
+                MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.05, // trackpad: gentle
+            };
+            if dy != 0.0 {
+                self.set_font_size((self.font_size + dy).round());
+            }
+            return;
+        }
+
         // The wheel acts on the pane *under the cursor* — you can scroll a
         // pane's history without stealing keyboard focus from another.
         let pid = match self.pane_at(self.mouse_pos.0, self.mouse_pos.1) {
