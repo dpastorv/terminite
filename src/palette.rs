@@ -35,16 +35,16 @@ const fn half(rgb: (u8, u8, u8)) -> (u8, u8, u8) {
     (rgb.0 / 2, rgb.1 / 2, rgb.2 / 2)
 }
 
-pub fn resolve_color(color: AnsiColor) -> Color {
+pub fn resolve_color(color: AnsiColor, fg: (u8, u8, u8)) -> Color {
     let (r, g, b) = match color {
         AnsiColor::Spec(rgb) => (rgb.r, rgb.g, rgb.b),
-        AnsiColor::Named(name) => named_rgb(name),
+        AnsiColor::Named(name) => named_rgb(name, fg),
         AnsiColor::Indexed(idx) => indexed_rgb(idx),
     };
     Color::rgb(r, g, b)
 }
 
-pub fn named_rgb(name: NamedColor) -> (u8, u8, u8) {
+pub fn named_rgb(name: NamedColor, fg: (u8, u8, u8)) -> (u8, u8, u8) {
     match name {
         NamedColor::Black => PALETTE_16[0],
         NamedColor::Red => PALETTE_16[1],
@@ -70,11 +70,12 @@ pub fn named_rgb(name: NamedColor) -> (u8, u8, u8) {
         NamedColor::DimMagenta => half(PALETTE_16[5]),
         NamedColor::DimCyan => half(PALETTE_16[6]),
         NamedColor::DimWhite => half(PALETTE_16[7]),
-        NamedColor::DimForeground => half(DEFAULT_FG),
+        NamedColor::DimForeground => half(fg),
         NamedColor::BrightForeground => (255, 255, 255),
         NamedColor::Background => BACKGROUND_RGB,
         NamedColor::Cursor => (255, 200, 80),
-        _ => DEFAULT_FG,
+        // Foreground and any unlisted name fall back to the configured fg.
+        _ => fg,
     }
 }
 

@@ -509,7 +509,11 @@ impl Renderer {
                             top: d.text_top - scroll_y,
                             scale: 1.0,
                             bounds: body_bounds,
-                            default_color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+                            default_color: Color::rgb(
+                                self.config.foreground.0,
+                                self.config.foreground.1,
+                                self.config.foreground.2,
+                            ),
                             custom_glyphs: &[],
                         });
                     }

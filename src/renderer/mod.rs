@@ -19,7 +19,7 @@ use winit::window::{CursorIcon, Window};
 use crate::blocks::BlockStore;
 use crate::config::{BellStyle, Config, Padding};
 use crate::images::{self, Action};
-use crate::palette::{color_to_floats, DEFAULT_FG};
+use crate::palette::color_to_floats;
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
 use crate::texture::{TextureImage, TextureInstance, TextureRenderer};
@@ -89,10 +89,8 @@ const STRIKEOUT_THICKNESS: f32 = 1.5;
 
 const CURSOR_PAD_X: f32 = 1.0;
 const CURSOR_PAD_Y: f32 = 1.0;
-const CURSOR_COLOR: [f32; 4] = [1.0, 200.0 / 255.0, 80.0 / 255.0, 180.0 / 255.0];
-
-/// Translucent steel-blue selection highlight.
-const SELECTION_COLOR: [f32; 4] = [0.32, 0.46, 0.75, 0.35];
+// Cursor + selection colours are config-driven (see Renderer::cursor_color /
+// selection_color); defaults live in config.rs.
 
 /// Underline drawn beneath OSC 8 hyperlink ranges.
 const LINK_UNDERLINE_COLOR: [f32; 4] = [0.40, 0.60, 0.95, 0.85];
@@ -337,6 +335,9 @@ pub struct Renderer {
     bg_color: wgpu::Color,
     /// Faint tint over the focused pane's content — from config, hot-reloadable.
     focus_tint: [f32; 4],
+    /// Cursor + selection colours — from config, hot-reloadable.
+    cursor_color: [f32; 4],
+    selection_color: [f32; 4],
     pad: Padding,
     /// Block-label inset from the pane's left edge. Label sits in the
     /// strip `[pane.x + gutter_left, pane.x + pad.left]`.
@@ -625,6 +626,8 @@ impl Renderer {
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let bg_color = rgb_to_clear(config.background);
         let focus_tint = rgba_to_floats(config.focus_tint);
+        let cursor_color = rgba_to_floats(config.cursor_color);
+        let selection_color = rgba_to_floats(config.selection_color);
         let pad = config.padding;
         let gutter_left = config.gutter_left;
         let gutter_gap = config.gutter_gap;
@@ -772,6 +775,8 @@ impl Renderer {
             line_height,
             bg_color,
             focus_tint,
+            cursor_color,
+            selection_color,
             pad,
             gutter_left,
             gutter_gap,

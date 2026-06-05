@@ -21,7 +21,7 @@ pub use alacritty_terminal::vte::ansi::CursorShape as CursorShapeKind;
 use glyphon::Color;
 use winit::event_loop::EventLoopProxy;
 
-use crate::palette::{dim_color, resolve_color, BACKGROUND_RGB, DEFAULT_FG};
+use crate::palette::{dim_color, resolve_color, BACKGROUND_RGB};
 use crate::{TabId, UserEvent};
 
 // OS process-introspection helpers (cwd, names, pgid). Re-exported so existing
@@ -761,7 +761,7 @@ impl LiveTerm {
     /// `display_offset` is the number of lines scrolled up into history. We
     /// shift `Line(N)` lookups by `-display_offset` so the snapshot follows
     /// the viewport when the user scrolls back.
-    pub fn snapshot(&self) -> Snapshot {
+    pub fn snapshot(&self, fg: (u8, u8, u8)) -> Snapshot {
         let term = self.term.lock();
         let cursor_style = term.cursor_style();
         let grid = term.grid();
@@ -786,7 +786,7 @@ impl LiveTerm {
         let mut deco_runs: Vec<DecorationRun> = Vec::new();
         let mut link_runs: Vec<LinkRun> = Vec::new();
         let mut current_style = SpanStyle {
-            color: Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2),
+            color: Color::rgb(fg.0, fg.1, fg.2),
             bold: false,
             italic: false,
         };
@@ -824,7 +824,7 @@ impl LiveTerm {
                 let bg_ansi = if inverse { cell.fg } else { cell.bg };
                 let bg_color_opt = match bg_ansi {
                     AnsiColor::Named(NamedColor::Background) => None,
-                    other => Some(resolve_color(other)),
+                    other => Some(resolve_color(other, fg)),
                 };
                 // ── Hyperlink side: cells join a run while the URI matches.
                 let link_uri = cell.hyperlink().map(|h| h.uri().to_string());
@@ -863,7 +863,7 @@ impl LiveTerm {
                 }
 
                 // ── Decorations: underline, double underline, strikeout.
-                let text_style = cell_style(cell);
+                let text_style = cell_style(cell, fg);
                 let text_color = text_style.color;
 
                 let under_state = if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
@@ -1066,10 +1066,10 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// Translate a cell into its text visual style, honoring inverse, dim, hidden.
-pub fn cell_style(cell: &Cell) -> SpanStyle {
+pub fn cell_style(cell: &Cell, fg: (u8, u8, u8)) -> SpanStyle {
     let inverse = cell.flags.contains(Flags::INVERSE);
     let fg_ansi = if inverse { cell.bg } else { cell.fg };
-    let mut color = resolve_color(fg_ansi);
+    let mut color = resolve_color(fg_ansi, fg);
     if cell.flags.contains(Flags::DIM) {
         color = dim_color(color);
     }

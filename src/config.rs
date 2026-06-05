@@ -69,6 +69,12 @@ pub struct Config {
     /// A faint tint over the focused pane's content so it's easy to tell which
     /// pane has keyboard focus. `#rrggbbaa` (alpha = strength). Hot-reloaded.
     pub focus_tint: (u8, u8, u8, u8),
+    /// Default text colour (`#rrggbb`). Hot-reloaded.
+    pub foreground: (u8, u8, u8),
+    /// Cursor colour (`#rrggbbaa`). Hot-reloaded.
+    pub cursor_color: (u8, u8, u8, u8),
+    /// Selection highlight colour (`#rrggbbaa`). Hot-reloaded.
+    pub selection_color: (u8, u8, u8, u8),
     /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
     /// on focus-gain: edit the config in a side pane, click back into
     /// terminite, the new pad takes effect immediately.
@@ -172,6 +178,12 @@ pub fn schema() -> Vec<ConfigKey> {
           "Draw the Bn block-ID labels in the left gutter. Hot-reloaded."),
         k("focus_tint", ConfigKind::String, ConfigValue::String("#ffffff0a"), true,
           "Tint over the focused pane, hex #rrggbbaa (alpha = strength). Hot-reloaded."),
+        k("foreground", ConfigKind::String, ConfigValue::String("#dcdcdc"), true,
+          "Default text colour, hex #rrggbb. Hot-reloaded."),
+        k("cursor_color", ConfigKind::String, ConfigValue::String("#ffc850b4"), true,
+          "Cursor colour, hex #rrggbbaa. Hot-reloaded."),
+        k("selection_color", ConfigKind::String, ConfigValue::String("#5275bf59"), true,
+          "Selection highlight colour, hex #rrggbbaa. Hot-reloaded."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
           "Inset between the pane edge and content (left)."),
         k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
@@ -220,6 +232,9 @@ impl Default for Config {
             background: crate::palette::BACKGROUND_RGB,
             show_block_labels: false,
             focus_tint: (255, 255, 255, 10),
+            foreground: crate::palette::DEFAULT_FG,
+            cursor_color: (255, 200, 80, 180),
+            selection_color: (82, 117, 191, 89),
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
             // and a noticeable gap between the block label and the line.
@@ -369,6 +384,27 @@ impl Config {
                     if let Value::Str(s) = &val {
                         if let Some(rgba) = parse_hex_rgba(s) {
                             self.focus_tint = rgba;
+                        }
+                    }
+                }
+                "foreground" => {
+                    if let Value::Str(s) = &val {
+                        if let Some(rgb) = parse_hex_color(s) {
+                            self.foreground = rgb;
+                        }
+                    }
+                }
+                "cursor_color" => {
+                    if let Value::Str(s) = &val {
+                        if let Some(rgba) = parse_hex_rgba(s) {
+                            self.cursor_color = rgba;
+                        }
+                    }
+                }
+                "selection_color" => {
+                    if let Value::Str(s) = &val {
+                        if let Some(rgba) = parse_hex_rgba(s) {
+                            self.selection_color = rgba;
                         }
                     }
                 }

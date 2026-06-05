@@ -185,13 +185,19 @@ impl Renderer {
             || self.tab_max_width != self.config.tab_max_width;
         let new_bg = rgb_to_clear(self.config.background);
         let new_tint = rgba_to_floats(self.config.focus_tint);
-        let bg_changed = new_bg != self.bg_color;
-        let tint_changed = new_tint != self.focus_tint;
-        if !line_height_changed && !pad_or_gutter_changed && !bg_changed && !tint_changed {
+        let new_cursor = rgba_to_floats(self.config.cursor_color);
+        let new_selection = rgba_to_floats(self.config.selection_color);
+        let colors_changed = new_bg != self.bg_color
+            || new_tint != self.focus_tint
+            || new_cursor != self.cursor_color
+            || new_selection != self.selection_color;
+        if !line_height_changed && !pad_or_gutter_changed && !colors_changed {
             return;
         }
         self.bg_color = new_bg;
         self.focus_tint = new_tint;
+        self.cursor_color = new_cursor;
+        self.selection_color = new_selection;
 
         self.pad = self.config.padding;
         self.gutter_left = self.config.gutter_left;

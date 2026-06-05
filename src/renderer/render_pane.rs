@@ -103,7 +103,8 @@ impl Renderer {
                 // header lines, gaps) falls back to default color.
                 if let Some(highlights) = tab.module_highlights.as_ref() {
                     let mut runs: Vec<(String, Color)> = Vec::new();
-                    let default_color = Color::rgb(DEFAULT_FG.0, DEFAULT_FG.1, DEFAULT_FG.2);
+                    let fg = self.config.foreground;
+                    let default_color = Color::rgb(fg.0, fg.1, fg.2);
                     let mut first_line = true;
                     for (line_idx, line) in body.split('\n').enumerate() {
                         if !first_line {
@@ -331,7 +332,7 @@ impl Renderer {
                         if cr > cl && cb > ct {
                             below.push(RectInstance {
                                 rect: [cl, ct, cr - cl, cb - ct],
-                                color: CURSOR_COLOR,
+                                color: self.cursor_color,
                             });
                         }
                     }
@@ -487,15 +488,17 @@ impl Renderer {
             cursor_shape,
             cursor_blinking,
             has_extra_row,
-        } = self
-            .root
-            .as_mut()
-            .expect("pane tree present")
-            .find_mut(pid)
-            .expect("pane present")
-            .active_tab_mut()
-            .active_term_mut()
-            .snapshot();
+        } = {
+            let fg = self.config.foreground;
+            self.root
+                .as_mut()
+                .expect("pane tree present")
+                .find_mut(pid)
+                .expect("pane present")
+                .active_tab_mut()
+                .active_term_mut()
+                .snapshot(fg)
+        };
         let _ = cursor_blinking;
 
         // ── Refresh the active tab's text buffer if its content changed ──
@@ -601,7 +604,7 @@ impl Renderer {
                         (col_end - col_start) as f32 * cell_advance,
                         line_height,
                     ]) {
-                        below.push(RectInstance { rect: rc, color: SELECTION_COLOR });
+                        below.push(RectInstance { rect: rc, color: self.selection_color });
                     }
                 }
             }
@@ -663,11 +666,11 @@ impl Renderer {
                     [x + w - t, y, t, h],
                 ] {
                     if let Some(rc) = clip(edge) {
-                        below.push(RectInstance { rect: rc, color: CURSOR_COLOR });
+                        below.push(RectInstance { rect: rc, color: self.cursor_color });
                     }
                 }
             } else if let Some(rc) = clip(crect) {
-                below.push(RectInstance { rect: rc, color: CURSOR_COLOR });
+                below.push(RectInstance { rect: rc, color: self.cursor_color });
             }
         }
 
