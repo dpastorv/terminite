@@ -82,6 +82,20 @@ impl Renderer {
         let mut tab_bar: Vec<RectInstance> = Vec::new();
         let mut draws: Vec<PaneDraw> = Vec::with_capacity(layout.len());
         for (pid, rect) in &layout {
+            // Faint lighter tint on the focused pane's content so it's clear
+            // which pane has keyboard focus. Pushed first (behind cell
+            // backgrounds + text); only when the window itself is focused.
+            if self.focused && *pid == active_pane && self.focus_tint[3] > 0.0 {
+                below.push(RectInstance {
+                    rect: [
+                        rect.x,
+                        rect.y + self.tab_bar_height,
+                        rect.w,
+                        (rect.h - self.tab_bar_height).max(0.0),
+                    ],
+                    color: self.focus_tint,
+                });
+            }
             let d = self.render_pane(
                 *pid,
                 *rect,

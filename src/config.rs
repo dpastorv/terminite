@@ -66,6 +66,9 @@ pub struct Config {
     /// block model is still tracked from OSC 133, but nothing references blocks
     /// yet and the labels' anchors can desync across reflow/focus. Hot-reloaded.
     pub show_block_labels: bool,
+    /// A faint tint over the focused pane's content so it's easy to tell which
+    /// pane has keyboard focus. `#rrggbbaa` (alpha = strength). Hot-reloaded.
+    pub focus_tint: (u8, u8, u8, u8),
     /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
     /// on focus-gain: edit the config in a side pane, click back into
     /// terminite, the new pad takes effect immediately.
@@ -167,6 +170,8 @@ pub fn schema() -> Vec<ConfigKey> {
           "Window background colour, hex (#rrggbb). Hot-reloaded."),
         k("show_block_labels", ConfigKind::Bool, ConfigValue::Bool(false), true,
           "Draw the Bn block-ID labels in the left gutter. Hot-reloaded."),
+        k("focus_tint", ConfigKind::String, ConfigValue::String("#ffffff0a"), true,
+          "Tint over the focused pane, hex #rrggbbaa (alpha = strength). Hot-reloaded."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
           "Inset between the pane edge and content (left)."),
         k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
@@ -214,6 +219,7 @@ impl Default for Config {
             font_size: 28.0,
             background: crate::palette::BACKGROUND_RGB,
             show_block_labels: false,
+            focus_tint: (255, 255, 255, 10),
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
             // and a noticeable gap between the block label and the line.
@@ -359,6 +365,13 @@ impl Config {
                         self.show_block_labels = b;
                     }
                 }
+                "focus_tint" => {
+                    if let Value::Str(s) = &val {
+                        if let Some(rgba) = parse_hex_rgba(s) {
+                            self.focus_tint = rgba;
+                        }
+                    }
+                }
                 "comms_delivery" => {
                     if let Value::Bool(b) = val {
                         self.comms_delivery = b;
@@ -418,6 +431,21 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
         u8::from_str_radix(&h[0..2], 16).ok()?,
         u8::from_str_radix(&h[2..4], 16).ok()?,
         u8::from_str_radix(&h[4..6], 16).ok()?,
+    ))
+}
+
+/// Parse a `#rrggbbaa` (or bare `rrggbbaa`) hex colour with alpha. Returns None
+/// on anything malformed.
+fn parse_hex_rgba(s: &str) -> Option<(u8, u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 8 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&h[0..2], 16).ok()?,
+        u8::from_str_radix(&h[2..4], 16).ok()?,
+        u8::from_str_radix(&h[4..6], 16).ok()?,
+        u8::from_str_radix(&h[6..8], 16).ok()?,
     ))
 }
 

@@ -78,6 +78,12 @@ fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
     }
     wgpu::Color { r: lin(r), g: lin(g), b: lin(b), a: 1.0 }
 }
+
+/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. RGB stays sRGB-encoded
+/// (the rect shader linearizes it); alpha is raw.
+fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
+    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
+}
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
 
@@ -329,6 +335,8 @@ pub struct Renderer {
     line_height: f32,
     /// Window background (the wgpu clear) — from config, hot-reloadable.
     bg_color: wgpu::Color,
+    /// Faint tint over the focused pane's content — from config, hot-reloadable.
+    focus_tint: [f32; 4],
     pad: Padding,
     /// Block-label inset from the pane's left edge. Label sits in the
     /// strip `[pane.x + gutter_left, pane.x + pad.left]`.
@@ -616,6 +624,7 @@ impl Renderer {
         let font_family = config.font_family.clone();
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let bg_color = rgb_to_clear(config.background);
+        let focus_tint = rgba_to_floats(config.focus_tint);
         let pad = config.padding;
         let gutter_left = config.gutter_left;
         let gutter_gap = config.gutter_gap;
@@ -762,6 +771,7 @@ impl Renderer {
             cell_advance,
             line_height,
             bg_color,
+            focus_tint,
             pad,
             gutter_left,
             gutter_gap,
