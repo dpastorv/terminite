@@ -1,9 +1,0 @@
-# Example module — a tiny echo demo proving the Bundle 6 wire works.
-# Copy this directory to ~/.terminite/modules/hello/ (or run
-# tools/install-example-module.sh), then pick "Hello" from any pane's
-# dropdown.
-
-name = "Hello"
-version = "0.1.0"
-binary = "./hello.py"
-description = "Echoes what you type — proves the module IPC loop."
