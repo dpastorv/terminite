@@ -1,0 +1,11 @@
+# terminite-native Files module — browse, preview, and edit in one pane.
+#
+# A file navigator: Enter on a folder cds into it, Enter on an image previews
+# it inline, Enter on text/code opens the editor. Esc backs out to the list
+# (the editor guards unsaved changes). Replaces the Nav / Preview / Edit trio.
+
+name = "Files"
+version = "0.1.0"
+binary = "./files.py"
+description = "Browse, preview, and edit files in one pane."
+kind = "data"
