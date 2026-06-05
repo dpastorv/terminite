@@ -61,7 +61,7 @@ const PTY_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(1
 const UNDERLINE_THICKNESS: f32 = 1.5;
 /// Max distinct glyph buffers cached for the per-cell render path before a
 /// wholesale clear — bounds memory (system-impact discipline).
-const GLYPH_CACHE_CAP: usize = 8192;
+const GLYPH_CACHE_CAP: usize = 4096;
 
 /// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
 /// re-encodes on store; convert sRGB → linear here so the authored colour lands
