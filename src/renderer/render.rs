@@ -1143,6 +1143,12 @@ pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32,
         .and_then(|run| run.glyphs.first())
         .map(|glyph| glyph.w)
         .unwrap_or(font_size * 0.6)
+        // Snap the cell to a whole pixel. A fractional advance (e.g. 16.8px)
+        // accumulates rounding error across columns, so by col ~12 a box-drawing
+        // bottom border no longer sits under the verticals above it. Integer
+        // cells = every column boundary lands on a whole pixel → clean tiling.
+        // monospace_width gets this same value, so glyphs snap to it too.
+        .round()
         // Floor it: a degenerate measurement must never explode the grid.
         .max(2.0)
 }
