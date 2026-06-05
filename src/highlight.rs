@@ -62,7 +62,10 @@ impl HighlightStore {
     /// shouldn't happen because we ship the bytes — fall back to
     /// syntect's defaults so the editor still highlights.
     pub fn load() -> Self {
-        let syntaxes = SyntaxSet::load_defaults_newlines();
+        // two-face's extended grammar set (fancy-regex) — ~200 languages
+        // including Rust, TypeScript, TOML, Swift, Kotlin, etc., which syntect's
+        // stock defaults lack. Resolved by extension/name/token the same way.
+        let syntaxes = two_face::syntax::extra_newlines();
         let theme = load_bundled_theme(ONE_DARK_TMTHEME).unwrap_or_else(|| {
             crate::logging::warn(
                 "highlight: embedded One Dark failed to parse — falling back to syntect default",
@@ -190,5 +193,18 @@ mod tests {
         let store = HighlightStore::load();
         let spans = store.highlight("fn main() {}\n", "rs");
         assert!(!spans.is_empty(), "rs body should highlight");
+    }
+
+    #[test]
+    fn common_languages_resolve() {
+        // The languages syntect's stock set lacks (Rust, TypeScript, TOML, …)
+        // must resolve via the two-face extended set — guards the dep swap.
+        let store = HighlightStore::load();
+        for lang in ["rs", "ts", "tsx", "toml", "swift", "kt", "scala", "go", "py", "css", "html", "json", "yaml"] {
+            assert!(
+                store.syntax_for(lang).is_some(),
+                "language `{lang}` should resolve to a syntax"
+            );
+        }
     }
 }

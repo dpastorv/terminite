@@ -37,4 +37,7 @@ serde_json = "1"
 wgpu = "29.0.3"
 winit = "0.30.13"
 tungstenite = "0.29.0"
+# Extended syntect grammar set (Rust, TypeScript, TOML, …) — fancy-regex engine
+# to match our syntect `default-fancy`, so no Oniguruma C dependency.
+two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
 
