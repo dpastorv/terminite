@@ -1,0 +1,24 @@
+terminite
+Copyright 2026 Daniel Pastor
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this software except in compliance with the License. A copy of the License is in
+the LICENSE file at the root of this repository, or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+────────────────────────────────────────────────────────────────────────────
+Third-party components
+────────────────────────────────────────────────────────────────────────────
+
+alacritty_terminal — vendored and modified (vendor/alacritty_terminal/)
+  Copyright the Alacritty contributors.
+  Licensed under Apache-2.0; see vendor/alacritty_terminal/LICENSE-APACHE.
+  Modifications by terminite: OSC 7 (working-directory) and OSC 133
+  (shell-integration / blocks) events surfaced from the terminal model.
+
+Bundled fonts (assets/fonts/)
+  JetBrains Mono, Fira Code, DM Mono, PT Mono, Roboto Mono.
+  Each licensed under the SIL Open Font License 1.1; see the matching
+  OFL-*.txt alongside the font files. The OFL governs the fonts only and is
+  independent of this project's Apache-2.0 license.

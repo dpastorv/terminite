@@ -2,6 +2,7 @@
 name = "terminite"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 # Vendored fork — adds OSC 7 (cwd) + OSC 133 (shell integration) dispatch.
