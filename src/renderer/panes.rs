@@ -183,9 +183,12 @@ impl Renderer {
             || self.highlight_offset_y != self.config.highlight_offset_y
             || self.tab_min_width != self.config.tab_min_width
             || self.tab_max_width != self.config.tab_max_width;
-        if !line_height_changed && !pad_or_gutter_changed {
+        let new_bg = rgb_to_clear(self.config.background);
+        let bg_changed = new_bg != self.bg_color;
+        if !line_height_changed && !pad_or_gutter_changed && !bg_changed {
             return;
         }
+        self.bg_color = new_bg;
 
         self.pad = self.config.padding;
         self.gutter_left = self.config.gutter_left;

@@ -59,6 +59,9 @@ pub struct Config {
     pub font_family: String,
     /// Text size in pixels. Startup-applied.
     pub font_size: f32,
+    /// Window background colour (RGB). Hot-reloaded on focus-gain — set it as a
+    /// hex string in config (`background = "#1a1b26"`), click back in, it applies.
+    pub background: (u8, u8, u8),
     /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
     /// on focus-gain: edit the config in a side pane, click back into
     /// terminite, the new pad takes effect immediately.
@@ -156,6 +159,8 @@ pub fn schema() -> Vec<ConfigKey> {
           "Monospace family. Bundled: JetBrains Mono, Fira Code, DM Mono, PT Mono, Roboto Mono. Empty = platform default."),
         k("font_size", ConfigKind::Float, ConfigValue::Float(28.0), false,
           "Content font size in pixels. Startup-applied."),
+        k("background", ConfigKind::String, ConfigValue::String("#0a0a0f"), true,
+          "Window background colour, hex (#rrggbb). Hot-reloaded."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
           "Inset between the pane edge and content (left)."),
         k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
@@ -201,6 +206,7 @@ impl Default for Config {
         Self {
             font_family: crate::fonts::DEFAULT_FAMILY.to_string(),
             font_size: 28.0,
+            background: crate::palette::BACKGROUND_RGB,
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
             // and a noticeable gap between the block label and the line.
@@ -252,6 +258,13 @@ impl Config {
                     if let Some(n) = val.as_f32() {
                         if n.is_finite() {
                             self.font_size = n.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                        }
+                    }
+                }
+                "background" => {
+                    if let Value::Str(s) = &val {
+                        if let Some(rgb) = parse_hex_color(s) {
+                            self.background = rgb;
                         }
                     }
                 }
@@ -382,6 +395,20 @@ impl Value {
 /// Parse a flat `key = value` subset of TOML: no tables, no arrays. `#`
 /// starts a comment; values may be double/single-quoted strings,
 /// integers, or `true` / `false`.
+/// Parse a `#rrggbb` (or bare `rrggbb`) hex colour. Returns None on anything
+/// malformed — the caller keeps the prior/default colour.
+fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&h[0..2], 16).ok()?,
+        u8::from_str_radix(&h[2..4], 16).ok()?,
+        u8::from_str_radix(&h[4..6], 16).ok()?,
+    ))
+}
+
 fn parse_flat_toml(text: &str) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for raw in text.lines() {

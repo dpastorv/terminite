@@ -23,7 +23,7 @@ use crate::palette::{color_to_floats, DEFAULT_FG};
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
 use crate::texture::{TextureImage, TextureInstance, TextureRenderer};
-use crate::{TabId, UserEvent, BACKGROUND};
+use crate::{TabId, UserEvent};
 
 // The Renderer impl is split across these submodules (same type, multiple
 // impl blocks). Each child sees this module's private items via `use super::*`.
@@ -62,6 +62,12 @@ const UNDERLINE_THICKNESS: f32 = 1.5;
 /// Max distinct glyph buffers cached for the per-cell render path before a
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 8192;
+
+/// Config RGB → wgpu clear colour. Matches the existing channel convention
+/// (raw /255, no extra gamma) so a default config reproduces the old backdrop.
+fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
+    wgpu::Color { r: r as f64 / 255.0, g: g as f64 / 255.0, b: b as f64 / 255.0, a: 1.0 }
+}
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
 
@@ -311,6 +317,8 @@ pub struct Renderer {
     /// config's live values may differ after a focus-reload.
     cell_advance: f32,
     line_height: f32,
+    /// Window background (the wgpu clear) — from config, hot-reloadable.
+    bg_color: wgpu::Color,
     pad: Padding,
     /// Block-label inset from the pane's left edge. Label sits in the
     /// strip `[pane.x + gutter_left, pane.x + pad.left]`.
@@ -597,6 +605,7 @@ impl Renderer {
         let font_size = config.font_size;
         let font_family = config.font_family.clone();
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
+        let bg_color = rgb_to_clear(config.background);
         let pad = config.padding;
         let gutter_left = config.gutter_left;
         let gutter_gap = config.gutter_gap;
@@ -742,6 +751,7 @@ impl Renderer {
             modules,
             cell_advance,
             line_height,
+            bg_color,
             pad,
             gutter_left,
             gutter_gap,

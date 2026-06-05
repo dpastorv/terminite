@@ -857,7 +857,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BACKGROUND),
+                        load: wgpu::LoadOp::Clear(self.bg_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

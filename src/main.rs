@@ -106,14 +106,6 @@ fn trim_crash_dumps(dir: &std::path::Path) {
     }
 }
 
-/// terminite's resting background — deep, quiet, not pure black.
-pub const BACKGROUND: wgpu::Color = wgpu::Color {
-    r: 0.04,
-    g: 0.04,
-    b: 0.06,
-    a: 1.0,
-};
-
 /// Decode the embedded app icon to an RGBA `winit::window::Icon`. Compiled
 /// into the binary via `include_bytes!`, so terminite carries its own
 /// brand asset — no fs read at runtime, no path dependency.
