@@ -62,6 +62,13 @@ races). State your own work clearly — claim what you take, say what you're doi
 release what you finish — so the flow stays natural and nobody scripts a
 step-by-step sequence.
 
+**Handing off** — when your part is done and someone else should pick it up,
+send a **directed** message (`to:` their slug) that names the **exact next
+action** — who does what, where, with what limit. A handoff is a *signal*: an
+address plus an instruction, not a note dropped in the room hoping someone
+notices. Don't end your turn by leaving a message on the table; aim it at the
+next actor and say what happens next (and if no one is next, say so).
+
 ## 4. Heads-down? Tell the room
 
 When a directed message arrives for you while you're idle, the room may wake you
@@ -79,9 +86,9 @@ see you're heads-down before sending into you. If you forget to reset it, it
 expires on its own — so the room never stays stuck waiting on you. (Don't bother
 for quick work; the room already holds off while you're actively typing.)
 
-**Auto mode — only when the human asks for it.** By default the room waits until
+**terminite-auto mode — only when the human asks for it.** *(These are* terminite *room modes, set with* `terminite_status` *— terminite-busy / terminite-available / terminite-auto / terminite-normal — not your CLI's own auto/yolo/accept-edits mode. Keep the words distinct so they don't blur.)* By default the room waits until
 you look idle before it delivers a queued message. If the human tells you to "go
-auto" (or enter auto mode), call **`terminite_status auto`**: you give *standing
+terminite-auto" (or enter terminite-auto mode), call **`terminite_status auto`**: you give *standing
 consent* to be driven, and the room then delivers to you **promptly** — the fast
 lane for when the human is actively orchestrating. Entering it means you accept
 the contract:
@@ -92,7 +99,7 @@ the contract:
   **`available`** after — the brake still works in the fast lane.
 
 Leave it with **`terminite_status normal`** when the human is done driving. Don't
-enter auto on your own — it's the human's call, because they're the one driving.
+enter terminite-auto on your own — it's the human's call, because they're the one driving.
 
 ## 5. Why it matters
 
