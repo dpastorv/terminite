@@ -115,7 +115,9 @@ class Config:
             return f"↑/↓ navigate · Enter to edit · {key['name']}: {key['kind']}{warn}"
         if self.mode == "edit_text":
             key = self.keys[self.idx]
-            return f"{key['name']} = {self.edit_buffer}_   Enter to commit, Esc to cancel"
+            # The value is now typed inline on the row itself; the header just
+            # holds the hint so you're never editing somewhere you can't see.
+            return f"editing {key['name']} — Enter to commit · Esc to cancel"
         return ""
 
     def render(self):
@@ -137,9 +139,14 @@ class Config:
             # tuned vs left at default.
             mod_mark = "‣ " if modified else "  "
             doc = key.get("doc", "")
-            line = f"{mod_mark}{key['name'].ljust(name_w)}  {disp_val}"
-            if doc:
-                line += f"   — {doc}"
+            if self.mode == "edit_text" and i == self.idx:
+                # Type the value right on its row — you always see what you're
+                # changing, instead of editing in a header far from the row.
+                line = f"{mod_mark}{key['name'].ljust(name_w)}  {self.edit_buffer}_"
+            else:
+                line = f"{mod_mark}{key['name'].ljust(name_w)}  {disp_val}"
+                if doc:
+                    line += f"   — {doc}"
             out.append(line)
             gutter.append(str(i + 1).rjust(3))
         if not self.keys:
@@ -151,7 +158,9 @@ class Config:
             "body": "\n".join(out),
             "scroll_to_line": cursor_line,
             "gutter": gutter,
-            "highlight_line": cursor_line if self.mode == "browse" else None,
+            # Highlight the current row in both modes — so the row you're
+            # editing is the row that's lit.
+            "highlight_line": cursor_line,
         })
 
     # --- input ------------------------------------------------------------

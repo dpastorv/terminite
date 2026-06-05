@@ -207,8 +207,24 @@ impl Renderer {
                 // leave the user's wheel position alone when the
                 // target is already on screen.
                 if let Some(line) = tab.pending_ensure_visible.take() {
-                    let target_top = line as f32 * line_height;
-                    let target_bottom = target_top + line_height;
+                    // Map the LOGICAL line to its real VISUAL top by counting
+                    // wrapped rows — long rows wrap to several visual lines, so
+                    // `line * line_height` under-shoots and the target lands
+                    // half-off. Walk layout_runs: rows above add height, rows OF
+                    // the target give its (possibly multi-line) height.
+                    let mut target_top = 0.0_f32;
+                    let mut target_h = 0.0_f32;
+                    for run in buf.layout_runs() {
+                        let li = run.line_i as usize;
+                        if li < line {
+                            target_top += line_height;
+                        } else if li == line {
+                            target_h += line_height;
+                        } else {
+                            break;
+                        }
+                    }
+                    let target_bottom = target_top + target_h.max(line_height);
                     if target_top < tab.module_scroll_y {
                         tab.module_scroll_y = target_top;
                     } else if target_bottom > tab.module_scroll_y + content_h {
