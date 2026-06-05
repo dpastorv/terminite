@@ -488,10 +488,12 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
 /// without grepping the source.
 pub fn documented_default() -> String {
     let mut out = String::from(
-        "# terminite config — edit, then click back into terminite to apply.\n\
-         # Values marked [hot-reload] take effect on focus-gain; [startup] need a\n\
-         # relaunch. Unknown keys and bad values are ignored; delete a line to\n\
-         # fall back to its default.\n\n",
+        "# terminite config. Each key below is shown COMMENTED with its default.\n\
+         # To change one: uncomment its line (remove the `# ` before the key) and\n\
+         # edit the value — or just add `key = value` anywhere. Your line always\n\
+         # wins; the commented defaults are only documentation.\n\
+         # [hot-reload] applies when you click back into terminite; [startup]\n\
+         # needs a relaunch. Bad values are ignored.\n\n",
     );
     for key in schema() {
         let when = if key.hot_reload { "hot-reload" } else { "startup" };
@@ -501,7 +503,9 @@ pub fn documented_default() -> String {
             ConfigValue::Bool(b) => format!("{b}"),
             ConfigValue::String(s) => format!("\"{s}\""),
         };
-        out.push_str(&format!("# {}  [{when}]\n{} = {val}\n\n", key.doc, key.name));
+        // Default shown commented — documentation, not an active assignment, so
+        // a user's own line (anywhere) is never overridden by the default below.
+        out.push_str(&format!("# {}  [{when}]\n# {} = {val}\n\n", key.doc, key.name));
     }
     out
 }
