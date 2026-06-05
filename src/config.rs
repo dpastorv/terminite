@@ -176,7 +176,7 @@ pub fn schema() -> Vec<ConfigKey> {
           "Window background colour, hex (#rrggbb). Hot-reloaded."),
         k("show_block_labels", ConfigKind::Bool, ConfigValue::Bool(false), true,
           "Draw the Bn block-ID labels in the left gutter. Hot-reloaded."),
-        k("focus_tint", ConfigKind::String, ConfigValue::String("#ffffff07"), true,
+        k("focus_tint", ConfigKind::String, ConfigValue::String("#ffffff01"), true,
           "Tint over the focused pane, hex #rrggbbaa (alpha = strength). Hot-reloaded."),
         k("foreground", ConfigKind::String, ConfigValue::String("#dcdcdc"), true,
           "Default text colour, hex #rrggbb. Hot-reloaded."),
@@ -231,7 +231,7 @@ impl Default for Config {
             font_size: 28.0,
             background: crate::palette::BACKGROUND_RGB,
             show_block_labels: false,
-            focus_tint: (255, 255, 255, 7),
+            focus_tint: (255, 255, 255, 1),
             foreground: crate::palette::DEFAULT_FG,
             cursor_color: (255, 200, 80, 180),
             selection_color: (82, 117, 191, 89),
@@ -268,8 +268,20 @@ impl Config {
     /// any unparseable field falls back to the default — never an error.
     pub fn load() -> Self {
         let mut cfg = Config::default();
-        if let Some(text) = Config::path().and_then(|p| std::fs::read_to_string(p).ok()) {
-            cfg.apply(&text);
+        if let Some(path) = Config::path() {
+            if path.exists() {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    cfg.apply(&text);
+                }
+            } else {
+                // First run: write a fully self-documenting config so the file
+                // explains every available key + default, instead of leaving the
+                // user to discover them from the source.
+                if let Some(dir) = path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&path, documented_default());
+            }
         }
         cfg
     }
@@ -468,6 +480,30 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
         u8::from_str_radix(&h[2..4], 16).ok()?,
         u8::from_str_radix(&h[4..6], 16).ok()?,
     ))
+}
+
+/// Render a self-documenting default config from `schema()` — every key with
+/// its description, hot-reload note, and default value. Written on first run and
+/// printed by `terminite config`, so the available knobs are discoverable
+/// without grepping the source.
+pub fn documented_default() -> String {
+    let mut out = String::from(
+        "# terminite config — edit, then click back into terminite to apply.\n\
+         # Values marked [hot-reload] take effect on focus-gain; [startup] need a\n\
+         # relaunch. Unknown keys and bad values are ignored; delete a line to\n\
+         # fall back to its default.\n\n",
+    );
+    for key in schema() {
+        let when = if key.hot_reload { "hot-reload" } else { "startup" };
+        let val = match key.default {
+            ConfigValue::Float(f) => format!("{f:?}"),
+            ConfigValue::Int(i) => format!("{i}"),
+            ConfigValue::Bool(b) => format!("{b}"),
+            ConfigValue::String(s) => format!("\"{s}\""),
+        };
+        out.push_str(&format!("# {}  [{when}]\n{} = {val}\n\n", key.doc, key.name));
+    }
+    out
 }
 
 /// Parse a `#rrggbbaa` (or bare `rrggbbaa`) hex colour with alpha. Returns None

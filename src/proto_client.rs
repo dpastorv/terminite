@@ -77,6 +77,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "files" => Some(cmd_files(args.get(1).map(|s| s.as_str()))),
         "tool-emit-hook" => Some(cmd_tool_emit_hook()),
         "install" => Some(cmd_install(&args[1..])),
+        "config" => Some(cmd_config()),
         "module" => Some(cmd_module(&args[1..])),
         "shell-init" => Some(cmd_shell_init(&args[1..])),
         "mcp" => {
@@ -168,6 +169,18 @@ ENV
 
 fn cmd_tabs() -> ExitCode {
     one_shot(r#"{"id":1,"method":"list_tabs"}"#)
+}
+
+/// `terminite config` — show where the config lives and print every available
+/// key with its docs + default, so the knobs are discoverable without grepping.
+fn cmd_config() -> ExitCode {
+    match crate::config::Config::path() {
+        Some(p) => println!("# config file: {}", p.display()),
+        None => println!("# config file: (no path — is $HOME set?)"),
+    }
+    println!();
+    print!("{}", crate::config::documented_default());
+    ExitCode::SUCCESS
 }
 
 fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
