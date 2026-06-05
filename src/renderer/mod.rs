@@ -63,10 +63,20 @@ const UNDERLINE_THICKNESS: f32 = 1.5;
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 8192;
 
-/// Config RGB → wgpu clear colour. Matches the existing channel convention
-/// (raw /255, no extra gamma) so a default config reproduces the old backdrop.
+/// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
+/// re-encodes on store; convert sRGB → linear here so the authored colour lands
+/// true (otherwise a near-black bg double-encodes to grey). Matches the rect
+/// shader's `srgb_to_linear`.
 fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
-    wgpu::Color { r: r as f64 / 255.0, g: g as f64 / 255.0, b: b as f64 / 255.0, a: 1.0 }
+    fn lin(c: u8) -> f64 {
+        let s = c as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    wgpu::Color { r: lin(r), g: lin(g), b: lin(b), a: 1.0 }
 }
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
