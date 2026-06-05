@@ -1065,8 +1065,9 @@ pub(super) fn make_content_buffer(
         font_system,
         "",
         &Attrs::new().family(font_family(family)),
-        // Grid content: Basic shaping snaps to the cell (see render_pane).
-        Shaping::Basic,
+        // Empty init; content shaping (Advanced, for fallback) is set per
+        // set_rich_text in render_pane. Alignment is from monospace_width.
+        Shaping::Advanced,
         None,
     );
     buf.shape_until_scroll(font_system, false);
@@ -1131,9 +1132,8 @@ pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32,
         font_system,
         "M",
         &Attrs::new().family(font_family(family)),
-        // Measure with the SAME shaping the grid uses, so cell_advance matches
-        // how content is actually laid out.
-        Shaping::Basic,
+        // Match the content shaping path so cell_advance matches layout.
+        Shaping::Advanced,
         None,
     );
     probe.shape_until_scroll(font_system, false);

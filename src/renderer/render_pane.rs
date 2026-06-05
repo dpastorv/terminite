@@ -523,13 +523,14 @@ impl Renderer {
                         (text.as_str(), attrs)
                     }),
                     &default_attrs,
-                    // Grid content uses Basic shaping, not Advanced: a terminal
-                    // is a fixed cell grid, so we must NOT apply ligatures/kerning
-                    // (which reflow glyphs off the cell boundaries). Paired with
-                    // the buffer's monospace_width, this snaps every glyph —
-                    // including box-drawing — to its cell. Fixes misaligned
-                    // "drawings" + the cursor drifting after wide/box glyphs.
-                    Shaping::Basic,
+                    // Advanced shaping so glyphs missing from the primary font
+                    // fall back to a system font (CJK, Hangul, Braille, emoji,
+                    // symbols) — Basic shaping drops them. Box-drawing alignment
+                    // comes from the bundled fixed-pitch font + the buffer's
+                    // monospace_width (which snaps every glyph to its cell), NOT
+                    // from disabling shaping. Box-drawing chars don't ligate or
+                    // kern, so Advanced doesn't reflow them off the grid.
+                    Shaping::Advanced,
                     None,
                 );
                 tab.text_buffer
