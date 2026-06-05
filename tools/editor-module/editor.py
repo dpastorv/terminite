@@ -79,18 +79,46 @@ LANGUAGE_BY_EXT = {
     "md": "md", "markdown": "md",
 }
 
+# Extensionless files identified by their whole name.
+LANGUAGE_BY_NAME = {
+    "makefile": "make", "gnumakefile": "make",
+    "dockerfile": "dockerfile",
+    "cmakelists.txt": "cmake",
+}
 
-def language_for(path):
-    if not path:
-        return None
-    base = os.path.basename(path)
+# Interpreter (basename of a `#!` line) -> language token. Lets a script with
+# no extension still highlight from its shebang.
+SHEBANG_LANG = {
+    "python": "py", "bash": "sh", "sh": "sh", "zsh": "sh", "dash": "sh",
+    "node": "js", "nodejs": "js", "ruby": "rb", "perl": "pl", "php": "php",
+    "lua": "lua",
+}
+
+
+def language_for(path, first_line=None):
+    """Resolve a syntect language token. Tries, in order: whole filename
+    (Makefile/Dockerfile), dotfile stem, extension, then a shebang on the
+    first line (so extensionless scripts highlight)."""
+    base = os.path.basename(path or "").lower()
+    if base in LANGUAGE_BY_NAME:
+        return LANGUAGE_BY_NAME[base]
     if base.startswith("."):
-        # Dotfiles: .gitignore, .bashrc, etc. — best effort.
-        return LANGUAGE_BY_EXT.get(base[1:].lower())
+        hit = LANGUAGE_BY_EXT.get(base[1:])
+        if hit:
+            return hit
     _, dot, ext = base.rpartition(".")
-    if not dot:
-        return None
-    return LANGUAGE_BY_EXT.get(ext.lower())
+    if dot:
+        hit = LANGUAGE_BY_EXT.get(ext)
+        if hit:
+            return hit
+    # No filename match — fall back to a shebang.
+    if first_line and first_line.startswith("#!"):
+        # `#!/usr/bin/env python3` -> python; `#!/bin/bash` -> bash.
+        toks = [t for t in first_line[2:].replace("/", " ").split() if t != "env"]
+        if toks:
+            interp = toks[-1].lower().rstrip("0123456789.")
+            return SHEBANG_LANG.get(interp)
+    return None
 # Total bytes of buffered undo snapshots. Each snapshot is a copy of
 # the full lines list, so 16 MB caps memory use across pathological
 # edit storms without ever blowing past the host's per-module body
@@ -826,7 +854,9 @@ class Editor:
             # Syntax highlighting hint — host runs syntect against
             # the body when this is set. `None` for unknown types
             # (host falls back to plain color rendering).
-            "language": language_for(self.path),
+            "language": language_for(
+                self.path, self.lines[0] if self.lines else None
+            ),
         }
         send(msg)
 
