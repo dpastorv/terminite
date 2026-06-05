@@ -54,9 +54,19 @@ impl Renderer {
     /// field also lands a current-value lookup.
     pub(super) fn config_current_value(&self, key: &crate::config::ConfigKey) -> serde_json::Value {
         let c = &self.config;
+        let hex3 = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
+        let hex4 =
+            |(r, g, b, a): (u8, u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}{a:02x}");
         match key.name {
             "font_family" => serde_json::json!(&c.font_family),
             "font_size" => serde_json::json!(c.font_size),
+            "background" => serde_json::json!(hex3(c.background)),
+            "show_block_labels" => serde_json::json!(c.show_block_labels),
+            "focus_tint" => serde_json::json!(hex4(c.focus_tint)),
+            "foreground" => serde_json::json!(hex3(c.foreground)),
+            "cursor_color" => serde_json::json!(hex4(c.cursor_color)),
+            "selection_color" => serde_json::json!(hex4(c.selection_color)),
+            "comms_delivery" => serde_json::json!(c.comms_delivery),
             "padding_left" => serde_json::json!(c.padding.left),
             "padding_right" => serde_json::json!(c.padding.right),
             "padding_top" => serde_json::json!(c.padding.top),
