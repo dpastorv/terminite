@@ -39,7 +39,13 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-MAX_BYTES = 1_000_000
+# Largest file the editor will load editable. Capped well under the host's
+# 256 KB module-stdout line limit: every render serializes the whole document
+# (plus gutter + spans) as ONE JSON line, so a file near the wire limit would
+# render fine on load then silently stop updating once edits push it over. A
+# bigger file still opens, read-only, showing its first MAX_BYTES. (The real
+# fix for large files is viewport rendering — a later bundle.)
+MAX_BYTES = 128 * 1024
 PAGE_LINES = 16
 GUTTER_PAD = 2  # spaces between line number and content
 
@@ -315,7 +321,10 @@ class Editor:
         size = st.st_size
         if size > MAX_BYTES:
             self.readonly = True
-            self.message = f"file > {MAX_BYTES} bytes — read-only"
+            self.message = (
+                f"{size // 1024} KB > {MAX_BYTES // 1024} KB editable cap — "
+                "read-only (showing the start)"
+            )
         try:
             with open(path, "rb") as f:
                 blob = f.read(min(size, MAX_BYTES))
@@ -747,9 +756,26 @@ class Editor:
         self.delete_selection()
         self.message = f"cut {len(text)} chars"
 
+    def doc_bytes(self):
+        """Approximate on-disk size of the buffer (content + newlines)."""
+        return sum(len(line.encode("utf-8")) for line in self.lines) + len(self.lines)
+
     def paste(self):
         text = system_clipboard_paste()
         if text is None or not text:
+            return
+        # Budget the paste against the editable cap — a multi-MB clipboard
+        # would otherwise balloon the buffer past MAX_BYTES, blow the 256 KB
+        # render wire, and snapshot the whole thing into undo on every edit.
+        budget = MAX_BYTES - self.doc_bytes()
+        if budget <= 0:
+            self.message = "at size limit — paste skipped"
+            return
+        blob = text.encode("utf-8")
+        if len(blob) > budget:
+            text = blob[:budget].decode("utf-8", "ignore")
+            self.insert(text)
+            self.message = "paste truncated to fit the editable cap"
             return
         self.insert(text)
         self.message = "pasted"
