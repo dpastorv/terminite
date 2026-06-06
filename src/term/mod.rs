@@ -375,12 +375,20 @@ impl LiveTerm {
         // controlling terminal).
         let shell_pid = pty.child().id() as i32;
         let master_fd = pty.file().as_raw_fd();
+        // `ptsname()` returns a single shared static buffer that any other
+        // `ptsname()` call overwrites — so two panes spawning at the same
+        // moment raced it into a garbage slave name (the "Last login on
+        // ttys<garbage>" banner). `TIOCPTYGNAME` writes the slave path into
+        // OUR buffer, so concurrent spawns can't collide.
         let slave_fd = unsafe {
-            let slave_path = libc::ptsname(master_fd);
-            if slave_path.is_null() {
-                -1
+            let mut name = [0 as libc::c_char; 128];
+            if libc::ioctl(master_fd, libc::TIOCPTYGNAME as _, name.as_mut_ptr()) == 0 {
+                let resolved = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy();
+                crate::logging::info(&format!("pty slave resolved: {resolved}"));
+                libc::open(name.as_ptr(), libc::O_RDONLY | libc::O_NOCTTY)
             } else {
-                libc::open(slave_path, libc::O_RDONLY | libc::O_NOCTTY)
+                crate::logging::warn("pty: TIOCPTYGNAME failed to resolve the slave name");
+                -1
             }
         };
 
