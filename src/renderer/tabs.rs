@@ -102,6 +102,14 @@ pub(super) struct Tab {
     /// — Nav's selection row, Editor's cursor row. Spans all wrap
     /// segments of that line for continuous highlight.
     pub(super) module_highlight_line: Option<u32>,
+    /// Resolved RGB for the `highlight_line` band when the module
+    /// asked for an accent (danger red / new green). `None` = the
+    /// default subtle amber. Set from `highlight_accent` on the wire.
+    pub(super) module_highlight_accent: Option<[u8; 3]>,
+    /// Raw module-supplied color spans (the NAV / EDIT badges), kept
+    /// for change detection. Resolved into `module_highlights` on the
+    /// body / language / spans change path.
+    pub(super) module_color_spans: Option<Vec<crate::modules::ColorSpan>>,
     /// Syntect language token (e.g. "rs", "py") for this body, or
     /// `None` for plain rendering. Editor sends a value derived
     /// from the file extension; Nav / Preview leave it `None`.
@@ -253,6 +261,8 @@ impl Tab {
             module_gutter: None,
             gutter_buffer: None,
             module_highlight_line: None,
+            module_highlight_accent: None,
+            module_color_spans: None,
             module_language: None,
             module_highlights: None,
             last_focused_path: None,

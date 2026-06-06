@@ -248,6 +248,37 @@ pub struct CursorPos {
     pub col: u32,
 }
 
+/// A semantic color a module can request, resolved to an actual RGB
+/// by the host from the active theme. Modules stay theme-agnostic —
+/// they name the *meaning* (this is dangerous, this is being edited),
+/// terminite owns the palette so colors follow the theme everywhere.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Accent {
+    /// Neutral foreground — the default text color (Nav's badge).
+    Fg,
+    /// "Being edited" — the theme's yellow (Editor's badge).
+    Edit,
+    /// "Newly created" — the theme's green (a fresh file / folder row).
+    New,
+    /// "Destructive" — the theme's red (a row about to be deleted).
+    Danger,
+}
+
+/// One run of body text the module wants painted in an accent color
+/// (foreground). `start`/`end` are byte offsets into source `line`
+/// (0-indexed, body split on `\n`) — same convention as syntect
+/// spans, so they merge into the host's existing per-line span path.
+/// Used for the colored NAV / EDIT mode badges; a module span on a
+/// line takes precedence over syntax highlighting for that line.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ColorSpan {
+    pub line: u32,
+    pub start: u32,
+    pub end: u32,
+    pub accent: Accent,
+}
+
 /// Message a module sends to terminite. Reader thread parses each line
 /// of the module's stdout into one of these and forwards via
 /// `UserEvent::ModuleMessage`.
@@ -294,6 +325,16 @@ pub enum ModuleMessage {
     /// names like "Rust", "Python". `None` = plain rendering.
     /// Highlighting is recomputed on body or language change and
     /// otherwise reused, so steady-state cursor moves stay cheap.
+    ///
+    /// Optional `highlight_accent` recolors the `highlight_line` band.
+    /// Absent = the default subtle amber; `danger` = a red wash (a row
+    /// about to be deleted); `new` = a green wash (a freshly created
+    /// row). The host owns the actual colors via the theme.
+    ///
+    /// Optional `spans` paints runs of body text in an accent color
+    /// (the colored NAV / EDIT mode badges). Each span names a
+    /// semantic `accent`; the host resolves it from the theme. A span
+    /// overrides syntax highlighting on its line.
     SetText {
         body: String,
         #[serde(default)]
@@ -305,7 +346,11 @@ pub enum ModuleMessage {
         #[serde(default)]
         highlight_line: Option<u32>,
         #[serde(default)]
+        highlight_accent: Option<Accent>,
+        #[serde(default)]
         language: Option<String>,
+        #[serde(default)]
+        spans: Option<Vec<ColorSpan>>,
     },
     /// Render the file at `path` as the pane's content. PNG only in
     /// v1; the host returns a `log` line if decode fails so the

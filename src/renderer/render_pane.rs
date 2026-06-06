@@ -256,6 +256,18 @@ impl Renderer {
                 // every visual segment. Each qualifying run pushes
                 // its own clipped rect so the band stays inside the
                 // pane's content box even when partially scrolled.
+                // Band color: the module's accent (danger red / new
+                // green) at a readable wash, else the default subtle
+                // amber for a plain selection / cursor row.
+                let band = match tab.module_highlight_accent {
+                    Some(rgb) => [
+                        rgb[0] as f32 / 255.0,
+                        rgb[1] as f32 / 255.0,
+                        rgb[2] as f32 / 255.0,
+                        0.18,
+                    ],
+                    None => [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.10],
+                };
                 if let Some(buf) = tab.content_buffer.as_ref() {
                     let mut acc = 0.0_f32;
                     let highlight_left = px + gutter_w;
@@ -268,7 +280,7 @@ impl Renderer {
                             if bot > top {
                                 below.push(RectInstance {
                                     rect: [highlight_left, top, highlight_w, bot - top],
-                                    color: [1.0, 200.0 / 255.0, 80.0 / 255.0, 0.10],
+                                    color: band,
                                 });
                             }
                         }

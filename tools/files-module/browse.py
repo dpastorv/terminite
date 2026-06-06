@@ -49,7 +49,7 @@ MAX_ENTRIES = 2000
 HEADER_LINES = 3
 
 
-from wire import send, log  # shared host wire (one stdout stream)
+from wire import send, log, del_word_back, WORD_BACKSPACE  # shared host wire
 
 
 def fmt_size(n):
@@ -99,6 +99,9 @@ class Nav:
         # shown in the status line for a single render, cleared on the
         # next normal-mode keystroke.
         self.notice = ""
+        # One-shot "look here" flag — set after a create / rename so the
+        # new row gets the theme's attention (green) wash for one render.
+        self.attention = False
         # Name-entry state (new file / new folder / rename).
         self.input_action: Optional[str] = None  # new_file | new_folder | rename
         self.input_buf = ""
@@ -219,8 +222,10 @@ class Nav:
             self.render_help()
             return
         # Leading badge marks which Files sub-mode owns the pane — the
-        # navigator. The editor wears the matching ▌ EDIT badge.
-        lines = [f"▌ NAV   {self.cwd}", self.status_line(), ""]
+        # navigator. NAV wears the neutral foreground; the editor wears
+        # the theme's yellow ● EDIT. The badge text is colored via a span.
+        badge = "● NAV"
+        lines = [f"{badge}   {self.cwd}", self.status_line(), ""]
         for i, name in enumerate(self.entries):
             full = self._full_path(name)
             marker = "▸" if i == self.idx else " "
@@ -235,6 +240,14 @@ class Nav:
         # Keep the cursor row visible; status & cwd are pinned above and
         # scroll off the top as needed.
         cursor_line = HEADER_LINES + self.idx if self.entries else 0
+        # Recolor the selection band by intent: red over a row about to
+        # be deleted, green over a freshly created / renamed row, else
+        # the default amber. The host owns the actual theme colors.
+        accent = None
+        if self.mode == "confirm" and self.confirm and self.confirm[0] == "delete":
+            accent = "danger"
+        elif self.attention:
+            accent = "new"
         send({
             "kind": "set_text",
             "body": "\n".join(lines),
@@ -243,6 +256,11 @@ class Nav:
             # host uses for the editor cursor row, so the highlight
             # treatment is consistent across modules.
             "highlight_line": cursor_line if self.entries else None,
+            "highlight_accent": accent,
+            # Color the ● NAV badge (bullet + word) with the neutral fg.
+            "spans": [
+                {"line": 0, "start": 0, "end": len(badge.encode()), "accent": "fg"}
+            ],
         })
 
     def render_help(self):
@@ -295,6 +313,10 @@ class Nav:
             return
         if raw == "\r" or raw == "\n":
             self.exit_input(commit=True)
+            return
+        if raw == WORD_BACKSPACE:
+            self.input_buf = del_word_back(self.input_buf)
+            self.render()
             return
         if raw == "\x7f" or raw == "\b":
             self.input_buf = self.input_buf[:-1]
@@ -360,6 +382,8 @@ class Nav:
             self.notice = f"renamed → {name}"
         else:
             return
+        # Success → draw the eye to the new row for one render.
+        self.attention = True
         self.refresh()
         self._select_name(name)
 
@@ -517,6 +541,11 @@ class Nav:
             # mode so arrow keys / Enter work on the narrowed set.
             self.exit_filter_mode(keep_filter=True)
             return
+        if raw == WORD_BACKSPACE:
+            self.filter = del_word_back(self.filter)
+            self.apply_filter()
+            self.render()
+            return
         if raw == "\x7f" or raw == "\b":
             self.filter = self.filter[:-1]
             self.apply_filter()
@@ -602,8 +631,9 @@ class Nav:
             elif raw in ("n", "N", "\x1b", "\r"):
                 self.exit_confirm(run=False)
             return
-        # Normal mode — clear any one-shot notice from the prior action.
+        # Normal mode — clear any one-shot feedback from the prior action.
         self.notice = ""
+        self.attention = False
         if raw == "\r" or raw == "\n":
             # Propagate the open-signal (if a file) up to the dispatcher.
             return self.activate()

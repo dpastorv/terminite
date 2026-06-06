@@ -365,6 +365,46 @@ impl Renderer {
 
     /// One message from a running module. Updates the tab's cached
     /// body (replace-only in v1) and asks for a redraw.
+    /// Resolve a semantic `Accent` to an RGB from the active theme.
+    /// `Fg` follows the configured foreground (so "neutral" tracks the
+    /// user's text color); the rest are terminite's One Dark-derived
+    /// palette — the same family the editor's syntax theme draws from,
+    /// so a badge and the code beneath it speak the same colors.
+    fn accent_rgb(&self, accent: crate::modules::Accent) -> [u8; 3] {
+        use crate::modules::Accent;
+        match accent {
+            Accent::Fg => {
+                let f = self.config.foreground;
+                [f.0, f.1, f.2]
+            }
+            Accent::Edit => [229, 192, 123],   // One Dark yellow
+            Accent::New => [152, 195, 121],     // One Dark green
+            Accent::Danger => [224, 108, 117],  // One Dark red
+        }
+    }
+
+    /// Turn module-supplied color spans into a per-line span list the
+    /// render path already understands (same shape as syntect output).
+    /// Sparse — only the lines a span touches get entries.
+    fn resolve_spans(
+        &self,
+        spans: &[crate::modules::ColorSpan],
+    ) -> crate::highlight::LineSpans {
+        let max_line = spans.iter().map(|s| s.line as usize).max().unwrap_or(0);
+        let mut out: crate::highlight::LineSpans = vec![Vec::new(); max_line + 1];
+        for s in spans {
+            out[s.line as usize].push(crate::highlight::Span {
+                start: s.start as usize,
+                end: s.end as usize,
+                rgb: self.accent_rgb(s.accent),
+            });
+        }
+        for line in out.iter_mut() {
+            line.sort_by_key(|sp| sp.start);
+        }
+        out
+    }
+
     pub fn handle_module_message(
         &mut self,
         tab_id: TabId,
@@ -377,7 +417,9 @@ impl Renderer {
                 cursor,
                 gutter,
                 highlight_line,
+                highlight_accent,
                 language,
+                spans,
             } => {
                 // Bound the body — a runaway module that tries to
                 // shape a 1 GB string would freeze the window.
@@ -390,13 +432,45 @@ impl Renderer {
                     ));
                     return;
                 }
-                // Highlight up front — we need &self.highlight_store
-                // before we take the mut borrow on tabs. The result
-                // is dropped later if nothing actually changed.
-                let new_highlights = language.as_deref().and_then(|lang| {
-                    let spans = self.highlight_store.highlight(&body, lang);
-                    if spans.is_empty() { None } else { Some(spans) }
-                });
+                // Phase 1 — detect what changed against the tab's current
+                // state via an immutable borrow, BEFORE touching the
+                // highlighter. The common case (a cursor move: same body,
+                // language, spans) falls out here and skips the whole
+                // re-highlight + rich-text rebuild below.
+                let (body_changed, language_changed, spans_changed) = {
+                    let mut tabs: Vec<&Tab> = Vec::new();
+                    self.root
+                        .as_ref()
+                        .expect("pane tree present")
+                        .all_tabs(&mut tabs);
+                    match tabs.into_iter().find(|t| t.id == tab_id) {
+                        Some(tab) => (
+                            tab.last_module_body != body,
+                            tab.module_language != language,
+                            tab.module_color_spans != spans,
+                        ),
+                        None => return,
+                    }
+                };
+                let needs_rehighlight = body_changed || language_changed || spans_changed;
+                let resolved_accent = highlight_accent.map(|a| self.accent_rgb(a));
+                // Phase 2 — re-run syntect + rebuild the badge overlay
+                // only when coloring inputs actually changed. `&self`
+                // borrow is free here (no tab borrow held yet).
+                let new_highlights = if needs_rehighlight {
+                    let syntect_spans = language.as_deref().and_then(|lang| {
+                        let s = self.highlight_store.highlight(&body, lang);
+                        if s.is_empty() { None } else { Some(s) }
+                    });
+                    let module_overlay = spans.as_ref().map(|sp| self.resolve_spans(sp));
+                    // Syntax spans with the module's accent spans (the
+                    // NAV / EDIT badge) overlaid — a module span wins on
+                    // its line.
+                    Some(merge_highlights(syntect_spans, module_overlay))
+                } else {
+                    None
+                };
+                // Phase 3 — apply (mut borrow).
                 let mut tabs: Vec<&mut Tab> = Vec::new();
                 self.root
                     .as_mut()
@@ -407,7 +481,6 @@ impl Renderer {
                 else {
                     return;
                 };
-                let body_changed = tab.last_module_body != body;
                 let new_cursor = cursor.map(|c| (c.line, c.col));
                 let cursor_changed = tab.module_cursor != new_cursor;
                 if body_changed {
@@ -440,15 +513,18 @@ impl Renderer {
                     // frame.
                     tab.gutter_buffer = None;
                 }
-                let highlight_changed = tab.module_highlight_line != highlight_line;
+                let highlight_changed = tab.module_highlight_line != highlight_line
+                    || tab.module_highlight_accent != resolved_accent;
                 tab.module_highlight_line = highlight_line;
-                let language_changed = tab.module_language != language;
-                let needs_rehighlight = body_changed || language_changed;
+                tab.module_highlight_accent = resolved_accent;
                 if language_changed {
                     tab.module_language = language;
                 }
-                if needs_rehighlight {
-                    tab.module_highlights = new_highlights;
+                if spans_changed {
+                    tab.module_color_spans = spans;
+                }
+                if let Some(merged) = new_highlights {
+                    tab.module_highlights = merged;
                     // Force content buffer rebuild — rich-text
                     // construction uses the new spans (or absence
                     // thereof) on the next render pass.
@@ -462,6 +538,7 @@ impl Renderer {
                     || gutter_changed
                     || highlight_changed
                     || language_changed
+                    || spans_changed
                     || scroll_to_line.is_some()
                 {
                     self.window.request_redraw();
@@ -691,6 +768,33 @@ pub(super) fn pane_id_at_path(node: &PaneNode, path: &[u8]) -> Option<PaneId> {
         return pane_id_at_path(child, rest);
     }
     None
+}
+
+/// Combine syntax-highlight spans with the module's accent spans (the
+/// NAV / EDIT badge). A module span replaces syntax spans on its line
+/// entirely — badges live on header lines that aren't meaningfully
+/// code, so "module line wins" keeps the merge trivial and predictable.
+fn merge_highlights(
+    base: Option<crate::highlight::LineSpans>,
+    overlay: Option<crate::highlight::LineSpans>,
+) -> Option<crate::highlight::LineSpans> {
+    match (base, overlay) {
+        (None, None) => None,
+        (Some(b), None) => Some(b),
+        (None, Some(o)) => Some(o),
+        (Some(mut b), Some(o)) => {
+            for (i, spans) in o.into_iter().enumerate() {
+                if spans.is_empty() {
+                    continue;
+                }
+                if i >= b.len() {
+                    b.resize(i + 1, Vec::new());
+                }
+                b[i] = spans;
+            }
+            Some(b)
+        }
+    }
 }
 
 

@@ -277,9 +277,19 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
             Some(b"\x1b[3~".to_vec())
         };
     }
+    if matches!(&event.logical_key, Key::Named(NamedKey::Backspace)) {
+        // Opt+Backspace → delete the previous word. `\x1b\x7f` is what
+        // macOS terminals send; shells (zsh/bash) read it as
+        // backward-kill-word, and terminite's editor + input fields
+        // handle it the same — one gesture, consistent across the app.
+        return if alt > 0 {
+            Some(b"\x1b\x7f".to_vec())
+        } else {
+            Some(b"\x7f".to_vec())
+        };
+    }
     match &event.logical_key {
         Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
-        Key::Named(NamedKey::Backspace) => Some(b"\x7f".to_vec()),
         Key::Named(NamedKey::Tab) => {
             if shift > 0 {
                 Some(b"\x1b[Z".to_vec()) // xterm "back-tab"

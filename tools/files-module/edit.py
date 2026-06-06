@@ -131,9 +131,13 @@ KILL_BUFFER_LINE_CAP = 5000
 KILL_BUFFER_BYTE_CAP = 4 * 1024 * 1024
 SEL_OPEN = "❮"
 SEL_CLOSE = "❯"
+# Mode badge on the status line — painted the theme's yellow via a
+# color span over these bytes (see render()).
+EDIT_BADGE = "● EDIT"
+EDIT_BADGE_BYTES = len(EDIT_BADGE.encode("utf-8"))
 
 
-from wire import send, log  # shared host wire (one stdout stream)
+from wire import send, log, del_word_back, WORD_BACKSPACE  # shared host wire
 
 
 # Words are runs of [\w-] then runs of non-whitespace non-word. The
@@ -198,7 +202,7 @@ class Editor:
         self.last_shell_cwd: Optional[str] = None
 
         # Mode + prompts
-        self.mode = "normal"  # normal | find | save_as | confirm
+        self.mode = "normal"  # normal | find | save_as | confirm | help
         self.confirm: Optional[Tuple[str, dict]] = None  # (kind, payload)
         self.prompt_text = ""
 
@@ -500,6 +504,32 @@ class Editor:
                 return
         self.col = len(line)
 
+    def backspace_word(self):
+        """Alt+Backspace — delete from the cursor back to the previous word
+        boundary (same boundary `word_left` jumps to). At column 0 this
+        falls back to a plain backspace (joins the line above)."""
+        if self.readonly:
+            return
+        if self.sel_anchor is not None:
+            self.push_undo()
+            self.delete_selection()
+            return
+        if self.col == 0:
+            self.backspace()
+            return
+        line = self.lines[self.row]
+        target = 0
+        for m in WORD_RE.finditer(line):
+            if m.end() < self.col:
+                target = m.start()
+            elif m.start() < self.col:
+                target = m.start()
+                break
+        self.push_undo()
+        self.lines[self.row] = line[:target] + line[self.col:]
+        self.col = target
+        self.dirty = True
+
     # --- editing primitives ----------------------------------------------
 
     def insert(self, ch: str):
@@ -764,9 +794,13 @@ class Editor:
                 sel_info = f"  sel:{ec - sc}"
             else:
                 sel_info = f"  sel:{er - sr + 1}L"
-        # Leading ▌ EDIT badge mirrors the navigator's ▌ NAV — a glance
+        # Leading ● EDIT badge mirrors the navigator's ● NAV — a glance
         # at the top-left tells you which Files sub-mode owns the pane.
-        return f"▌ EDIT  {dirty} {path}{ro}   {cursor_pos} / {line_count}L ({progress}%)   {self.eol}{sel_info}"
+        # The badge text is painted the theme's yellow via a span in render().
+        return (
+            f"{EDIT_BADGE}  {dirty} {path}{ro}   {cursor_pos} / {line_count}L "
+            f"({progress}%)   {self.eol}{sel_info}   ^E keys"
+        )
 
     def prompt_line(self):
         if self.mode == "find":
@@ -793,7 +827,28 @@ class Editor:
             return prompts.get(kind, f"confirm {kind}? (y/n)")
         return self.message
 
+    def render_help(self):
+        body = "\n".join([
+            "● EDIT — keys    (any key closes)",
+            "",
+            "  move     arrows    Opt+←→ word    Home/End    PgUp/PgDn",
+            "  select   Shift + move",
+            "  edit     Enter newline    Tab indent    Shift+Tab dedent",
+            "           Backspace / Delete",
+            "  file     Ctrl+S save        Esc  back to files",
+            "  history  Ctrl+Z undo    Ctrl+R redo",
+            "  lines    Ctrl+K cut    Ctrl+Y paste-cut    Ctrl+D duplicate",
+            "  clip     Ctrl+C copy    Ctrl+X cut    Ctrl+V paste",
+            "  find     Ctrl+F or /    Ctrl+G or n / N  next · prev",
+            "",
+            "  Ctrl+E   this help",
+        ])
+        send({"kind": "set_text", "body": body, "highlight_line": None})
+
     def render(self):
+        if self.mode == "help":
+            self.render_help()
+            return
         out = []
         gutter: List[str] = []
         # Header rows (status + prompt + blank) — body content, no
@@ -853,6 +908,12 @@ class Editor:
             "language": language_for(
                 self.path, self.lines[0] if self.lines else None
             ),
+            # Paint the ● EDIT badge (line 0, status) the theme's yellow.
+            # A module span overrides syntax coloring on its line, so the
+            # badge stays yellow even with a language set.
+            "spans": [
+                {"line": 0, "start": 0, "end": EDIT_BADGE_BYTES, "accent": "edit"}
+            ],
         }
         send(msg)
 
@@ -860,6 +921,11 @@ class Editor:
 
     def handle_input(self, raw: str):
         if not raw:
+            return
+        if self.mode == "help":
+            # The keys overlay is modal-lite: any key dismisses it.
+            self.mode = "normal"
+            self.render()
             return
         if self.mode == "find":
             self._find_keystroke(raw)
@@ -884,6 +950,12 @@ class Editor:
         if raw == "\r" or raw == "\n":
             self.exit_find(keep=True)
             return
+        if raw == WORD_BACKSPACE:
+            self.find_query = del_word_back(self.find_query)
+            self.rebuild_find_matches()
+            self.find_idx = 0
+            self.jump_to_match()
+            return
         if raw == "\x7f" or raw == "\b":
             self.find_query = self.find_query[:-1]
             self.rebuild_find_matches()
@@ -904,6 +976,9 @@ class Editor:
             return
         if raw == "\r" or raw == "\n":
             self.exit_save_as(commit=True)
+            return
+        if raw == WORD_BACKSPACE:
+            self.prompt_text = del_word_back(self.prompt_text)
             return
         if raw == "\x7f" or raw == "\b":
             self.prompt_text = self.prompt_text[:-1]
@@ -960,7 +1035,10 @@ class Editor:
             self.last_op_was_kill = False
             return
         # Single-byte control characters.
-        if raw == "\r" or raw == "\n":
+        # Enter in any form makes a new line. Some terminals deliver CR,
+        # some LF, some a CRLF pair as one chunk — accept all three so a
+        # blank line always lands.
+        if raw in ("\r", "\n", "\r\n"):
             self.newline()
         elif raw == "\x7f" or raw == "\b":
             self.backspace()
@@ -985,6 +1063,8 @@ class Editor:
             self.cut_selection()
         elif raw == "\x16":  # Ctrl+V
             self.paste()
+        elif raw == "\x05":  # Ctrl+E — keys overlay
+            self.mode = "help"
         elif raw == "\x06":  # Ctrl+F
             self.enter_find()
         elif raw == "\x07":  # Ctrl+G — next match
@@ -997,11 +1077,18 @@ class Editor:
             self.find_next(1)
         elif raw == "N" and self.find_matches:
             self.find_next(-1)
+        elif "\n" in raw or "\r" in raw:
+            # A multi-line chunk (e.g. bracketed paste) — insert() splits
+            # it into lines (the single-key Enter is handled above).
+            self.insert(raw)
         elif all(ord(c) >= 32 or c == "\t" for c in raw):
             self.insert(raw)
         self.last_op_was_kill = False
 
     def _handle_escape(self, raw):
+        if raw == "\x1b\x7f":          # Alt+Backspace → delete previous word
+            self.backspace_word()
+            return
         # xterm modifier-encoded sequences look like \x1b[1;NX where
         # N is the modifier (2=shift, 3=alt, 4=shift+alt, ...).
         m = re.match(r"^\x1b\[1;(\d+)([A-Za-z])$", raw)
