@@ -562,14 +562,41 @@ impl Renderer {
                 // a small text protocol. Errors go back to the module
                 // as log lines so the module's author can spot them
                 // in the regular log without crashing the pane.
-                let bytes = match std::fs::read(&path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        crate::logging::warn(&format!(
-                            "module tab {}: set_image read failed for {path}: {e}",
-                            tab_id.0
-                        ));
-                        return;
+                // Bounded read: at most the on-disk ceiling + 1 byte. This
+                // caps a giant file AND a non-regular stream (e.g. /dev/zero)
+                // that would otherwise read forever and OOM before the decode
+                // caps (16 MB still / 64 MB animated) ever apply.
+                const MAX_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+                let bytes = {
+                    use std::io::Read;
+                    match std::fs::File::open(&path) {
+                        Ok(f) => {
+                            let mut buf = Vec::new();
+                            match f.take(MAX_IMAGE_FILE_BYTES + 1).read_to_end(&mut buf) {
+                                Ok(_) if buf.len() as u64 > MAX_IMAGE_FILE_BYTES => {
+                                    crate::logging::warn(&format!(
+                                        "module tab {}: set_image {path} exceeds {} bytes — rejected",
+                                        tab_id.0, MAX_IMAGE_FILE_BYTES
+                                    ));
+                                    return;
+                                }
+                                Ok(_) => buf,
+                                Err(e) => {
+                                    crate::logging::warn(&format!(
+                                        "module tab {}: set_image read failed for {path}: {e}",
+                                        tab_id.0
+                                    ));
+                                    return;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            crate::logging::warn(&format!(
+                                "module tab {}: set_image open failed for {path}: {e}",
+                                tab_id.0
+                            ));
+                            return;
+                        }
                     }
                 };
                 let Some(decoded) = crate::images::decode_any_animated(&bytes) else {

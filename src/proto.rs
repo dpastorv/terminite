@@ -282,9 +282,31 @@ impl ProtoServer {
         if let Some(parent) = socket_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // A prior crashed run may have left the socket file in place;
-        // remove it so the bind below doesn't `EADDRINUSE`.
-        let _ = std::fs::remove_file(&socket_path);
+        // A prior crashed run may have left the socket file in place; remove
+        // it so the bind below doesn't `EADDRINUSE`. But only if it really is
+        // a stale socket — never unlink a regular file a misconfigured
+        // TERMINITE_SOCKET points at, and never clobber a live instance.
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if let Ok(meta) = std::fs::symlink_metadata(&socket_path) {
+                if !meta.file_type().is_socket() {
+                    eprintln!(
+                        "terminite: {} exists and is not a socket — refusing to remove it",
+                        socket_path.display()
+                    );
+                    return None;
+                }
+                if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+                    eprintln!(
+                        "terminite: another instance is listening on {} — not taking over",
+                        socket_path.display()
+                    );
+                    return None;
+                }
+                // Socket present but nothing answers → stale, safe to remove.
+                let _ = std::fs::remove_file(&socket_path);
+            }
+        }
         let listener = match UnixListener::bind(&socket_path) {
             Ok(l) => l,
             Err(e) => {
@@ -308,7 +330,15 @@ impl ProtoServer {
 
 impl Drop for ProtoServer {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket_path);
+        // Only unlink if it's still a socket — don't delete a regular file
+        // that replaced the path after we started.
+        use std::os::unix::fs::FileTypeExt;
+        if std::fs::symlink_metadata(&self.socket_path)
+            .map(|m| m.file_type().is_socket())
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_file(&self.socket_path);
+        }
     }
 }
 
