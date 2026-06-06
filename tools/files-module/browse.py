@@ -124,8 +124,9 @@ class Nav:
             n.lower(),
         ))
         # Cap rendered entries so a giant directory doesn't drive the
-        # host's reshape time off a cliff. Filter (`/`) bypasses the
-        # cap by matching against the full pre-cap list.
+        # host's reshape time off a cliff. The filter (`/`) then narrows
+        # this already-capped list — a name past the cap won't be found,
+        # which is why the truncation footer tells you to filter sooner.
         self.entries_truncated = len(names) > MAX_ENTRIES
         if self.entries_truncated:
             names = names[:MAX_ENTRIES]

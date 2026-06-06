@@ -386,13 +386,24 @@ impl Renderer {
     /// Turn module-supplied color spans into a per-line span list the
     /// render path already understands (same shape as syntect output).
     /// Sparse — only the lines a span touches get entries.
+    ///
+    /// `line_count` is the body's actual line count. Spans past the end
+    /// are meaningless (highlights index by body line) AND dangerous: the
+    /// wire `line` is an unvalidated `u32`, so without this clamp a single
+    /// span with `line: u32::MAX` would drive a multi-billion-entry
+    /// allocation on the UI thread. We bound the allocation by the body.
     fn resolve_spans(
         &self,
         spans: &[crate::modules::ColorSpan],
+        line_count: usize,
     ) -> crate::highlight::LineSpans {
-        let max_line = spans.iter().map(|s| s.line as usize).max().unwrap_or(0);
+        let in_bounds = |s: &&crate::modules::ColorSpan| (s.line as usize) < line_count;
+        let max_line = spans.iter().filter(in_bounds).map(|s| s.line as usize).max();
+        let Some(max_line) = max_line else {
+            return Vec::new();
+        };
         let mut out: crate::highlight::LineSpans = vec![Vec::new(); max_line + 1];
-        for s in spans {
+        for s in spans.iter().filter(in_bounds) {
             out[s.line as usize].push(crate::highlight::Span {
                 start: s.start as usize,
                 end: s.end as usize,
@@ -462,7 +473,9 @@ impl Renderer {
                         let s = self.highlight_store.highlight(&body, lang);
                         if s.is_empty() { None } else { Some(s) }
                     });
-                    let module_overlay = spans.as_ref().map(|sp| self.resolve_spans(sp));
+                    let module_overlay = spans
+                        .as_ref()
+                        .map(|sp| self.resolve_spans(sp, body.split('\n').count()));
                     // Syntax spans with the module's accent spans (the
                     // NAV / EDIT badge) overlaid — a module span wins on
                     // its line.

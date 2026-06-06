@@ -125,6 +125,14 @@ def language_for(path, first_line=None):
 # cap (also 16 MB). Older snapshots drop off the front of the ring
 # once the budget is breached.
 UNDO_BYTE_BUDGET = 16 * 1024 * 1024
+# Hard cap on retained snapshots — the byte budget below counts only text
+# characters, so a newline-heavy file (thousands of empty lines) accounts
+# near-zero bytes and would never evict. The count cap bounds that case.
+UNDO_MAX_SNAPSHOTS = 300
+# Per-line overhead added to the byte accounting so empty / short lines
+# still cost something (Python list slot + str object ≈ this many bytes),
+# else a 100k-empty-line buffer reads as 0 bytes and piles up unbounded.
+UNDO_PER_LINE_OVERHEAD = 64
 # Kill buffer caps — protect against unintentional Ctrl+K spam on a
 # huge file leaving us holding the entire file in memory.
 KILL_BUFFER_LINE_CAP = 5000
@@ -245,15 +253,19 @@ class Editor:
 
     def push_undo(self):
         self.undo.append(self.snapshot())
-        # Byte-budgeted eviction. `_undo_bytes` is conservative — sum
-        # of len(line) across snapshots; Python overhead is real but
-        # bounded by the same line count.
-        bytes_used = sum(
-            sum(len(line) for line in snap[0]) for snap in self.undo
-        )
+        # Hard snapshot-count cap first — bounds the newline-heavy case
+        # the byte budget alone misses (near-zero accounted bytes).
+        while len(self.undo) > UNDO_MAX_SNAPSHOTS:
+            self.undo.pop(0)
+        # Byte-budgeted eviction. Count a per-line overhead so empty /
+        # short lines still cost something — a buffer of thousands of
+        # blank lines must not read as zero and accumulate snapshots.
+        def snap_bytes(snap):
+            return sum(len(line) + UNDO_PER_LINE_OVERHEAD for line in snap[0])
+
+        bytes_used = sum(snap_bytes(snap) for snap in self.undo)
         while bytes_used > UNDO_BYTE_BUDGET and len(self.undo) > 1:
-            dropped = self.undo.pop(0)
-            bytes_used -= sum(len(line) for line in dropped[0])
+            bytes_used -= snap_bytes(self.undo.pop(0))
         self.redo.clear()
         self.last_op_was_kill = False
 
