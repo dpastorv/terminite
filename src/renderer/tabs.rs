@@ -337,7 +337,7 @@ impl Renderer {
         pane.tabs.push(tab);
         pane.active_tab = pane.tabs.len() - 1;
         self.sync_active_grid();
-        self.window.set_title(&self.active_tab_ref().title);
+        self.window.set_title(super::io::WINDOW_TITLE);
         self.window.request_redraw();
         self.persist_layout();
     }
@@ -376,7 +376,7 @@ impl Renderer {
                 pane.active_tab = pane.tabs.len() - 1;
             }
             self.sync_active_grid();
-            self.window.set_title(&self.active_tab_ref().title);
+            self.window.set_title(super::io::WINDOW_TITLE);
             self.window.request_redraw();
             self.persist_layout();
             return false;
@@ -403,7 +403,7 @@ impl Renderer {
         }
         pane.active_tab = idx;
         self.sync_active_grid();
-        self.window.set_title(&self.active_tab_ref().title);
+        self.window.set_title(super::io::WINDOW_TITLE);
         self.window.request_redraw();
     }
 

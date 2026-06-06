@@ -363,7 +363,7 @@ impl Renderer {
         self.root = Some(new_root);
         self.relayout();
         self.sync_active_grid();
-        self.window.set_title(&self.active_tab_ref().title);
+        self.window.set_title(super::io::WINDOW_TITLE);
         self.window.request_redraw();
         self.persist_layout();
         false
@@ -423,7 +423,7 @@ impl Renderer {
             }
             self.active_pane = pid;
             self.sync_active_grid();
-            self.window.set_title(&self.active_tab_ref().title);
+            self.window.set_title(super::io::WINDOW_TITLE);
             // Hot-reload also fires on in-window pane focus — editing the
             // config in a side pane and clicking back into a shell pane is
             // the natural tuning loop, and the window focus event doesn't

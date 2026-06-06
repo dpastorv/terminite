@@ -248,7 +248,7 @@ impl Renderer {
         // layout said (we may have moved them above to drive
         // set_tab_kind; reset to the persisted values).
         self.sync_active_grid();
-        self.window.set_title(&self.active_tab_ref().title);
+        self.window.set_title(super::io::WINDOW_TITLE);
         self.window.request_redraw();
         true
     }

@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// The OS window title — the application's identity. Per-tab context (the
+/// shell, cwd, agent, or module) lives in terminite's own tab bar, so the
+/// title bar wears the app name rather than the active shell's process name.
+pub(super) const WINDOW_TITLE: &str = "terminite";
+
 impl Renderer {
     pub fn ring_bell(&mut self, _tab_id: TabId) {
         // `bell_style = "none"` — the BEL does nothing.
@@ -134,7 +139,9 @@ impl Renderer {
             }
         }
         if tab_id == active_id {
-            self.window.set_title(&self.active_tab_ref().title);
+            // The OS window title is the app identity; per-tab context (shell,
+            // cwd, agent, module) lives in the in-app tab bar.
+            self.window.set_title(WINDOW_TITLE);
         }
     }
 
@@ -149,10 +156,8 @@ impl Renderer {
             return;
         }
         self.last_title_refresh = now;
-        let active_id = self.active_tab_ref().id;
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
-        let mut new_window_title: Option<String> = None;
         for tab in tabs {
             // Resolve the title this tab should show.
             let new_auto = match &tab.shell_title {
@@ -188,14 +193,10 @@ impl Renderer {
                 );
                 tab.last_auto_title = new_auto.clone();
                 tab.title = new_auto;
-                if tab.id == active_id {
-                    new_window_title = Some(tab.title.clone());
-                }
             }
         }
-        if let Some(t) = new_window_title {
-            self.window.set_title(&t);
-        }
+        // The window title stays the app name; only the tab bar reflects
+        // these per-tab titles.
     }
 
     /// Write bytes to the active tab's PTY (keyboard input path).
