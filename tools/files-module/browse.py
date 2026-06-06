@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""terminite module: Nav.
+"""terminite module: Nav — the browse half of the Files module.
 
 Native file navigator. Keyboard-only, designed to feel fast in a
 narrow sidebar pane.
 
 Modes:
-  normal    arrow keys / Enter / `o` (open) / `R` (reveal) / etc.
+  normal    arrows / Enter / o (open) / R (reveal) / fs commands / etc.
   filter    after `/` — typing narrows the list live
-  confirm   after `o` or `R` — y/n prompt before running an external
+  input     after n / N / r — type a name (new file / new folder / rename)
+  confirm   y/n prompt: external open / reveal, or a delete warning
+  help      after `?` — a key legend; any key dismisses
 
-Wire (this module → host):
-  set_text   body + optional scroll_to_line to keep cursor on screen
-  set_image  unused
+Filesystem commands (normal mode, all scoped to the current dir):
+  n  new file        N  new folder        r  rename selected
+  d  delete selected (Del key too) — confirms, loud for non-empty folders
+
+Wire (this half → dispatcher / host):
+  set_text   body + scroll_to_line to keep cursor on screen
   log        diagnostics
-  publish_focus  when the user Enters on a file (Preview / Edit react)
+  returns    ("open", path) up to the Files dispatcher on Enter over a file
 
-Wire (host → this module):
-  init       once at startup
+Wire (host → this half, via the dispatcher):
   input      keystrokes (raw bytes as a string)
-  focus      another module published — Nav ignores
   cwd        a shell pane reported a new cwd via OSC 7
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -91,6 +95,14 @@ class Nav:
         self.last_shell_cwd: Optional[str] = None
         self.all_entries: List[str] = []   # before filter
         self.entries: List[str] = []        # after filter
+        # Transient one-shot feedback ("created foo", "delete failed: …")
+        # shown in the status line for a single render, cleared on the
+        # next normal-mode keystroke.
+        self.notice = ""
+        # Name-entry state (new file / new folder / rename).
+        self.input_action: Optional[str] = None  # new_file | new_folder | rename
+        self.input_buf = ""
+        self.input_rename_from: Optional[str] = None
         self.refresh()
 
     # --- listing ----------------------------------------------------------
@@ -136,18 +148,21 @@ class Nav:
     # --- rendering --------------------------------------------------------
 
     def status_line(self):
+        if self.mode == "input":
+            label = {
+                "new_file": "new file",
+                "new_folder": "new folder",
+                "rename": "rename to",
+            }.get(self.input_action, "name")
+            return f"{label}: {self.input_buf}_   Enter = ok, Esc = cancel"
         if self.mode == "filter":
             n = len(self.entries)
             suffix = "no matches" if n == 0 else f"{n} match" + ("es" if n != 1 else "")
             return f"filter: {self.filter}_   ({suffix})  Esc = cancel"
         if self.mode == "confirm" and self.confirm:
-            action, path = self.confirm
-            name = os.path.basename(path) or path
-            prompt = {
-                "open": f"Open {name} in default app?",
-                "reveal": f"Reveal {name} in Finder?",
-            }.get(action, f"{action} {name}?")
-            return f"{prompt}  (y / n)"
+            return self._confirm_prompt()
+        if self.notice:
+            return self.notice
         # Normal mode: cursor position + selection metadata.
         if not self.entries:
             base = "(empty)"
@@ -171,10 +186,41 @@ class Nav:
         shell = ""
         if self.last_shell_cwd and self.last_shell_cwd != self.cwd:
             shell = f"    [s = sync to shell: {self.last_shell_cwd}]"
-        return base + shell
+        return base + shell + "    ? = keys"
+
+    def _confirm_prompt(self):
+        action, path = self.confirm
+        name = os.path.basename(path) or path
+        if action == "open":
+            return f"Open {name} in default app?  (y / n)"
+        if action == "reveal":
+            return f"Reveal {name} in Finder?  (y / n)"
+        if action == "delete":
+            try:
+                is_dir = os.path.isdir(path) and not os.path.islink(path)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                try:
+                    cnt = len(os.listdir(path))
+                except OSError:
+                    cnt = 0
+                if cnt:
+                    return (
+                        f"Delete {name}/ and ALL {cnt} item(s) inside? "
+                        "Cannot be undone.  (y / n)"
+                    )
+                return f"Delete empty folder {name}/?  (y / n)"
+            return f"Delete {name}? Cannot be undone.  (y / n)"
+        return f"{action} {name}?  (y / n)"
 
     def render(self):
-        lines = [self.cwd, self.status_line(), ""]
+        if self.mode == "help":
+            self.render_help()
+            return
+        # Leading badge marks which Files sub-mode owns the pane — the
+        # navigator. The editor wears the matching ▌ EDIT badge.
+        lines = [f"▌ NAV   {self.cwd}", self.status_line(), ""]
         for i, name in enumerate(self.entries):
             full = self._full_path(name)
             marker = "▸" if i == self.idx else " "
@@ -198,6 +244,161 @@ class Nav:
             # treatment is consistent across modules.
             "highlight_line": cursor_line if self.entries else None,
         })
+
+    def render_help(self):
+        body = "\n".join([
+            "▌ NAV — keys",
+            "",
+            "  ↑ ↓         move             Enter / →   open / enter dir",
+            "  ← / Bksp    up a directory   /           filter the list",
+            "  Home / End  first / last     .           toggle hidden",
+            "  o           open in app      R           reveal in Finder",
+            "  s           sync to shell's cwd",
+            "",
+            "  n  new file       N  new folder",
+            "  r  rename         d / Del  delete (asks first)",
+            "",
+            "  ?  this help      any key  dismiss",
+        ])
+        send({"kind": "set_text", "body": body, "highlight_line": None})
+
+    # --- filesystem ops ---------------------------------------------------
+
+    def enter_input(self, action):
+        """Open the name-entry line for new_file / new_folder / rename.
+        Rename pre-fills the selected name so an edit is a few keystrokes."""
+        self.mode = "input"
+        self.input_action = action
+        if action == "rename" and self.entries and self.entries[self.idx] != "..":
+            self.input_buf = self.entries[self.idx]
+            self.input_rename_from = self.entries[self.idx]
+        else:
+            self.input_buf = ""
+            self.input_rename_from = None
+        self.render()
+
+    def exit_input(self, commit):
+        action = self.input_action
+        name = self.input_buf.strip()
+        rename_from = self.input_rename_from
+        self.mode = "normal"
+        self.input_action = None
+        self.input_buf = ""
+        self.input_rename_from = None
+        if commit and name:
+            self._run_fs_op(action, name, rename_from)
+        self.render()
+
+    def input_keystroke(self, raw):
+        if raw == "\x1b":
+            self.exit_input(commit=False)
+            return
+        if raw == "\r" or raw == "\n":
+            self.exit_input(commit=True)
+            return
+        if raw == "\x7f" or raw == "\b":
+            self.input_buf = self.input_buf[:-1]
+            self.render()
+            return
+        if raw.startswith("\x1b"):
+            return  # ignore arrows / control sequences while typing a name
+        if all(ord(c) >= 32 for c in raw):
+            self.input_buf += raw
+            self.render()
+
+    def _bad_name(self, name):
+        """Reject names that would escape the current dir or break listing.
+        We deliberately keep ops single-directory — no path separators."""
+        if not name or name in (".", ".."):
+            return "invalid name"
+        if "/" in name or "\x00" in name:
+            return "name can't contain /"
+        return None
+
+    def _select_name(self, name):
+        """Put the cursor on `name` after a refresh, if it's visible."""
+        if name in self.entries:
+            self.idx = self.entries.index(name)
+
+    def _run_fs_op(self, action, name, rename_from):
+        err = self._bad_name(name)
+        if err:
+            self.notice = err
+            return
+        dest = os.path.join(self.cwd, name)
+        if action == "new_file":
+            if os.path.exists(dest):
+                self.notice = f"{name} already exists"
+                return
+            try:
+                open(dest, "x").close()  # x: fail if it raced into existence
+            except OSError as e:
+                self.notice = f"create failed: {e}"
+                return
+            self.notice = f"created {name}"
+        elif action == "new_folder":
+            if os.path.exists(dest):
+                self.notice = f"{name} already exists"
+                return
+            try:
+                os.mkdir(dest)
+            except OSError as e:
+                self.notice = f"mkdir failed: {e}"
+                return
+            self.notice = f"created {name}/"
+        elif action == "rename":
+            if not rename_from or name == rename_from:
+                return
+            if os.path.exists(dest):
+                self.notice = f"{name} already exists"
+                return
+            try:
+                os.rename(os.path.join(self.cwd, rename_from), dest)
+            except OSError as e:
+                self.notice = f"rename failed: {e}"
+                return
+            self.notice = f"renamed → {name}"
+        else:
+            return
+        self.refresh()
+        self._select_name(name)
+
+    def _request_delete(self):
+        """d / Del → arm the delete confirm for the selected entry."""
+        if not self.entries:
+            return
+        if self.entries[self.idx] == "..":
+            self.notice = "can't delete .."
+            self.render()
+            return
+        self.confirm = ("delete", self._selected_full_path())
+        self.mode = "confirm"
+        self.render()
+
+    def _do_delete(self, path):
+        name = os.path.basename(path) or path
+        prev_idx = self.idx
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError as e:
+            self.notice = f"delete failed: {e}"
+            self.refresh()
+            return
+        self.notice = f"deleted {name}"
+        self.refresh()
+        if self.entries:
+            self.idx = max(0, min(prev_idx, len(self.entries) - 1))
+
+    def enter_help(self):
+        self.mode = "help"
+        self.render()
+
+    def exit_help(self):
+        self.mode = "normal"
+        self.render()
 
     # --- helpers ----------------------------------------------------------
 
@@ -346,7 +547,10 @@ class Nav:
         self.mode = "normal"
         if run and action_path:
             action, path = action_path
-            self._run_external(action, path)
+            if action == "delete":
+                self._do_delete(path)
+            else:
+                self._run_external(action, path)
         self.render()
 
     def _run_external(self, action, path):
@@ -383,6 +587,12 @@ class Nav:
     def handle_input(self, raw):
         if not raw:
             return
+        if self.mode == "input":
+            self.input_keystroke(raw)
+            return
+        if self.mode == "help":
+            self.exit_help()
+            return
         if self.mode == "filter":
             self.filter_keystroke(raw)
             return
@@ -392,7 +602,8 @@ class Nav:
             elif raw in ("n", "N", "\x1b", "\r"):
                 self.exit_confirm(run=False)
             return
-        # Normal mode.
+        # Normal mode — clear any one-shot notice from the prior action.
+        self.notice = ""
         if raw == "\r" or raw == "\n":
             # Propagate the open-signal (if a file) up to the dispatcher.
             return self.activate()
@@ -400,7 +611,10 @@ class Nav:
             self.go_up()
             return
         if raw.startswith("\x1b") and len(raw) > 1:
-            self._navigate(raw)
+            if raw.endswith("[3~"):       # Delete key → delete selected
+                self._request_delete()
+            else:
+                self._navigate(raw)
             return
         # Single printable bindings.
         if raw == "/":
@@ -420,6 +634,24 @@ class Nav:
             return
         if raw == "R":
             self.enter_confirm("reveal")
+            return
+        # Filesystem commands. These shadow type-to-jump for n / r / d
+        # (same trade the o / s bindings already make) — mnemonic wins.
+        if raw == "n":
+            self.enter_input("new_file")
+            return
+        if raw == "N":
+            self.enter_input("new_folder")
+            return
+        if raw == "r":
+            if self.entries and self.entries[self.idx] != "..":
+                self.enter_input("rename")
+            return
+        if raw == "d":
+            self._request_delete()
+            return
+        if raw == "?":
+            self.enter_help()
             return
         # Anything else printable → type-to-jump on first letter.
         if len(raw) == 1 and raw.isalnum():

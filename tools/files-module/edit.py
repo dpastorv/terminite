@@ -764,7 +764,9 @@ class Editor:
                 sel_info = f"  sel:{ec - sc}"
             else:
                 sel_info = f"  sel:{er - sr + 1}L"
-        return f"{dirty} {path}{ro}   {cursor_pos} / {line_count}L ({progress}%)   {self.eol}{sel_info}"
+        # Leading ▌ EDIT badge mirrors the navigator's ▌ NAV — a glance
+        # at the top-left tells you which Files sub-mode owns the pane.
+        return f"▌ EDIT  {dirty} {path}{ro}   {cursor_pos} / {line_count}L ({progress}%)   {self.eol}{sel_info}"
 
     def prompt_line(self):
         if self.mode == "find":
