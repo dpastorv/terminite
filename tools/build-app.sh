@@ -92,6 +92,15 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
+echo "→ ad-hoc signing the bundle"
+# Rust's linker ad-hoc-signs the inner binary but leaves the bundle's
+# Info.plist + resources unbound — which reads as "damaged" once the app is
+# transferred (AirDrop/LocalSend) and quarantined on another Mac. A real
+# ad-hoc sign of the whole bundle binds them so it validates. It's still not
+# notarized (needs a paid Developer ID), so the receiving Mac must clear
+# quarantine once: xattr -dr com.apple.quarantine /Applications/Terminite.app
+codesign --force --deep --sign - "$APP"
+
 echo ""
 echo "✓ built $APP"
 echo ""
