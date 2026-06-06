@@ -477,7 +477,7 @@ fn install_kimi_hook(config_file: &std::path::Path, command: &str) -> Result<boo
     if let Some(parent) = config_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(config_file, doc.to_string())
+    crate::io_util::atomic_write(config_file, doc.to_string().as_bytes(), 0o644)
         .map_err(|e| format!("write {}: {e}", config_file.display()))?;
     Ok(true)
 }
@@ -709,7 +709,7 @@ fn seed_agy_permissions(settings_file: &std::path::Path, entries: &[String]) -> 
             let _ = std::fs::create_dir_all(parent);
         }
         let pretty = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize: {e}"))?;
-        std::fs::write(settings_file, pretty)
+        crate::io_util::atomic_write(settings_file, pretty.as_bytes(), 0o644)
             .map_err(|e| format!("write {}: {e}", settings_file.display()))?;
     }
     Ok(added)
@@ -1044,7 +1044,7 @@ fn install_hook(hooks_file: &std::path::Path, matcher: &str, command: &str) -> R
         "hooks": [ { "type": "command", "command": command } ]
     }));
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(hooks_file, pretty)
+    crate::io_util::atomic_write(hooks_file, pretty.as_bytes(), 0o644)
         .map_err(|e| format!("write {}: {e}", hooks_file.display()))?;
     Ok(true)
 }
@@ -1685,18 +1685,10 @@ fn cmd_shell_init(args: &[String]) -> ExitCode {
     if let Some(parent) = rc.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let tmp = rc.with_extension(format!(
-        "{}.terminite.tmp",
-        rc.extension()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default()
-    ));
-    if let Err(e) = std::fs::write(&tmp, &new_content) {
-        eprintln!("terminite: shell-init: write {} failed: {e}", tmp.display());
-        return ExitCode::from(1);
-    }
-    if let Err(e) = std::fs::rename(&tmp, &rc) {
-        eprintln!("terminite: shell-init: rename to {} failed: {e}", rc.display());
+    // Atomic + mode-preserving: a private rc (0600) stays private, and a
+    // crash mid-write can't truncate the user's shell config. New rc → 0644.
+    if let Err(e) = crate::io_util::atomic_write(&rc, new_content.as_bytes(), 0o644) {
+        eprintln!("terminite: shell-init: write {} failed: {e}", rc.display());
         return ExitCode::from(1);
     }
     eprintln!(
