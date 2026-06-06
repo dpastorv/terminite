@@ -1249,7 +1249,22 @@ fn module_remove(id: &str) -> ExitCode {
         eprintln!("terminite: no $HOME, can't locate modules dir");
         return ExitCode::from(1);
     };
+    // The id must be a single safe path component. Without this, a value like
+    // `..` or `../victim` escapes the modules dir and `remove_dir_all` deletes
+    // arbitrary directories. Reject traversal, separators, and absolutes.
+    let is_one_normal_component = std::path::Path::new(id)
+        .components()
+        .eq(std::iter::once(std::path::Component::Normal(id.as_ref())));
+    if id.is_empty() || !is_one_normal_component {
+        eprintln!("terminite: invalid module id '{id}' (must be a single name)");
+        return ExitCode::from(1);
+    }
     let dst = dst_root.join(id);
+    // Belt and suspenders: the join must stay a direct child of the root.
+    if dst.parent() != Some(dst_root.as_path()) {
+        eprintln!("terminite: refusing to remove a path outside the modules dir");
+        return ExitCode::from(1);
+    }
     if !dst.exists() {
         eprintln!("terminite: {} doesn't exist", dst.display());
         return ExitCode::from(1);

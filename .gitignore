@@ -30,3 +30,7 @@ __pycache__/
 # Design / scoping docs — kept on disk locally, not published. history.md stays.
 /guide/*
 !/guide/history.md
+
+# editor swap files
+*.swp
+*.swo

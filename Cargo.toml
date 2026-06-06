@@ -4,6 +4,16 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+# Release build: fully optimized + slim. LTO + a single codegen unit trade
+# compile time for runtime speed and a smaller binary; strip drops symbols.
+# `panic` is left as the default (unwind) on purpose — terminite leans on Drop
+# for teardown (PTY shutdown, socket removal), and unwind keeps those running
+# on a panic. Add `panic = "abort"` if binary size wins out over that.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
 [dependencies]
 # Vendored fork — adds OSC 7 (cwd) + OSC 133 (shell integration) dispatch.
 # See vendor/. terminite owns these patches; they travel with the repo.
