@@ -66,6 +66,7 @@ impl Renderer {
             "foreground" => serde_json::json!(hex3(c.foreground)),
             "cursor_color" => serde_json::json!(hex4(c.cursor_color)),
             "selection_color" => serde_json::json!(hex4(c.selection_color)),
+            "option_as_meta" => serde_json::json!(c.option_as_meta),
             "comms_delivery" => serde_json::json!(c.comms_delivery),
             "padding_left" => serde_json::json!(c.padding.left),
             "padding_right" => serde_json::json!(c.padding.right),

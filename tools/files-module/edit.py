@@ -530,6 +530,29 @@ class Editor:
         self.col = target
         self.dirty = True
 
+    def delete_word_forward(self):
+        """Alt+d — delete from the cursor to the next word boundary (same
+        boundary `word_right` jumps to). At end of line, joins the line
+        below (like a forward-delete)."""
+        if self.readonly:
+            return
+        if self.sel_anchor is not None:
+            self.push_undo()
+            self.delete_selection()
+            return
+        line = self.lines[self.row]
+        if self.col >= len(line):
+            self.delete_forward()
+            return
+        target = len(line)
+        for m in WORD_RE.finditer(line):
+            if m.end() > self.col:
+                target = m.end()
+                break
+        self.push_undo()
+        self.lines[self.row] = line[:self.col] + line[target:]
+        self.dirty = True
+
     # --- editing primitives ----------------------------------------------
 
     def insert(self, ch: str):
@@ -1088,6 +1111,15 @@ class Editor:
     def _handle_escape(self, raw):
         if raw == "\x1b\x7f":          # Alt+Backspace → delete previous word
             self.backspace_word()
+            return
+        if raw == "\x1bb":             # Alt+b → back one word (Meta, like a shell)
+            self.word_left()
+            return
+        if raw == "\x1bf":             # Alt+f → forward one word
+            self.word_right()
+            return
+        if raw == "\x1bd":             # Alt+d → delete word forward
+            self.delete_word_forward()
             return
         # xterm modifier-encoded sequences look like \x1b[1;NX where
         # N is the modifier (2=shift, 3=alt, 4=shift+alt, ...).

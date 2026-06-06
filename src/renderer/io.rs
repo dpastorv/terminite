@@ -206,6 +206,19 @@ impl Renderer {
         self.last_human_input.insert(id, std::time::Instant::now());
     }
 
+    /// Config flag: should Option/Alt be sent as Meta (`ESC`+char)?
+    pub(crate) fn option_as_meta(&self) -> bool {
+        self.config.option_as_meta
+    }
+
+    /// Whether the active pane's terminal is in application-cursor-keys
+    /// mode (DECCKM) — so the keyboard path can send `ESC O A` instead of
+    /// `ESC [ A` for arrows / Home / End. Data-module panes have no app
+    /// running, so this is `false` and they get the default `ESC [` form.
+    pub(crate) fn active_app_cursor(&self) -> bool {
+        self.active_tab_ref().active_term().mode_flags().app_cursor
+    }
+
     pub fn write_active(&mut self, bytes: Vec<u8>) {
         self.note_human_input();
         let tab = self.active_tab_ref();

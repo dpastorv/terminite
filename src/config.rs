@@ -75,6 +75,12 @@ pub struct Config {
     pub cursor_color: (u8, u8, u8, u8),
     /// Selection highlight colour (`#rrggbbaa`). Hot-reloaded.
     pub selection_color: (u8, u8, u8, u8),
+    /// Treat the Option/Alt key as Meta: `Opt+<char>` sends `ESC`+char
+    /// (the readline / zsh convention — `Opt+f`/`b`/`d`/`.` etc.) instead
+    /// of typing the macOS special glyph. On by default for shell line
+    /// editing; turn off to type accented characters via Option.
+    /// Hot-reloaded.
+    pub option_as_meta: bool,
     /// Per-edge inset from the pane rect to the text grid. Hot-reloaded
     /// on focus-gain: edit the config in a side pane, click back into
     /// terminite, the new pad takes effect immediately.
@@ -184,6 +190,8 @@ pub fn schema() -> Vec<ConfigKey> {
           "Cursor colour, hex #rrggbbaa. Hot-reloaded."),
         k("selection_color", ConfigKind::String, ConfigValue::String("#5275bf59"), true,
           "Selection highlight colour, hex #rrggbbaa. Hot-reloaded."),
+        k("option_as_meta", ConfigKind::Bool, ConfigValue::Bool(true), true,
+          "Treat Option/Alt as Meta: Opt+<char> sends ESC+char (readline Opt+f/b/d/.) instead of a special glyph. Off = type accented chars. Hot-reloaded."),
         k("padding_left", ConfigKind::Float, ConfigValue::Float(55.0), true,
           "Inset between the pane edge and content (left)."),
         k("padding_right", ConfigKind::Float, ConfigValue::Float(24.0), true,
@@ -235,6 +243,7 @@ impl Default for Config {
             foreground: crate::palette::DEFAULT_FG,
             cursor_color: (255, 200, 80, 180),
             selection_color: (82, 117, 191, 89),
+            option_as_meta: true,
             // Defaults dialed in via the hot-reload loop — Daniel's
             // tuned values land more breathing room around the content
             // and a noticeable gap between the block label and the line.
@@ -390,6 +399,11 @@ impl Config {
                 "show_block_labels" => {
                     if let Value::Bool(b) = val {
                         self.show_block_labels = b;
+                    }
+                }
+                "option_as_meta" => {
+                    if let Value::Bool(b) = val {
+                        self.option_as_meta = b;
                     }
                 }
                 "focus_tint" => {

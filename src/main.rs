@@ -7,6 +7,9 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Ime, KeyEvent, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+// `key_without_modifiers` — the layout-base key so Option-as-Meta encodes
+// Opt+f as `ESC f`, not `ESC ƒ`. Platform-specific (macOS / Windows / X11).
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Window, WindowId};
 
 mod activities;
@@ -226,19 +229,47 @@ pub enum UserEvent {
 // ── Input translation ──────────────────────────────────────────────────────
 
 /// Translate a winit key press into the bytes a shell expects on stdin.
-fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
+fn key_to_bytes(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+    option_as_meta: bool,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     if event.state != ElementState::Pressed {
         return None;
     }
+    let shift = modifiers.shift_key() as u8;
+    let alt = modifiers.alt_key() as u8;
+    let ctrl = modifiers.control_key() as u8;
+    let sup = modifiers.super_key() as u8;
     // Ctrl + letter — translate to the corresponding control byte (Ctrl-C = 3,
     // Ctrl-D = 4, …). Driven by the logical key so keyboard layout is honored.
-    if modifiers.control_key() {
+    if ctrl > 0 {
         if let Key::Character(text) = &event.logical_key {
             let mut chars = text.chars();
             if let (Some(c), None) = (chars.next(), chars.next()) {
                 let lower = c.to_ascii_lowercase();
                 if lower.is_ascii_lowercase() {
                     return Some(vec![(lower as u8) & 0x1f]);
+                }
+            }
+        }
+    }
+    // Ctrl+Space → NUL (set-mark in emacs / readline).
+    if ctrl > 0 && matches!(&event.logical_key, Key::Named(NamedKey::Space)) {
+        return Some(vec![0]);
+    }
+    // Option-as-Meta: Opt+<char> → ESC + char (the readline / zsh Meta
+    // convention: Opt+f/b/d/. etc.). `key_without_modifiers` gives the
+    // layout-base key so Opt+f is `ESC f`, not `ESC ƒ`. Gated by config so
+    // Option can still type accented chars when off. Ctrl / Cmd combos are
+    // handled above / by the caller, so exclude them here.
+    if option_as_meta && alt > 0 && ctrl == 0 && sup == 0 {
+        if let Key::Character(text) = event.key_without_modifiers() {
+            let mut chars = text.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                if c.is_ascii() && !c.is_control() {
+                    return Some(vec![0x1b, c as u8]);
                 }
             }
         }
@@ -250,9 +281,6 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
     // `Ctrl+Shift+Alt = 8`. Lets editor modules read Shift+Arrow as
     // selection extension and Opt+Arrow as word jump, and gives
     // shells (bash/zsh) the modifier info their key bindings expect.
-    let shift = modifiers.shift_key() as u8;
-    let alt = modifiers.alt_key() as u8;
-    let ctrl = modifiers.control_key() as u8;
     let mod_num = 1 + shift + alt * 2 + ctrl * 4;
     let arrow_letter = match &event.logical_key {
         Key::Named(NamedKey::ArrowUp) => Some(b'A'),
@@ -266,6 +294,9 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
     if let Some(letter) = arrow_letter {
         return if mod_num > 1 {
             Some(format!("\x1b[1;{mod_num}{}", letter as char).into_bytes())
+        } else if app_cursor {
+            // DECCKM (application cursor keys, e.g. vim): SS3 form.
+            Some(vec![b'\x1b', b'O', letter])
         } else {
             Some(vec![b'\x1b', b'[', letter])
         };
@@ -278,18 +309,26 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
         };
     }
     if matches!(&event.logical_key, Key::Named(NamedKey::Backspace)) {
-        // Opt+Backspace → delete the previous word. `\x1b\x7f` is what
-        // macOS terminals send; shells (zsh/bash) read it as
-        // backward-kill-word, and terminite's editor + input fields
+        // Opt+Backspace and Ctrl+Backspace → delete the previous word.
+        // `\x1b\x7f` is what macOS terminals send; shells (zsh/bash) read
+        // it as backward-kill-word, and terminite's editor + input fields
         // handle it the same — one gesture, consistent across the app.
-        return if alt > 0 {
+        return if alt > 0 || ctrl > 0 {
             Some(b"\x1b\x7f".to_vec())
         } else {
             Some(b"\x7f".to_vec())
         };
     }
     match &event.logical_key {
-        Key::Named(NamedKey::Enter) => Some(b"\r".to_vec()),
+        Key::Named(NamedKey::Enter) => {
+            if alt > 0 {
+                Some(b"\x1b\r".to_vec()) // Alt+Enter → ESC CR
+            } else if shift > 0 {
+                Some(b"\n".to_vec()) // Shift+Enter → LF
+            } else {
+                Some(b"\r".to_vec())
+            }
+        }
         Key::Named(NamedKey::Tab) => {
             if shift > 0 {
                 Some(b"\x1b[Z".to_vec()) // xterm "back-tab"
@@ -300,6 +339,22 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
         Key::Named(NamedKey::Escape) => Some(b"\x1b".to_vec()),
         Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
         Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
+        Key::Named(NamedKey::Insert) => Some(b"\x1b[2~".to_vec()),
+        // Function keys — F1–F4 use the SS3 form, F5–F12 the CSI `~`
+        // form (with xterm's gaps at 16 and 22). For TUIs: vim, htop,
+        // mc, nano, less.
+        Key::Named(NamedKey::F1) => Some(b"\x1bOP".to_vec()),
+        Key::Named(NamedKey::F2) => Some(b"\x1bOQ".to_vec()),
+        Key::Named(NamedKey::F3) => Some(b"\x1bOR".to_vec()),
+        Key::Named(NamedKey::F4) => Some(b"\x1bOS".to_vec()),
+        Key::Named(NamedKey::F5) => Some(b"\x1b[15~".to_vec()),
+        Key::Named(NamedKey::F6) => Some(b"\x1b[17~".to_vec()),
+        Key::Named(NamedKey::F7) => Some(b"\x1b[18~".to_vec()),
+        Key::Named(NamedKey::F8) => Some(b"\x1b[19~".to_vec()),
+        Key::Named(NamedKey::F9) => Some(b"\x1b[20~".to_vec()),
+        Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
+        Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
+        Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
         _ => event.text.as_ref().map(|s| s.as_bytes().to_vec()),
     }
 }
@@ -689,7 +744,14 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         _ => {}
                     }
                 }
-                if let Some(bytes) = key_to_bytes(&event, self.modifiers) {
+                let (opt_meta, app_cursor) = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| (r.option_as_meta(), r.active_app_cursor()))
+                    .unwrap_or((true, false));
+                if let Some(bytes) =
+                    key_to_bytes(&event, self.modifiers, opt_meta, app_cursor)
+                {
                     if let Some(renderer) = self.renderer.as_mut() {
                         renderer.write_active(bytes);
                     }
