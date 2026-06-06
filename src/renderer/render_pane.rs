@@ -32,19 +32,10 @@ impl Renderer {
         // Build / refresh content_buffer if needed. For modules,
         // prefer the live session's body (what the module asked us
         // to render); fall back to the kind's static placeholder.
-        let body = {
-            let tab_opt = self
-                .root
-                .as_ref()
-                .and_then(|n| n.find(pid))
-                .map(|p| p.active_tab_ref());
-            let session_body = tab_opt
-                .and_then(|t| t.module_session.as_ref())
-                .map(|s| s.body.clone())
-                .filter(|s| !s.is_empty());
-            session_body
-                .unwrap_or_else(|| non_shell_body(&kind, &self.modules))
-        };
+        // The body string is cloned lazily, only when the content buffer
+        // actually needs rebuilding (see below). A cached buffer — cursor
+        // moves, or an animation-driven full-window redraw of a static
+        // pane — never pays for it; editor bodies run up to 1 MB.
         // Gutter width — content shifts right by this when the
         // active module supplied gutter labels (Editor's line
         // numbers). Computed from the widest non-empty label;
@@ -85,6 +76,12 @@ impl Renderer {
         if let Some(tab) = tab {
             let needs_build = tab.content_buffer.is_none();
             if needs_build {
+                let body = tab
+                    .module_session
+                    .as_ref()
+                    .map(|s| s.body.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| non_shell_body(&kind, &self.modules));
                 let mut buf = Buffer::new(
                     &mut self.font_system,
                     Metrics::new(font_size, line_height),
