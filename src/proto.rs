@@ -27,7 +27,7 @@
 //! All bounds explicit at the source: per-line size, per-subscriber
 //! queue depth, drop-on-overflow rather than buffer.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
@@ -426,8 +426,7 @@ fn handle_connection(conn_id: u64, stream: UnixStream, proxy: EventLoopProxy<Use
     let mut br = BufReader::with_capacity(MAX_LINE_BYTES, stream);
     let mut buf = String::new();
     loop {
-        buf.clear();
-        match br.read_line(&mut buf) {
+        match crate::io_util::read_capped_line(&mut br, MAX_LINE_BYTES, &mut buf) {
             Ok(0) => break, // EOF
             Ok(_) => {
                 if buf.len() > MAX_LINE_BYTES {

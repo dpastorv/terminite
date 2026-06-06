@@ -14,7 +14,7 @@
 //! the dropdown shows. Override the modules dir with
 //! `$TERMINITE_MODULES_DIR`.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -452,9 +452,26 @@ impl ModuleSession {
             thread::Builder::new()
                 .name(format!("terminite-mod-e-{}", manifest.id))
                 .spawn(move || {
-                    let reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stderr);
-                    for line in reader.lines().map_while(Result::ok) {
-                        crate::logging::warn(&format!("module {err_id} stderr: {line}"));
+                    let mut reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stderr);
+                    let mut line = String::new();
+                    loop {
+                        match crate::io_util::read_capped_line(
+                            &mut reader,
+                            MODULE_MAX_LINE_BYTES,
+                            &mut line,
+                        ) {
+                            Ok(0) | Err(_) => break,
+                            // Over-long stderr line: log a truncated marker, resync.
+                            Ok(n) if n > MODULE_MAX_LINE_BYTES => {
+                                crate::logging::warn(&format!(
+                                    "module {err_id} stderr: line over {MODULE_MAX_LINE_BYTES} bytes — truncated"
+                                ));
+                            }
+                            Ok(_) => crate::logging::warn(&format!(
+                                "module {err_id} stderr: {}",
+                                line.trim_end()
+                            )),
+                        }
                     }
                 })
                 .ok();
@@ -564,14 +581,18 @@ fn reader_loop(
     module_id: String,
     proxy: EventLoopProxy<UserEvent>,
 ) {
-    let reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stdout);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if line.len() > MODULE_MAX_LINE_BYTES {
-            crate::logging::warn(&format!(
-                "module {module_id}: line exceeded MODULE_MAX_LINE_BYTES, dropping"
-            ));
-            continue;
+    let mut reader = BufReader::with_capacity(MODULE_MAX_LINE_BYTES, stdout);
+    let mut line = String::new();
+    loop {
+        match crate::io_util::read_capped_line(&mut reader, MODULE_MAX_LINE_BYTES, &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(n) if n > MODULE_MAX_LINE_BYTES => {
+                crate::logging::warn(&format!(
+                    "module {module_id}: line exceeded MODULE_MAX_LINE_BYTES, dropping"
+                ));
+                continue;
+            }
+            Ok(_) => {}
         }
         match serde_json::from_str::<ModuleMessage>(line.trim()) {
             Ok(msg) => {

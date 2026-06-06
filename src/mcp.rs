@@ -81,8 +81,7 @@ pub fn run(actor: Option<String>) -> ExitCode {
     let mut line = String::new();
 
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        match crate::io_util::read_capped_line(&mut reader, MAX_LINE_BYTES, &mut line) {
             Ok(0) => return ExitCode::SUCCESS, // EOF — client closed.
             Ok(_) => {}
             Err(e) => {
@@ -91,7 +90,8 @@ pub fn run(actor: Option<String>) -> ExitCode {
             }
         }
         if line.len() > MAX_LINE_BYTES {
-            // The reader fills past cap if there's no newline; reject.
+            // Bounded reader cut the line at the cap; drop it and resync at
+            // the next newline.
             send_err(&mut out, Value::Null, -32600,
                 "request line exceeded MAX_LINE_BYTES");
             continue;
@@ -149,9 +149,9 @@ pub fn run_channel() -> ExitCode {
     let mut reader = BufReader::with_capacity(MAX_LINE_BYTES, stdin.lock());
     let mut line = String::new();
     loop {
-        line.clear();
-        match reader.read_line(&mut line) {
+        match crate::io_util::read_capped_line(&mut reader, MAX_LINE_BYTES, &mut line) {
             Ok(0) => return ExitCode::SUCCESS, // claude closed stdin → exit.
+            Ok(n) if n > MAX_LINE_BYTES => continue, // over-long → drop, resync
             Ok(_) => {}
             Err(_) => return ExitCode::from(1),
         }
@@ -184,10 +184,16 @@ pub fn run_channel() -> ExitCode {
 /// socket and surface each into claude as a `notifications/claude/channel`,
 /// auto-acking it. Exits on socket EOF.
 fn channel_bridge(sub: UnixStream, out: std::sync::Arc<std::sync::Mutex<io::Stdout>>) {
-    let reader = BufReader::new(sub);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+    let mut reader = BufReader::new(sub);
+    let mut line = String::new();
+    loop {
+        match crate::io_util::read_capped_line(&mut reader, MAX_LINE_BYTES, &mut line) {
+            Ok(0) => break,                          // socket EOF
+            Ok(n) if n > MAX_LINE_BYTES => continue, // over-long → drop, resync
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else { continue };
         if v.get("kind").and_then(|k| k.as_str()) != Some("room_message") {
             continue;
         }

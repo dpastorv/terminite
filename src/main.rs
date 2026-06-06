@@ -21,6 +21,7 @@ mod fileclaims;
 mod fonts;
 mod highlight;
 mod images;
+mod io_util;
 mod layout;
 mod logging;
 mod mcp;
