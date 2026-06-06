@@ -56,6 +56,20 @@ clobber each other. Coordination is **human-led** — you drive by moving betwee
 panes; terminite is the surface that makes the work visible. Nothing is forced:
 agents work in parallel by default and only coordinate on a real collision.
 
+### A note on trust
+
+terminite runs the processes you start, as you — like any terminal. The room
+extends that across panes over a local, owner-only socket: **a pane is the trust
+unit.** Everything in a pane — your shell, your agent, and whatever they run — can
+reach the room and see other panes. So the boundary is simple and worth saying
+plainly: **don't run code you don't trust in a pane you care about.** Two
+protections are firm regardless — the socket is reachable only by your own user
+(never the network, never another account), and a delivered room message can never
+carry control bytes into your prompt, so a message can't become a command. Within
+your own session, though, terminite assumes you trust what you chose to launch.
+That fits what it is today: a personal tool where *you* start the agents. If that
+ever changes — hosting agents you didn't launch — the model tightens to match.
+
 ## Configure
 
 Settings live in a hot-reloaded config — edit it, click back into terminite, it
@@ -77,8 +91,11 @@ terminite has a small extension surface — modules render in a pane and talk to
 host over a simple wire. Bundled:
 
 - **Config** — the settings pane above.
-- **Nav / Preview / Edit** — a native file-navigation trio (a file list that
-  publishes focus events; a previewer and an editor that react to them).
+- **Files** — a native file navigator in one pane: `Enter` on an image opens an
+  inline preview, `Enter` on text/code opens a built-in editor (syntax
+  highlighting, the readline editing keys, `Ctrl+E` for the key list), `Esc`
+  backs out. Plus guarded basics — new / rename / delete. Built for quick edits
+  beside your AI partner, not to replace your IDE.
 - **debug** — an observability pane for working on terminite itself.
 
 Drop a new module into `~/.terminite/modules/` and it's picked up live.
