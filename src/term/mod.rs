@@ -612,8 +612,16 @@ impl LiveTerm {
         let cols = grid.columns();
         let rows = grid.screen_lines() as i32;
         let history = grid.history_size() as i32;
+        // Cap retained matches. A common query (e.g. a single space) over a
+        // full 50k-line scrollback could otherwise build millions of tuples —
+        // a multi-hundred-MB spike while holding the terminal lock. The first
+        // N is plenty to navigate; we stop scanning once we hit the cap.
+        const MAX_SEARCH_MATCHES: usize = 10_000;
         let mut matches = Vec::new();
         for line in -history..rows {
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                break;
+            }
             let row = &grid[Line(line)];
             // Build the row's text plus a column map so a byte offset in the
             // joined string maps back to a cell column.
