@@ -29,6 +29,11 @@ pub const MAX_LAYOUT_BYTES: usize = 256 * 1024;
 /// to spawn 100k shells — bound it. Real layouts are <50 panes.
 pub const MAX_LAYOUT_PANES: usize = 256;
 
+/// Cap on total tabs across all panes. Each tab restores a `LiveTerm`
+/// + shell, so a 256 KB file packed with tiny tab entries could still
+/// fork thousands of shells even under the pane cap. Bound the total.
+pub const MAX_LAYOUT_TABS: usize = 512;
+
 /// Bumped when the schema changes incompatibly. Older files load if
 /// they're <= `LAYOUT_VERSION`; newer ones bail and default-spawn.
 pub const LAYOUT_VERSION: u32 = 1;
@@ -178,6 +183,26 @@ pub fn load() -> std::io::Result<Option<Layout>> {
         ));
         return Ok(None);
     }
+    let tab_count = count_tabs(&layout.root);
+    if tab_count > MAX_LAYOUT_TABS {
+        crate::logging::warn(&format!(
+            "layout: refusing to restore {} tabs > cap {}",
+            tab_count, MAX_LAYOUT_TABS
+        ));
+        return Ok(None);
+    }
+    // A pane with zero tabs would panic the moment its active tab is
+    // indexed. Reject the whole layout atomically and fall back to a
+    // default spawn rather than restore a booby-trapped tree.
+    if !every_pane_has_tabs(&layout.root) {
+        crate::logging::warn("layout: a pane has no tabs — ignoring the saved layout");
+        return Ok(None);
+    }
+    // Clamp floats (NaN / inf / out-of-range ratios + scales) and
+    // active-tab indices in place — these are recoverable, no reason to
+    // discard an otherwise-valid layout over them.
+    let mut layout = layout;
+    sanitize(&mut layout.root);
     Ok(Some(layout))
 }
 
@@ -185,6 +210,51 @@ fn count_panes(node: &LayoutNode) -> usize {
     match node {
         LayoutNode::Pane(_) => 1,
         LayoutNode::Split { first, second, .. } => count_panes(first) + count_panes(second),
+    }
+}
+
+fn count_tabs(node: &LayoutNode) -> usize {
+    match node {
+        LayoutNode::Pane(p) => p.tabs.len(),
+        LayoutNode::Split { first, second, .. } => count_tabs(first) + count_tabs(second),
+    }
+}
+
+fn every_pane_has_tabs(node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Pane(p) => !p.tabs.is_empty(),
+        LayoutNode::Split { first, second, .. } => {
+            every_pane_has_tabs(first) && every_pane_has_tabs(second)
+        }
+    }
+}
+
+/// Clamp every float and index in the tree to a sane range so a hostile
+/// or corrupt file can't inject NaN scales or out-of-bounds active tabs.
+fn sanitize(node: &mut LayoutNode) {
+    match node {
+        LayoutNode::Pane(p) => {
+            if !p.font_scale.is_finite() || p.font_scale <= 0.0 {
+                p.font_scale = 1.0;
+            }
+            p.font_scale = p.font_scale.clamp(0.2, 5.0);
+            if p.active_tab >= p.tabs.len() {
+                p.active_tab = 0;
+            }
+        }
+        LayoutNode::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } => {
+            if !ratio.is_finite() {
+                *ratio = 0.5;
+            }
+            *ratio = ratio.clamp(0.05, 0.95);
+            sanitize(first);
+            sanitize(second);
+        }
     }
 }
 

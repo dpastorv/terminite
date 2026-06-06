@@ -570,11 +570,16 @@ impl Pane {
     }
 
     pub(super) fn active_tab_ref(&self) -> &Tab {
-        &self.tabs[self.active_tab]
+        // Clamp a possibly-drifted index to the last tab — a pane always
+        // holds ≥1 tab (layout restore rejects empty panes; close-last-tab
+        // closes the pane), so this never panics on a valid tree.
+        let i = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        &self.tabs[i]
     }
 
     pub(super) fn active_tab_mut(&mut self) -> &mut Tab {
-        &mut self.tabs[self.active_tab]
+        let i = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        &mut self.tabs[i]
     }
 }
 
