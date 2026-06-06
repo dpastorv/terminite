@@ -453,10 +453,11 @@ pub struct Renderer {
     proxy: EventLoopProxy<UserEvent>,
 
     /// The active proto-subscription writer, if any. v1 = single client;
-    /// the slot holds the channel of the connection that most recently
-    /// called `subscribe`. Events are sent here; a `try_send` failure
-    /// (channel full or disconnected) clears the slot.
-    proto_subscriber: Option<std::sync::mpsc::SyncSender<crate::proto::OutMessage>>,
+    /// the slot holds `(conn_id, channel)` of the connection that most
+    /// recently called `subscribe`. Conn-bound so only that connection's
+    /// disconnect (or a send failure) clears it — an unrelated one-shot
+    /// command connecting/disconnecting must not wipe a live subscriber.
+    proto_subscriber: Option<(u64, std::sync::mpsc::SyncSender<crate::proto::OutMessage>)>,
 
     /// The comms base's push channels — one per subscribed actor. The faculty's
     /// receiver calls `room_subscribe {actor}` and terminite pushes directed

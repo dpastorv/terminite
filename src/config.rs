@@ -267,10 +267,13 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The standard config path, `~/.config/terminite/config.toml`.
+    /// The config path — the single resolver shared with the config-pane
+    /// writer, so the renderer reads exactly the file the pane edits.
+    /// `$XDG_CONFIG_HOME/terminite/config.toml` if set, else
+    /// `~/.config/terminite/config.toml`. (Previously the loader was
+    /// `$HOME`-only while the writer honored XDG — they could diverge.)
     pub fn path() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join(".config/terminite/config.toml"))
+        crate::config_io::config_path()
     }
 
     /// Load from the standard path. A missing file, an unreadable file, or

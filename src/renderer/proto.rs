@@ -35,17 +35,18 @@ const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 const AUTO_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 impl Renderer {
-    /// A new module connected — drop any prior subscriber (v1 = single
-    /// client; the new one wins).
-    pub fn handle_proto_connect(&mut self) {
-        self.proto_subscriber = None;
-    }
+    /// A new connection arrived. A connection is not a subscription —
+    /// the subscriber slot is only set when someone calls `subscribe`,
+    /// so we leave any existing subscriber alone here.
+    pub fn handle_proto_connect(&mut self) {}
 
-    /// A proto connection closed — clear the subscriber slot and drop the
-    /// connection's room presence (if it had joined). `room_who` reflects the
-    /// departure immediately.
+    /// A proto connection closed — clear the subscriber slot only if this
+    /// connection owned it, and drop the connection's room presence (if it
+    /// had joined). `room_who` reflects the departure immediately.
     pub fn handle_proto_disconnect(&mut self, conn_id: u64) {
-        self.proto_subscriber = None;
+        if matches!(&self.proto_subscriber, Some((cid, _)) if *cid == conn_id) {
+            self.proto_subscriber = None;
+        }
         // Drop any comms-base receiver this connection was holding.
         self.room_subscribers.retain(|_, (cid, _)| *cid != conn_id);
         if self.roster.leave(conn_id, crate::presence::now_ms()).is_some() {
@@ -67,7 +68,7 @@ impl Renderer {
             "list_blocks" => self.proto_list_blocks(&req.params),
             "get_block" => self.proto_get_block(&req.params),
             "subscribe" => {
-                self.proto_subscriber = Some(out.clone());
+                self.proto_subscriber = Some((conn_id, out.clone()));
                 crate::proto::OutPayload::Subscribed
             }
             "set_tag" => self.proto_set_tag(&req.params),
@@ -1043,7 +1044,7 @@ impl Renderer {
     }
 
     pub(super) fn proto_emit_event(&mut self, event: crate::proto::EventPayload) {
-        let Some(out) = self.proto_subscriber.as_ref() else { return };
+        let Some((_, out)) = self.proto_subscriber.as_ref() else { return };
         let msg = crate::proto::OutMessage {
             id: 0,
             payload: crate::proto::OutPayload::Event(event),
