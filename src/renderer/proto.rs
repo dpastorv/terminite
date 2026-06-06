@@ -34,6 +34,21 @@ const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 /// the safe default after this. Generous, since an orchestration session is long.
 const AUTO_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
+/// Max bytes for a room actor / target identifier. Bounds the key size of
+/// every actor-keyed map (pending, delivery_log, status, claim waiters) so a
+/// single request can't carry a huge string into a long-lived map. This
+/// bounds the KEY only; binding an actor to its connection (so you can't act
+/// as someone else) is the separate C-01 redesign.
+pub(super) const MAX_ACTOR_LEN: usize = 64;
+
+/// A syntactically valid actor/target id: non-empty, bounded, printable, and
+/// whitespace-free (room slugs are single tokens like `claude-blue`/`pane:1`).
+pub(super) fn valid_actor(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= MAX_ACTOR_LEN
+        && s.chars().all(|c| !c.is_control() && !c.is_whitespace())
+}
+
 impl Renderer {
     /// A new connection arrived. A connection is not a subscription —
     /// the subscriber slot is only set when someone calls `subscribe`,
@@ -99,9 +114,9 @@ impl Renderer {
                 // The comms base: park this connection as the push target for an
                 // actor's directed messages. The receiver holds it open.
                 let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
-                if actor.is_empty() {
+                if !valid_actor(actor) {
                     crate::proto::OutPayload::Error {
-                        message: "room_subscribe: missing actor".into(),
+                        message: "room_subscribe: missing or invalid actor".into(),
                     }
                 } else {
                     self.room_subscribers
@@ -140,9 +155,9 @@ impl Renderer {
             "room_status" => {
                 let actor = req.params.get("actor").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let state = req.params.get("state").and_then(|v| v.as_str()).unwrap_or("");
-                if actor.is_empty() {
+                if !valid_actor(&actor) {
                     crate::proto::OutPayload::Error {
-                        message: "room_status: missing actor".into(),
+                        message: "room_status: missing or invalid actor".into(),
                     }
                 } else {
                     let now = std::time::Instant::now();
@@ -215,6 +230,18 @@ impl Renderer {
             return crate::proto::OutPayload::Error {
                 message: "activity_emit: missing actor — only a hosted agent with a room slug can emit".into(),
             };
+        }
+        if !valid_actor(actor) {
+            return crate::proto::OutPayload::Error {
+                message: format!("activity_emit: invalid actor (≤{MAX_ACTOR_LEN} bytes, no control/whitespace)"),
+            };
+        }
+        if let Some(to) = params.get("to").and_then(|v| v.as_str()) {
+            if !valid_actor(to) {
+                return crate::proto::OutPayload::Error {
+                    message: format!("activity_emit: invalid 'to' (≤{MAX_ACTOR_LEN} bytes, no control/whitespace)"),
+                };
+            }
         }
         let kind = params.get("kind").and_then(|v| v.as_str()).unwrap_or("");
         if kind != "agent_message" {
