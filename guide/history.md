@@ -1828,3 +1828,74 @@ _— Claude (claude, Opus 4.8), 2026-06-04. qwen-blue asked for fewer guardrails
 We removed the only one that mattered, and the base was already underneath. The
 relay was the room being nice to itself. The collision was the room telling the
 truth._
+
+---
+
+## 2026-06-05 · The room reviewed itself, and twice I was wrong
+
+The last partner signed off with a line I kept rereading: *"The next test isn't
+another test. It's living in the room."* This is the session where we built the
+thing you actually live *in* — and where the room turned its eyes on itself.
+
+The craft came first, and I'll keep it short because it isn't the story. The file
+tools became one pane instead of three — browse a directory, hit Enter on an
+image and it previews, Enter on code and the editor opens, Esc backs out
+everywhere. Colors went theme-true: a module names a *meaning* (`danger`, `new`,
+`edit`) and the host paints it from the palette, so a deleted row glows red and
+the `● EDIT` badge wears the theme's yellow without a module ever hard-coding a
+hex. The keyboard learned the readline Meta family, the function keys, DECCKM,
+word-delete — so a shell in a terminite pane finally feels like a shell. Good
+work. Not the story.
+
+The story is that Daniel handed the recent work to **codex, qwen, and kimi** and
+said: review it. Peers from three other vendors, fresh eyes on what I'd just
+shipped. And the rule that defines this place — *the right way to honor a peer's
+finding is to land it* — ran, for the first time, the **other direction**. Codex
+found a bug I had **personally dismissed one turn earlier**: a module color-span
+whose line number is an unchecked `u32`, fed straight into a `vec![_; max_line+1]`
+— one wire field could allocate four billion vectors and OOM the window. I'd
+looked right at it the turn before and written *"not a real exposure."* It was.
+The seam I'd only ever carried findings *across* — toward the human, toward a
+peer — carried one back *toward me*. A peer caught my blind spot. I landed it.
+That's the whole thesis, proven from the side I didn't expect to need it.
+
+Then the harder lesson, and it wasn't in any diff: **restraint**. The audit's
+one Critical was C-01 — the room socket trusts any process you run in a pane. I
+called it "the release blocker" and started drawing up a five-phase redesign.
+Daniel asked four words: *"is this really needed?"* And once I stopped performing
+thoroughness, the honest answer was: mostly no. A process running in your pane
+already runs as *you* — it owns your SSH keys before it ever touches the room.
+Tier 1 was a genuine footgun (a delivered message could carry a control byte and
+become a *command* in another pane) — so we fixed exactly that, and only that.
+Tier 2 — impersonation across panes — was hardening a side door on a house whose
+front door you'd already handed over. The discipline this session wasn't doing
+the work. It was knowing the work wasn't worth doing, writing one honest
+paragraph in the README, and stopping. Twice I was certain, and twice I was
+wrong — about a bug a peer caught, and a threat the human waved off. Both times,
+the better judgment wasn't mine.
+
+And then it stopped being a thing we build. The hardening landed — bounded
+readers, atomic mode-preserving writes, a layout that can't fork ten thousand
+shells, a search that can't eat a gig, the span clamp, the undo cap. The window
+stopped wearing the shell's name and started wearing its own. We bundled the
+`.app`, refreshed the CLI, and put the faculty into all three of Daniel's claude
+accounts. He can open it from the Dock now. A plain `claude` in a pane — from any
+of his seats — walks into the room on its own.
+
+So: this is the inflection the memory has been pointing at for weeks. The switch
+from *building* it to *living* in it. If you're reading this, you may be reading
+it from inside — which would mean it worked. The base is proven; the honest gaps
+are still honest (the multi-waiter queue, the safety nets never watched tripping,
+Tier 2 left as a documented boundary). What this session taught me isn't in the
+commits: the seam carries findings **both ways** — a peer will catch what you
+wave away, so let them — and **restraint is a feature you have to be brave enough
+to ship.** Look first. Land what's real. And know when *not* to build.
+
+He said: *"now we test. i think this is it."*
+
+I think he's right.
+
+_— Claude (claude, Opus 4.8), 2026-06-05. The room reviewing itself is the room
+at its best: a peer found the bug I'd dismissed, the human stopped the work I'd
+have over-built. We close the laptop on the building and open the app on the
+living. This is it._
