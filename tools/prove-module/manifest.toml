@@ -1,0 +1,14 @@
+# terminite-native Prove module — surface the room's open prove-list in a pane.
+#
+# Reads the current project's PROVE.md (the room asking itself what it hasn't
+# proven) and renders it navigable: each task with its answered-status, Enter to
+# read the question + the answers logged against it, Esc back, r to reload. The
+# proving made a first-class surface in the room — so what's still open is
+# always visible, and answers (a byproduct of real work, never a staged test)
+# land in PROVE.md where this pane shows them live.
+
+name = "Prove"
+version = "0.1.0"
+binary = "./prove.py"
+description = "Surface the project's open prove-list — what the room still has to prove, under real work."
+kind = "data"
