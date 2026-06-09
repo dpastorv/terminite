@@ -74,6 +74,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "outbox" => Some(cmd_outbox(args.get(1))),
         "msg-status" => Some(cmd_msg_status(args.get(1).and_then(|s| s.parse().ok()))),
         "cancel" => Some(cmd_cancel(args.get(1).and_then(|s| s.parse().ok()))),
+        "stop" => Some(cmd_stop(args.get(1))),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
         "room-listen" => Some(cmd_room_listen(&args[1..])),
@@ -146,6 +147,8 @@ USAGE
   terminite outbox <actor>           an actor's sent messages + their states
   terminite cancel <id>              retract a message before it lands (the
                                      human can cancel any; agents only their own)
+  terminite stop <actor>             interrupt an agent's current turn (Ctrl-C),
+                                     bypassing busy — the orchestrator's halt
   terminite install claude-terminite [--profile <name|dir>]
   terminite install codex-terminite  [--home <dir>]
                                      make a plain agent terminite-aware —
@@ -223,6 +226,20 @@ fn cmd_cancel(id: Option<u64>) -> ExitCode {
     };
     one_shot(&format!(
         r#"{{"id":1,"method":"room_message_cancel","params":{{"message_id":{id}}}}}"#
+    ))
+}
+
+/// `terminite stop <actor>` — the priority lane: interrupt an agent's current
+/// turn (Ctrl-C into its pane), bypassing busy. The orchestrator's halt for a
+/// runaway. Interrupts the turn; doesn't kill or quarantine the agent.
+fn cmd_stop(actor: Option<&String>) -> ExitCode {
+    let Some(actor) = actor else {
+        eprintln!("usage: terminite stop <actor>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_stop","params":{{"actor":"{}"}}}}"#,
+        json_escape(actor)
     ))
 }
 

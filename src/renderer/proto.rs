@@ -134,6 +134,7 @@ impl Renderer {
             "room_message_status" => self.proto_message_status(&req.params),
             "room_outbox" => self.proto_outbox(&req.params),
             "room_message_cancel" => self.proto_message_cancel(&req.params),
+            "room_stop" => self.proto_room_stop(&req.params),
             "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
             "tool_emit" => self.proto_tool_emit(peer_pid, &req.params),
@@ -834,6 +835,38 @@ impl Renderer {
             self.set_msg_state(mid, crate::proto::MsgState::Cancelled);
         }
         true
+    }
+
+    /// `room_stop {actor}` — the priority lane (R2). Interrupt the actor's
+    /// CURRENT turn by typing Ctrl-C into its pane, **bypassing the busy/idle
+    /// gate** that holds normal delivery. E17's exact bug was that `busy`
+    /// shielded an agent from emergency STOPs — the politeness brake outranked
+    /// the safety one; here the brake wins. The orchestrator's halt for a
+    /// drifted / runaway agent. This INTERRUPTS the turn; it does not kill the
+    /// agent (that's the human's KILL escalation) or quarantine it (HALT).
+    pub(super) fn proto_room_stop(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_actor(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "stop: missing or invalid actor".into(),
+            };
+        }
+        let Some(pane) = self.roster.pane_for_slug(actor) else {
+            return crate::proto::OutPayload::Error {
+                message: format!("stop: {actor} has no pane to interrupt"),
+            };
+        };
+        // Ctrl-C (0x03) — the universal "interrupt the current turn" for the
+        // agent CLIs. No gate: the brake reaches even a busy agent.
+        self.pty_write_raw(pane, vec![0x03]);
+        // The interrupted agent is back at its prompt — drop any stale `busy`
+        // so the room can engage it again once the human is satisfied.
+        self.actor_status.remove(actor);
+        eprintln!("[room] STOP → Ctrl-C into pane {pane} ({actor})");
+        crate::proto::OutPayload::Ok
     }
 
     /// `file_claim {actor, path}` — an actor declares it's working in a file.
