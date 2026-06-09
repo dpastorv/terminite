@@ -144,6 +144,11 @@ pub enum OutPayload {
         from: String,
         text: String,
     },
+    /// `activity_emit` result — the id the message was recorded under, so the
+    /// sender can track its delivery (`room_message_status`) or cancel it.
+    Emitted {
+        message_id: u64,
+    },
     /// `room_message_status` — the delivery fate of one directed message, so a
     /// sender knows whether it was *processed*, not just logged (R1's receipt).
     MessageStatus {

@@ -71,6 +71,9 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "export" => Some(cmd_export(&args[1..])),
         "stats" => Some(cmd_stats()),
         "activities" => Some(cmd_activities(&args[1..])),
+        "outbox" => Some(cmd_outbox(args.get(1))),
+        "msg-status" => Some(cmd_msg_status(args.get(1).and_then(|s| s.parse().ok()))),
+        "cancel" => Some(cmd_cancel(args.get(1).and_then(|s| s.parse().ok()))),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
         "room-listen" => Some(cmd_room_listen(&args[1..])),
@@ -138,6 +141,11 @@ USAGE
   terminite activities [actor]       the room's activity stream, in time
                                      order (all actors, or just <actor>;
                                      `to <slug>` reads <slug>'s inbox)
+  terminite msg-status <id>          delivery fate of a directed message
+                                     (queued/delivered/floor_typed/read/…)
+  terminite outbox <actor>           an actor's sent messages + their states
+  terminite cancel <id>              retract a message before it lands (the
+                                     human can cancel any; agents only their own)
   terminite install claude-terminite [--profile <name|dir>]
   terminite install codex-terminite  [--home <dir>]
                                      make a plain agent terminite-aware —
@@ -192,6 +200,42 @@ fn cmd_blocks(tab_id: Option<u64>) -> ExitCode {
 
 fn cmd_room_who() -> ExitCode {
     one_shot(r#"{"id":1,"method":"room_who"}"#)
+}
+
+/// `terminite msg-status <id>` — the delivery fate of a directed message.
+fn cmd_msg_status(id: Option<u64>) -> ExitCode {
+    let Some(id) = id else {
+        eprintln!("usage: terminite msg-status <message_id>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_message_status","params":{{"message_id":{id}}}}}"#
+    ))
+}
+
+/// `terminite cancel <id>` — retract a message before it lands. Sent with NO
+/// actor, so the host treats it as the human's (orchestrator) authority: the
+/// human can cancel ANY message, where an agent can cancel only its own.
+fn cmd_cancel(id: Option<u64>) -> ExitCode {
+    let Some(id) = id else {
+        eprintln!("usage: terminite cancel <message_id>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_message_cancel","params":{{"message_id":{id}}}}}"#
+    ))
+}
+
+/// `terminite outbox <actor>` — an agent's sent messages and their states.
+fn cmd_outbox(actor: Option<&String>) -> ExitCode {
+    let Some(actor) = actor else {
+        eprintln!("usage: terminite outbox <actor>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_outbox","params":{{"actor":"{}"}}}}"#,
+        json_escape(actor)
+    ))
 }
 
 /// `terminite files` → every live file claim in the room; `terminite files

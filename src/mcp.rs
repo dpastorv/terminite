@@ -455,7 +455,7 @@ fn tool_catalog() -> Vec<Value> {
         json!({
             "name": "terminite_activity_emit",
             "description":
-                "Post a message to the room's activity log. Address it (set `to` to a room id, e.g. \"codex-2\") or broadcast (omit `to`). You are identified automatically — your room id is stamped by the host, you can't post as someone else. NOTE: this RECORDS the message; it does not deliver it as a turn. An addressed agent that isn't actively polling won't be woken by it — the message waits in the log until someone reads it. Use `terminite_activities_list` to read what others have posted to you.",
+                "Post a message to the room. Address it (set `to` to a room id, e.g. \"codex-2\") or broadcast (omit `to`). You are identified automatically — your room id is stamped by the host, you can't post as someone else. A DIRECTED message is delivered to its recipient (pushed to its receiver, or typed into its pane when it's idle) and the response returns a `message_id` — track its fate with `terminite_message_status` (queued / delivered / floor_typed / read / cancelled / gave_up), or retract it with `terminite_message_cancel` if it's gone stale before it lands. Use `terminite_activities_list` to read what others posted to you.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -530,6 +530,42 @@ fn tool_catalog() -> Vec<Value> {
                     },
                 },
                 "required": ["state"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_message_status",
+            "description":
+                "Did my message land? Pass the `message_id` that `terminite_activity_emit` returned, and get its delivery fate: \"queued\" (recorded, waiting for a delivery path), \"delivered\" (pushed to the recipient's live receiver), \"floor_typed\" (typed into its pane), \"read\" (the recipient confirmed it — processed), \"cancelled\" (you retracted it), or \"gave_up\" (re-delivery exhausted, it never acted). Absence of a reply is NOT evidence — check this instead of assuming.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": { "type": "integer", "description": "The id terminite_activity_emit returned for the message." },
+                },
+                "required": ["message_id"],
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_outbox",
+            "description":
+                "Your sent directed messages and what happened to each — a glanceable receipt list (message_id, recipient, state, preview). Use it to spot anything stuck \"queued\" or \"gave_up\" (it never reached the recipient) without checking ids one by one. You are identified automatically.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            },
+        }),
+        json!({
+            "name": "terminite_message_cancel",
+            "description":
+                "Retract a message you sent before it lands — for when the situation moved on and a stale instruction shouldn't reach the recipient. Pass the `message_id`. Works while it's still \"queued\" (pulled from the recipient's inbox, never delivered) or in the brief window after it was typed into their pane but before it submitted (the typed text is erased). Too late once it's \"delivered\"/\"read\". You can only cancel your OWN messages.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": { "type": "integer", "description": "The id of your message to retract." },
+                },
+                "required": ["message_id"],
                 "additionalProperties": false,
             },
         }),
@@ -631,6 +667,28 @@ fn call_tool(name: &str, args: &Value) -> Result<String, String> {
             proto_call(json!({
                 "id": 1, "method": "activity_emit",
                 "params": { "actor": actor, "kind": kind, "to": to, "text": text }
+            }))
+        }
+        "terminite_message_status" => {
+            let message_id = require_int(args, "message_id")?;
+            proto_call(json!({
+                "id": 1, "method": "room_message_status",
+                "params": { "message_id": message_id }
+            }))
+        }
+        "terminite_outbox" => {
+            let actor = ACTOR.get().cloned().unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "room_outbox", "params": { "actor": actor }
+            }))
+        }
+        "terminite_message_cancel" => {
+            let message_id = require_int(args, "message_id")?;
+            // Sender-scoped: the host checks this actor authored the message.
+            let actor = ACTOR.get().cloned().unwrap_or_default();
+            proto_call(json!({
+                "id": 1, "method": "room_message_cancel",
+                "params": { "actor": actor, "message_id": message_id }
             }))
         }
         "terminite_file_status" => {

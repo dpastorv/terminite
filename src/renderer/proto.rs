@@ -293,8 +293,8 @@ impl Renderer {
             };
         }
         let to = params.get("to").and_then(|v| v.as_str());
-        self.emit_directed(actor, to, &text);
-        crate::proto::OutPayload::Ok
+        let id = self.emit_directed(actor, to, &text);
+        crate::proto::OutPayload::Emitted { message_id: id }
     }
 
     /// Record a directed (or broadcast, `to: None`) message and DELIVER it:
