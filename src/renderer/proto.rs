@@ -1084,10 +1084,15 @@ impl Renderer {
             .and_then(|v| v.as_u64())
             .or_else(|| peer_pid.and_then(|p| self.pane_from_pid(p)));
         let presence = self.roster.join(conn_id, base, pane);
+        // Freshness (R3): how many activities already sit under the slug we just
+        // (re)assigned. Non-zero on a fresh join = you reclaimed a slug with
+        // history — the external "you may be a resumed session" signal.
+        let said = self.activities.count_by_actor(&presence.slug) as u64;
         self.window.request_redraw();
-        crate::proto::OutPayload::Joined {
-            actor: presence_to_info(&presence),
-        }
+        let mut actor = presence_to_info(&presence);
+        actor.activity = self.activity_state(&presence.slug).to_string();
+        actor.said = Some(said);
+        crate::proto::OutPayload::Joined { actor }
     }
 
     /// Find the tab/pane a connecting process belongs to by walking its PID
@@ -1558,6 +1563,7 @@ fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
         pane: p.pane,
         status: None,
         activity: "idle".to_string(), // overridden by the caller that has &self
+        said: None,                   // join-time only; absent in room_who
     }
 }
 

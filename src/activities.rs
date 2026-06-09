@@ -198,6 +198,14 @@ impl ActivityStore {
         self.items.len()
     }
 
+    /// How many activities are recorded under `actor`. Used at join to tell an
+    /// agent whether the slug it just (re)claimed already has history — a
+    /// resumed/reset session reclaims a slug with a non-zero count, which is the
+    /// external signal it can't get from inside its own context (R3 / E4 / E12).
+    pub fn count_by_actor(&self, actor: &str) -> usize {
+        self.items.iter().filter(|a| a.actor == actor).count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

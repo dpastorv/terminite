@@ -307,6 +307,13 @@ pub struct ActorInfo {
     /// tell who needs a nudge without reading the terminal. Heuristic, host-
     /// derived — never self-reported.
     pub activity: String,
+    /// Activities already recorded under this slug (R3 freshness). Set in the
+    /// `room_join` response: a non-zero count when you *just* joined means you
+    /// reclaimed a slug with history — you are a resumed/reset session and
+    /// should verify against the log before trusting your memory. `null` in
+    /// `room_who` (it's a join-time signal, not a per-poll field).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub said: Option<u64>,
 }
 
 #[derive(Serialize, Debug)]
