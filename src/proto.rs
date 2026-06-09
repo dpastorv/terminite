@@ -300,6 +300,13 @@ pub struct ActorInfo {
     /// peers can see who's heads-down before sending into them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// Derived activity (R2 presence-with-state), distinct from the *declared*
+    /// `status`: `"working"` (in a turn), `"idle"` (at its prompt, nothing
+    /// queued), or `"waiting"` (at its prompt WITH a message it hasn't picked
+    /// up — the "stuck pane" E17 said the room couldn't see). Lets a watcher
+    /// tell who needs a nudge without reading the terminal. Heuristic, host-
+    /// derived — never self-reported.
+    pub activity: String,
 }
 
 #[derive(Serialize, Debug)]

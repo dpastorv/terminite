@@ -556,6 +556,20 @@ impl Renderer {
 
     /// What to surface in `room_who`: the brake is most urgent to see, then the
     /// fast lane, then a transient `available`.
+    /// Derived activity for `room_who` (R2): `working` (in a turn, or declared
+    /// busy), `waiting` (idle at its prompt but holding a message it hasn't
+    /// acted on — the "stuck pane"), or `idle` (at its prompt, nothing queued).
+    /// Heuristic — `is_actor_idle` is a coarse silence proxy; the precise
+    /// "stuck" half leans on the delivery state (we delivered, it didn't act).
+    fn activity_state(&self, slug: &str) -> &'static str {
+        if self.declared_status(slug) == Some("busy") || !self.is_actor_idle(slug) {
+            return "working";
+        }
+        let has_unacted = self.pending.get(slug).is_some_and(|q| !q.is_empty())
+            || self.delivery_watch.contains_key(slug);
+        if has_unacted { "waiting" } else { "idle" }
+    }
+
     fn shown_status(&self, slug: &str) -> Option<String> {
         if self.is_halted(slug) {
             return Some("halted".into()); // the human's hold is the most urgent to see
@@ -1112,6 +1126,7 @@ impl Renderer {
                 .map(|p| {
                     let mut info = presence_to_info(p);
                     info.status = self.shown_status(&p.slug);
+                    info.activity = self.activity_state(&p.slug).to_string();
                     info
                 })
                 .collect(),
@@ -1542,6 +1557,7 @@ fn presence_to_info(p: &crate::presence::Presence) -> crate::proto::ActorInfo {
         rgb: [p.color.rgb.0, p.color.rgb.1, p.color.rgb.2],
         pane: p.pane,
         status: None,
+        activity: "idle".to_string(), // overridden by the caller that has &self
     }
 }
 
