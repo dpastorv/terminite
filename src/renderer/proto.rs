@@ -18,6 +18,11 @@ const DELIVERY_MAX: usize = 8;
 const STALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const MAX_REDELIVERY: u8 = 3;
 
+/// Cap on tracked per-message delivery states (oldest message ids evicted —
+/// ids are monotonic, so the smallest is the oldest). A receipt for a very old
+/// message ages out; the live ones are what a sender queries.
+const MESSAGE_STATE_CAP: usize = 4096;
+
 /// Cap on waiters queued per file (bounds memory; oldest dropped).
 const FILE_WAITERS_CAP: usize = 16;
 
@@ -47,6 +52,17 @@ pub(super) fn valid_actor(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= MAX_ACTOR_LEN
         && s.chars().all(|c| !c.is_control() && !c.is_whitespace())
+}
+
+/// A short, single-line preview of message text for the outbox — trimmed and
+/// capped so the receipt list stays glanceable without re-fetching full text.
+pub(super) fn preview_text(text: &str) -> String {
+    let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if t.chars().count() > 80 {
+        format!("{}…", t.chars().take(79).collect::<String>())
+    } else {
+        t
+    }
 }
 
 /// Sanitize text bound for the PTY floor (C-01 Tier 1). The floor types a room
@@ -115,6 +131,9 @@ impl Renderer {
             }
             "activities_list" => self.proto_activities_list(&req.params),
             "activity_emit" => self.proto_activity_emit(&req.params),
+            "room_message_status" => self.proto_message_status(&req.params),
+            "room_outbox" => self.proto_outbox(&req.params),
+            "room_message_cancel" => self.proto_message_cancel(&req.params),
             "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
             "tool_emit" => self.proto_tool_emit(peer_pid, &req.params),
@@ -142,6 +161,8 @@ impl Renderer {
             // (drop from its addressee's pending queue, so it isn't re-delivered).
             "room_ack" => {
                 if let Some(id) = req.params.get("message_id").and_then(|v| v.as_u64()) {
+                    // The receiver processed it → the sender's receipt is `read`.
+                    self.set_msg_state(id, crate::proto::MsgState::Read);
                     if let Some(actor) = self
                         .activities
                         .get(id)
@@ -281,6 +302,28 @@ impl Renderer {
     /// the `activity_emit` verb and terminite's own system notifications (e.g.
     /// "file free"). The emitter is marked awake (its stall watch clears).
     /// Returns the activity id.
+    /// Record a message's delivery fate (R1's receipt), bounded — evict the
+    /// oldest (smallest) id when over cap. `Read`/`Cancelled`/`GaveUp` are
+    /// terminal; never regress a terminal state to an in-flight one.
+    fn set_msg_state(&mut self, id: u64, state: crate::proto::MsgState) {
+        use crate::proto::MsgState::*;
+        if let Some(cur) = self.message_state.get(&id) {
+            // Read and Cancelled are final. GaveUp is NOT — the channel
+            // re-delivery gave up, but the PTY floor may still land it later.
+            if matches!(cur, Read | Cancelled) {
+                return;
+            }
+        }
+        if self.message_state.len() >= MESSAGE_STATE_CAP
+            && !self.message_state.contains_key(&id)
+        {
+            if let Some(&oldest) = self.message_state.keys().min() {
+                self.message_state.remove(&oldest);
+            }
+        }
+        self.message_state.insert(id, state);
+    }
+
     fn emit_directed(&mut self, from: &str, to: Option<&str>, text: &str) -> u64 {
         let agent_name = agent_name_from_slug(from);
         let id = self.activities.emit_message(
@@ -289,6 +332,9 @@ impl Renderer {
             to.map(String::from),
             text.to_string(),
         );
+        if to.is_some() {
+            self.set_msg_state(id, crate::proto::MsgState::Queued);
+        }
         // The emitter just acted → it's awake; clear any stall watch on it and
         // stamp its activity (so the PTY floor knows it's not idle right now).
         self.delivery_watch.remove(from);
@@ -375,6 +421,7 @@ impl Renderer {
             self.room_subscribers.remove(target);
             return;
         }
+        self.set_msg_state(message_id, crate::proto::MsgState::Delivered);
         // Delivered to a live receiver → arm the stall watch (preserving the
         // retry count). If the actor stays silent past STALL_DEADLINE, the base
         // re-delivers — progress doesn't depend on the agent being clever.
@@ -403,8 +450,21 @@ impl Renderer {
         for actor in due {
             let retries = self.delivery_watch.get(&actor).map(|(_, r)| *r).unwrap_or(0);
             let has_pending = self.pending.get(&actor).is_some_and(|q| !q.is_empty());
-            if !has_pending || retries >= MAX_REDELIVERY {
-                self.delivery_watch.remove(&actor); // acted/nothing left, or gave up
+            if retries >= MAX_REDELIVERY && has_pending {
+                // Channel re-delivery exhausted — mark each still-pending
+                // message `gave_up` so its SENDER sees that, not eternal
+                // silence. (The PTY floor may still land it; that's a forward
+                // transition GaveUp permits.)
+                if let Some(ids) = self.pending.get(&actor).cloned() {
+                    for id in ids {
+                        self.set_msg_state(id, crate::proto::MsgState::GaveUp);
+                    }
+                }
+                self.delivery_watch.remove(&actor);
+                continue;
+            }
+            if !has_pending {
+                self.delivery_watch.remove(&actor); // acted / nothing left
                 continue;
             }
             // Bump the retry, then re-deliver (push re-arms the watch with it).
@@ -501,16 +561,20 @@ impl Renderer {
     /// beat later. The split is the fix for the relay's "submit gap": a fast
     /// text+`\r` burst reads as a paste and the newline never submits; a delayed,
     /// isolated Enter does. See `PTY_SUBMIT_DELAY` / `flush_pty_submits`.
-    fn pty_inject(&mut self, pane: u64, text: &str) {
+    fn pty_inject(&mut self, pane: u64, text: &str, msg_ids: Vec<u64>) {
         let line = sanitize_floor_text(text);
-        let n = line.len();
+        let typed_chars = line.chars().count();
         self.pty_write_raw(pane, line.into_bytes());
-        self.pty_submit_queue
-            .push((std::time::Instant::now() + PTY_SUBMIT_DELAY, pane));
+        self.pty_submit_queue.push(super::FloorSubmit {
+            deadline: std::time::Instant::now() + PTY_SUBMIT_DELAY,
+            pane,
+            typed_chars,
+            msg_ids,
+        });
         // Host-side diagnostic (the agents can't see the PTY buffer): proves the
         // floor typed text to a pane, and that the Enter is coming separately.
         eprintln!(
-            "[pty-floor] typed {n} chars → pane {pane}; Enter in {}ms",
+            "[pty-floor] typed {typed_chars} chars → pane {pane}; Enter in {}ms",
             PTY_SUBMIT_DELAY.as_millis()
         );
     }
@@ -524,12 +588,12 @@ impl Renderer {
         }
         let now = std::time::Instant::now();
         let mut still_waiting = Vec::new();
-        for (deadline, pane) in std::mem::take(&mut self.pty_submit_queue) {
-            if deadline <= now {
-                self.pty_write_raw(pane, b"\r".to_vec());
-                eprintln!("[pty-floor] Enter → pane {pane}");
+        for s in std::mem::take(&mut self.pty_submit_queue) {
+            if s.deadline <= now {
+                self.pty_write_raw(s.pane, b"\r".to_vec());
+                eprintln!("[pty-floor] Enter → pane {}", s.pane);
             } else {
-                still_waiting.push((deadline, pane));
+                still_waiting.push(s);
             }
         }
         self.pty_submit_queue = still_waiting;
@@ -553,7 +617,7 @@ impl Renderer {
         if self.pending.is_empty() || !self.config.comms_delivery {
             return;
         }
-        let mut jobs: Vec<(String, u64, Vec<(String, String)>)> = Vec::new();
+        let mut jobs: Vec<(String, u64, Vec<u64>, Vec<(String, String)>)> = Vec::new();
         for (actor, ids) in &self.pending {
             if ids.is_empty() || self.room_subscribers.contains_key(actor) {
                 continue;
@@ -562,18 +626,21 @@ impl Renderer {
             if self.human_at_pane(pane) || !self.pty_ready(actor) {
                 continue;
             }
+            let mut id_list = Vec::new();
             let msgs: Vec<(String, String)> = ids
                 .iter()
                 .filter_map(|&id| {
                     let a = self.activities.get(id)?;
-                    Some((a.actor.clone(), a.message_text()?.to_string()))
+                    let m = (a.actor.clone(), a.message_text()?.to_string());
+                    id_list.push(id);
+                    Some(m)
                 })
                 .collect();
             if !msgs.is_empty() {
-                jobs.push((actor.clone(), pane, msgs));
+                jobs.push((actor.clone(), pane, id_list, msgs));
             }
         }
-        for (actor, pane, msgs) in jobs {
+        for (actor, pane, ids, msgs) in jobs {
             // One injection per actor (one Enter = one turn) — concatenate any
             // held messages so a backlog doesn't fire N separate turns.
             let combined = msgs
@@ -581,11 +648,166 @@ impl Renderer {
                 .map(|(from, text)| format!("[{from}] {text}"))
                 .collect::<Vec<_>>()
                 .join("  ·  ");
-            self.pty_inject(pane, &format!("[terminite room] {combined}"));
+            for &id in &ids {
+                self.set_msg_state(id, crate::proto::MsgState::FloorTyped);
+            }
+            self.pty_inject(pane, &format!("[terminite room] {combined}"), ids);
             // Typed in → consumed: drop the queue + any stall watch.
             self.pending.remove(&actor);
             self.delivery_watch.remove(&actor);
         }
+    }
+
+    /// `room_message_status {message_id}` — the delivery fate of one directed
+    /// message (R1's receipt): queued / delivered / floor_typed / read /
+    /// cancelled / gave_up. So a sender knows whether it was *processed*.
+    pub(super) fn proto_message_status(
+        &self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let Some(id) = params.get("message_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "message_status: needs a message_id".into(),
+            };
+        };
+        let Some(&state) = self.message_state.get(&id) else {
+            return crate::proto::OutPayload::Error {
+                message: "message_status: unknown message id (not a tracked directed message, or aged out)".into(),
+            };
+        };
+        let (from, to) = self
+            .activities
+            .get(id)
+            .map(|a| (a.actor.clone(), a.message_to().map(String::from)))
+            .unwrap_or_default();
+        crate::proto::OutPayload::MessageStatus {
+            message_id: id,
+            state,
+            from,
+            to,
+        }
+    }
+
+    /// `room_outbox {actor}` — every directed message this actor sent that the
+    /// room still tracks, with each one's state and a short preview. The
+    /// glanceable receipt: "what happened to everything I said."
+    pub(super) fn proto_outbox(
+        &self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_actor(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "outbox: missing or invalid actor".into(),
+            };
+        }
+        let mut messages: Vec<crate::proto::OutboxEntry> = self
+            .message_state
+            .iter()
+            .filter_map(|(&id, &state)| {
+                let a = self.activities.get(id)?;
+                if a.actor != actor {
+                    return None;
+                }
+                let preview = a.message_text().map(preview_text).unwrap_or_default();
+                Some(crate::proto::OutboxEntry {
+                    message_id: id,
+                    to: a.message_to().map(String::from),
+                    state,
+                    preview,
+                })
+            })
+            .collect();
+        messages.sort_by_key(|m| m.message_id);
+        crate::proto::OutPayload::Outbox { messages }
+    }
+
+    /// `room_message_cancel {message_id, actor}` — sender-scoped. Retract a
+    /// still-queued message (pull it from the recipient's pending so it never
+    /// lands), or *unsend* one the floor just typed but hasn't submitted yet
+    /// (erase the line + drop its Enter). Too late once it's delivered / read.
+    pub(super) fn proto_message_cancel(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        use crate::proto::MsgState;
+        let Some(id) = params.get("message_id").and_then(|v| v.as_u64()) else {
+            return crate::proto::OutPayload::Error {
+                message: "message_cancel: needs a message_id".into(),
+            };
+        };
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        // Resolve sender + addressee, then drop the borrow before mutating.
+        let Some((from, to)) = self
+            .activities
+            .get(id)
+            .map(|a| (a.actor.clone(), a.message_to().map(String::from)))
+        else {
+            return crate::proto::OutPayload::Error {
+                message: "message_cancel: unknown message id".into(),
+            };
+        };
+        if !actor.is_empty() && actor != from {
+            return crate::proto::OutPayload::Error {
+                message: "message_cancel: only the sender can cancel its own message".into(),
+            };
+        }
+        match self.message_state.get(&id).copied() {
+            Some(MsgState::Queued) => {
+                if let Some(target) = &to {
+                    if let Some(q) = self.pending.get_mut(target) {
+                        q.retain(|x| *x != id);
+                        if q.is_empty() {
+                            self.pending.remove(target);
+                        }
+                    }
+                }
+                self.set_msg_state(id, MsgState::Cancelled);
+                crate::proto::OutPayload::MessageCancel {
+                    message_id: id,
+                    cancelled: true,
+                    state: MsgState::Cancelled,
+                }
+            }
+            Some(MsgState::FloorTyped) if self.unsend_floor(id) => {
+                crate::proto::OutPayload::MessageCancel {
+                    message_id: id,
+                    cancelled: true,
+                    state: MsgState::Cancelled,
+                }
+            }
+            Some(other) => crate::proto::OutPayload::MessageCancel {
+                message_id: id,
+                cancelled: false,
+                state: other,
+            },
+            None => crate::proto::OutPayload::Error {
+                message: "message_cancel: untracked message id".into(),
+            },
+        }
+    }
+
+    /// If a floor injection covering `id` is still waiting on its delayed Enter,
+    /// erase the typed line (one backspace per typed char — the prompt was idle
+    /// when injected) and drop the Enter, so the stale message never submits.
+    /// Cancels the whole injection (its messages were typed as one line — a
+    /// batch can't be surgically un-typed). Returns false if the Enter already
+    /// fired (too late).
+    fn unsend_floor(&mut self, id: u64) -> bool {
+        let Some(pos) = self
+            .pty_submit_queue
+            .iter()
+            .position(|s| s.msg_ids.contains(&id))
+        else {
+            return false;
+        };
+        let s = self.pty_submit_queue.remove(pos);
+        self.pty_write_raw(s.pane, vec![0x7f; s.typed_chars]); // backspace ×N
+        eprintln!("[pty-floor] unsend → erased {} chars in pane {}", s.typed_chars, s.pane);
+        for mid in s.msg_ids {
+            self.set_msg_state(mid, crate::proto::MsgState::Cancelled);
+        }
+        true
     }
 
     /// `file_claim {actor, path}` — an actor declares it's working in a file.
@@ -1226,6 +1448,40 @@ mod tests {
         assert!(!valid_actor("has space"));
         assert!(!valid_actor("ctrl\x07bell"));
         assert!(!valid_actor(&"x".repeat(MAX_ACTOR_LEN + 1)));
+    }
+
+    #[test]
+    fn preview_is_one_line_and_capped() {
+        assert_eq!(preview_text("  hello   world\n  again  "), "hello world again");
+        let long = "x".repeat(200);
+        let p = preview_text(&long);
+        assert_eq!(p.chars().count(), 80); // 79 + the ellipsis
+        assert!(p.ends_with('…'));
+    }
+
+    #[test]
+    fn msg_state_serializes_snake_case() {
+        use crate::proto::MsgState;
+        let j = |s| serde_json::to_string(&s).unwrap();
+        assert_eq!(j(MsgState::Queued), "\"queued\"");
+        assert_eq!(j(MsgState::FloorTyped), "\"floor_typed\"");
+        assert_eq!(j(MsgState::GaveUp), "\"gave_up\"");
+    }
+
+    #[test]
+    fn message_status_payload_shape() {
+        let p = crate::proto::OutPayload::MessageStatus {
+            message_id: 7,
+            state: crate::proto::MsgState::Read,
+            from: "claude-blue".into(),
+            to: Some("kimi-red".into()),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(v["kind"], "message_status");
+        assert_eq!(v["message_id"], 7);
+        assert_eq!(v["state"], "read");
+        assert_eq!(v["to"], "kimi-red");
     }
 }
 

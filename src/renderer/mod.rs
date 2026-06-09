@@ -58,6 +58,16 @@ const PTY_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
 /// any paste-coalescing window, imperceptible to a watching human.
 const PTY_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(120);
 
+/// A floor injection waiting on its delayed Enter. Carries what
+/// `room_message_cancel` needs to *unsend* in this window: the typed char
+/// count (to backspace-erase the line) and the message ids it covered.
+pub(super) struct FloorSubmit {
+    pub deadline: Instant,
+    pub pane: u64,
+    pub typed_chars: usize,
+    pub msg_ids: Vec<u64>,
+}
+
 const UNDERLINE_THICKNESS: f32 = 1.5;
 /// Max distinct glyph buffers cached for the per-cell render path before a
 /// wholesale clear — bounds memory (system-impact discipline).
@@ -475,6 +485,13 @@ pub struct Renderer {
     /// and is accounted individually. Capped per actor (`PENDING_CAP`).
     pending: std::collections::HashMap<String, Vec<u64>>,
 
+    /// The delivery fate of each directed message (`message_id → MsgState`), so a
+    /// sender can be told whether its message was processed, not just logged —
+    /// R1's missing receipt. The layer already drives every transition (queue →
+    /// deliver/floor-type → read/give-up); this just records it where the sender
+    /// can read it. Bounded (`MESSAGE_STATE_CAP`, oldest ids evicted).
+    message_state: std::collections::HashMap<u64, crate::proto::MsgState>,
+
     /// Loop-guard: recent delivery timestamps per actor (a small sliding window).
     /// Caps the rate terminite will push to any one actor, so two idle agents
     /// can't bounce messages into a runaway — the real danger isn't the chatter,
@@ -524,11 +541,13 @@ pub struct Renderer {
     /// a gone actor has no pane to inject).
     actor_auto: std::collections::HashMap<String, Instant>,
 
-    /// Pending floor-message Enters (when to send · pane). The text is typed
-    /// immediately; the Enter follows a beat later so the TUI doesn't swallow it
-    /// as paste content. Drained in `flush_pty_submits` on the WaitUntil tick.
+    /// Pending floor-message Enters. The text is typed immediately; the Enter
+    /// follows a beat later so the TUI doesn't swallow it as paste content.
+    /// Drained in `flush_pty_submits` on the WaitUntil tick. Each entry also
+    /// carries what `room_message_cancel` needs to *unsend* in this window:
+    /// the typed char count (to backspace-erase) and the message ids covered.
     /// Bounded by in-flight injections (≤ pending cap), one short Vec.
-    pty_submit_queue: Vec<(Instant, u64)>,
+    pty_submit_queue: Vec<FloorSubmit>,
 
     /// The room's activity stream — workspace-global (not per-tab),
     /// because cross-pane visibility is the whole point. The lounge's
@@ -818,6 +837,7 @@ impl Renderer {
             proto_subscriber: None,
             room_subscribers: std::collections::HashMap::new(),
             pending: std::collections::HashMap::new(),
+            message_state: std::collections::HashMap::new(),
             delivery_log: std::collections::HashMap::new(),
             delivery_watch: std::collections::HashMap::new(),
             file_waiters: std::collections::HashMap::new(),
@@ -924,7 +944,7 @@ impl Renderer {
             .has_pending_pty_work()
             .then(|| Instant::now() + PTY_RETRY);
         // A deferred floor Enter waiting to fire.
-        let pty_submit = self.pty_submit_queue.iter().map(|(d, _)| *d).min();
+        let pty_submit = self.pty_submit_queue.iter().map(|s| s.deadline).min();
         [
             self.bell_flash_until,
             self.next_blink_deadline,

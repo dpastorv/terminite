@@ -144,10 +144,60 @@ pub enum OutPayload {
         from: String,
         text: String,
     },
+    /// `room_message_status` — the delivery fate of one directed message, so a
+    /// sender knows whether it was *processed*, not just logged (R1's receipt).
+    MessageStatus {
+        message_id: u64,
+        state: MsgState,
+        from: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+    },
+    /// `room_outbox` — a sender's directed messages and each one's state.
+    Outbox {
+        messages: Vec<OutboxEntry>,
+    },
+    /// `room_message_cancel` — `cancelled` true if it was retracted/unsent
+    /// before landing; false (with the current `state`) if it was too late.
+    MessageCancel {
+        message_id: u64,
+        cancelled: bool,
+        state: MsgState,
+    },
     Error {
         message: String,
     },
     Event(EventPayload),
+}
+
+/// The delivery fate of a directed room message. The receipt R1 was missing:
+/// today the layer *tracks* all of this internally and never tells the sender.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MsgState {
+    /// Recorded, waiting for a delivery path to open.
+    Queued,
+    /// Pushed down a live channel receiver the recipient holds open.
+    Delivered,
+    /// Typed into the recipient's pane by the PTY floor (Enter sent/queued).
+    FloorTyped,
+    /// The recipient `room_ack`'d it — confirmed processed.
+    Read,
+    /// The sender retracted it before it landed.
+    Cancelled,
+    /// Re-delivered the max number of times; the recipient never acted.
+    GaveUp,
+}
+
+/// One row of a sender's `room_outbox`.
+#[derive(Serialize, Debug)]
+pub struct OutboxEntry {
+    pub message_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub state: MsgState,
+    /// A short preview so the outbox is glanceable without re-fetching text.
+    pub preview: String,
 }
 
 #[derive(Serialize, Debug)]
