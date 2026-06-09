@@ -75,6 +75,8 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "msg-status" => Some(cmd_msg_status(args.get(1).and_then(|s| s.parse().ok()))),
         "cancel" => Some(cmd_cancel(args.get(1).and_then(|s| s.parse().ok()))),
         "stop" => Some(cmd_stop(args.get(1))),
+        "halt" => Some(cmd_halt(args.get(1))),
+        "release" => Some(cmd_release(args.get(1))),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
         "room-listen" => Some(cmd_room_listen(&args[1..])),
@@ -149,6 +151,9 @@ USAGE
                                      human can cancel any; agents only their own)
   terminite stop <actor>             interrupt an agent's current turn (Ctrl-C),
                                      bypassing busy — the orchestrator's halt
+  terminite halt <actor>             bench an agent: interrupt + eject from the
+                                     room until released (the reversible hard-stop)
+  terminite release <actor>          lift a halt; the agent rejoins the room
   terminite install claude-terminite [--profile <name|dir>]
   terminite install codex-terminite  [--home <dir>]
                                      make a plain agent terminite-aware —
@@ -239,6 +244,31 @@ fn cmd_stop(actor: Option<&String>) -> ExitCode {
     };
     one_shot(&format!(
         r#"{{"id":1,"method":"room_stop","params":{{"actor":"{}"}}}}"#,
+        json_escape(actor)
+    ))
+}
+
+/// `terminite halt <actor>` — bench an agent: interrupt it and eject it from the
+/// room (no delivery, no room actions) until `release`. The reversible hard-stop.
+fn cmd_halt(actor: Option<&String>) -> ExitCode {
+    let Some(actor) = actor else {
+        eprintln!("usage: terminite halt <actor>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_halt","params":{{"actor":"{}"}}}}"#,
+        json_escape(actor)
+    ))
+}
+
+/// `terminite release <actor>` — lift a halt; the agent rejoins the room.
+fn cmd_release(actor: Option<&String>) -> ExitCode {
+    let Some(actor) = actor else {
+        eprintln!("usage: terminite release <actor>");
+        return ExitCode::from(2);
+    };
+    one_shot(&format!(
+        r#"{{"id":1,"method":"room_release","params":{{"actor":"{}"}}}}"#,
         json_escape(actor)
     ))
 }

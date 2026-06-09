@@ -135,6 +135,8 @@ impl Renderer {
             "room_outbox" => self.proto_outbox(&req.params),
             "room_message_cancel" => self.proto_message_cancel(&req.params),
             "room_stop" => self.proto_room_stop(&req.params),
+            "room_halt" => self.proto_room_halt(&req.params),
+            "room_release" => self.proto_room_release(&req.params),
             "room_join" => self.proto_room_join(conn_id, peer_pid, &req.params),
             "room_who" => self.proto_room_who(),
             "tool_emit" => self.proto_tool_emit(peer_pid, &req.params),
@@ -268,6 +270,11 @@ impl Renderer {
         if !valid_actor(actor) {
             return crate::proto::OutPayload::Error {
                 message: format!("activity_emit: invalid actor (≤{MAX_ACTOR_LEN} bytes, no control/whitespace)"),
+            };
+        }
+        if self.is_halted(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "halted: you are benched by the orchestrator — ask to be released before acting in the room".into(),
             };
         }
         if let Some(to) = params.get("to").and_then(|v| v.as_str()) {
@@ -417,6 +424,10 @@ impl Renderer {
         if self.declared_status(target) == Some("busy") {
             return;
         }
+        // Benched (HALT) → nothing is delivered until the human releases it.
+        if self.is_halted(target) {
+            return;
+        }
         // Loop-guard: prune the actor's delivery window, and if it's already at
         // the cap, DON'T push — the message stays pending and catches up once the
         // rate cools. Breaks a two-agent bounce from running unbounded.
@@ -546,6 +557,9 @@ impl Renderer {
     /// What to surface in `room_who`: the brake is most urgent to see, then the
     /// fast lane, then a transient `available`.
     fn shown_status(&self, slug: &str) -> Option<String> {
+        if self.is_halted(slug) {
+            return Some("halted".into()); // the human's hold is the most urgent to see
+        }
         match self.declared_status(slug) {
             Some("busy") => Some("busy".into()),
             other => {
@@ -646,7 +660,8 @@ impl Renderer {
         }
         let mut jobs: Vec<(String, u64, Vec<u64>, Vec<(String, String)>)> = Vec::new();
         for (actor, ids) in &self.pending {
-            if ids.is_empty() || self.room_subscribers.contains_key(actor) {
+            if ids.is_empty() || self.room_subscribers.contains_key(actor) || self.is_halted(actor)
+            {
                 continue;
             }
             let Some(pane) = self.roster.pane_for_slug(actor) else { continue };
@@ -869,6 +884,55 @@ impl Renderer {
         crate::proto::OutPayload::Ok
     }
 
+    /// Is this actor benched (HALT)? Used to gate delivery + room actions.
+    fn is_halted(&self, actor: &str) -> bool {
+        self.quarantined.contains(actor)
+    }
+
+    /// `room_halt {actor}` — the ladder rung above STOP: interrupt the actor's
+    /// turn AND bench it from room participation (no delivery in, no room
+    /// actions out) until `room_release`. The reversible hard-stop. Human only.
+    pub(super) fn proto_room_halt(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_actor(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "halt: missing or invalid actor".into(),
+            };
+        }
+        // Interrupt the current turn (STOP), then bench it.
+        if let Some(pane) = self.roster.pane_for_slug(actor) {
+            self.pty_write_raw(pane, vec![0x03]);
+        }
+        self.actor_status.remove(actor);
+        self.quarantined.insert(actor.to_string());
+        eprintln!("[room] HALT → {actor} benched (interrupted + ejected)");
+        self.window.request_redraw(); // room_who reflects the hold
+        crate::proto::OutPayload::Ok
+    }
+
+    /// `room_release {actor}` — lift a HALT; the actor rejoins the room. Human.
+    pub(super) fn proto_room_release(
+        &mut self,
+        params: &serde_json::Value,
+    ) -> crate::proto::OutPayload {
+        let actor = params.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+        if !valid_actor(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "release: missing or invalid actor".into(),
+            };
+        }
+        let was = self.quarantined.remove(actor);
+        eprintln!(
+            "[room] RELEASE → {actor} {}",
+            if was { "rejoined" } else { "(wasn't halted)" }
+        );
+        self.window.request_redraw();
+        crate::proto::OutPayload::Ok
+    }
+
     /// `file_claim {actor, path}` — an actor declares it's working in a file.
     /// Advisory: the claim always succeeds (the human always wins), but if a
     /// *different* live actor already held it, that actor is returned as
@@ -883,6 +947,11 @@ impl Renderer {
         if actor.is_empty() || path.is_empty() {
             return crate::proto::OutPayload::Error {
                 message: "file_claim: needs a room actor and a path".into(),
+            };
+        }
+        if self.is_halted(actor) {
+            return crate::proto::OutPayload::Error {
+                message: "halted: you are benched by the orchestrator — ask to be released".into(),
             };
         }
         let conflict = self
@@ -1074,6 +1143,10 @@ impl Renderer {
         let Some(slug) = self.roster.slug_for_pane(pane) else {
             return crate::proto::OutPayload::Ok;
         };
+        // Benched (HALT) → don't stream a halted agent's work into the room.
+        if self.is_halted(&slug) {
+            return crate::proto::OutPayload::Ok;
+        }
         let tool = params
             .get("tool")
             .and_then(|v| v.as_str())

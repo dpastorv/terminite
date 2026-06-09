@@ -541,6 +541,14 @@ pub struct Renderer {
     /// a gone actor has no pane to inject).
     actor_auto: std::collections::HashMap<String, Instant>,
 
+    /// HALTED actors — benched by the human (the cancel ladder's reversible
+    /// middle rung). A halted actor is ejected from room participation: no
+    /// delivery reaches it, and its room actions (emit, tool-call, claim) are
+    /// refused, until the human `room_release`s it. Unlike `busy` it does NOT
+    /// expire — it's a deliberate hold the human lifts. (Local shell action is
+    /// out of the room's reach; that's the human's KILL escalation.)
+    quarantined: std::collections::HashSet<String>,
+
     /// Pending floor-message Enters. The text is typed immediately; the Enter
     /// follows a beat later so the TUI doesn't swallow it as paste content.
     /// Drained in `flush_pty_submits` on the WaitUntil tick. Each entry also
@@ -838,6 +846,7 @@ impl Renderer {
             room_subscribers: std::collections::HashMap::new(),
             pending: std::collections::HashMap::new(),
             message_state: std::collections::HashMap::new(),
+            quarantined: std::collections::HashSet::new(),
             delivery_log: std::collections::HashMap::new(),
             delivery_watch: std::collections::HashMap::new(),
             file_waiters: std::collections::HashMap::new(),
