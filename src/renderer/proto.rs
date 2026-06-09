@@ -324,6 +324,30 @@ impl Renderer {
         self.message_state.insert(id, state);
     }
 
+    /// The actor just produced activity → any message we'd delivered to it
+    /// that's still awaiting confirmation was, by evidence, processed. Mark it
+    /// `read` (R1's "processed" receipt) by INFERENCE — the recipient woke and
+    /// acted after the delivery — so the sender gets a true receipt without the
+    /// agent needing to ack. This is the only path to `read` for a floor-typed
+    /// message (it arrives as pane text with no id to ack), and the
+    /// weakest-resident-correct one: the base infers progress, the agent needn't
+    /// be clever. `read` therefore means "acked OR active-after-delivery".
+    fn mark_processed(&mut self, actor: &str) {
+        use crate::proto::MsgState;
+        let ids: Vec<u64> = self
+            .message_state
+            .iter()
+            .filter(|&(_, &s)| matches!(s, MsgState::Delivered | MsgState::FloorTyped))
+            .filter_map(|(&id, _)| {
+                let a = self.activities.get(id)?;
+                (a.message_to() == Some(actor)).then_some(id)
+            })
+            .collect();
+        for id in ids {
+            self.set_msg_state(id, MsgState::Read);
+        }
+    }
+
     fn emit_directed(&mut self, from: &str, to: Option<&str>, text: &str) -> u64 {
         let agent_name = agent_name_from_slug(from);
         let id = self.activities.emit_message(
@@ -335,10 +359,12 @@ impl Renderer {
         if to.is_some() {
             self.set_msg_state(id, crate::proto::MsgState::Queued);
         }
-        // The emitter just acted → it's awake; clear any stall watch on it and
-        // stamp its activity (so the PTY floor knows it's not idle right now).
+        // The emitter just acted → it's awake; clear any stall watch on it,
+        // stamp its activity (so the PTY floor knows it's not idle right now),
+        // and mark anything we'd delivered to it as processed (R1 receipt).
         self.delivery_watch.remove(from);
         self.last_activity.insert(from.to_string(), std::time::Instant::now());
+        self.mark_processed(from);
         if let Some(target) = to {
             let q = self.pending.entry(target.to_string()).or_default();
             q.push(id);
@@ -1026,10 +1052,12 @@ impl Renderer {
             .unwrap_or(tool.as_str())
             .to_string();
         let agent_name = agent_name_from_slug(&slug);
-        // A tool call means this actor is awake → clear its stall watch and
-        // stamp its activity (the PTY floor won't inject mid-turn).
+        // A tool call means this actor is awake → clear its stall watch, stamp
+        // its activity (the PTY floor won't inject mid-turn), and mark anything
+        // we'd delivered to it as processed (R1 receipt).
         self.delivery_watch.remove(&slug);
         self.last_activity.insert(slug.clone(), std::time::Instant::now());
+        self.mark_processed(&slug);
         self.activities.emit(
             slug,
             agent_name,
