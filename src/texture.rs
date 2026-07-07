@@ -253,9 +253,10 @@ impl TextureRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            // Match the surface so the sampled color lands in sRGB space
-            // (the decoded PNG bytes are already sRGB-encoded).
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            // Non-sRGB to match the (now Unorm) surface: the decoded PNG
+            // bytes are already sRGB-encoded, and we want them sampled raw
+            // and passed straight through to the raw target unchanged.
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });

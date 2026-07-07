@@ -249,6 +249,9 @@ impl Renderer {
         self.glyph_cache.clear();
         self.relayout();
         self.sync_active_grid();
+        // Persist the new zoom so it survives a restart (stored in the
+        // layout-state file, not the user's config).
+        self.persist_layout();
         self.window.request_redraw();
     }
 

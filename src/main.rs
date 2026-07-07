@@ -406,13 +406,39 @@ impl ApplicationHandler<UserEvent> for Terminite {
         event_loop.set_control_flow(flow);
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Final workspace save on quit. persist_layout also snapshots
+        // window geometry + zoom, so a pure resize or move with no
+        // structural change still gets remembered on the way out.
+        if let Some(r) = self.renderer.as_ref() {
+            r.persist_layout();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.renderer.is_some() {
             return;
         }
+        // Load any saved layout up front: its window geometry sizes the
+        // window at creation time, so a restore doesn't flash at the
+        // default size and then jump. Load failure (missing file, parse
+        // error, cap breach) → None, and we fall through to defaults;
+        // we never block startup on it.
+        let saved = match layout::load() {
+            Ok(s) => s,
+            Err(e) => {
+                logging::warn(&format!("layout: load failed: {e}"));
+                None
+            }
+        };
+        let (init_w, init_h) = saved
+            .as_ref()
+            .and_then(|s| s.window)
+            .map(|w| (w.width, w.height))
+            .unwrap_or((900.0, 600.0));
         let mut attributes = Window::default_attributes()
             .with_title("terminite")
-            .with_inner_size(LogicalSize::new(900.0, 600.0));
+            .with_inner_size(LogicalSize::new(init_w, init_h));
         if let Some(icon) = load_app_icon() {
             attributes = attributes.with_window_icon(Some(icon));
         }
@@ -421,22 +447,27 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 .create_window(attributes)
                 .expect("terminite: failed to create the window"),
         );
+        // Reopen where we left off. Position is physical px, already
+        // clamped to a sane range on load.
+        if let Some(w) = saved.as_ref().and_then(|s| s.window) {
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(w.x, w.y));
+        }
         // Allow IME composition input (dead keys, accents, CJK input methods).
         window.set_ime_allowed(true);
         let mut renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
-        // Restore last layout if one exists. Failure (missing file,
-        // parse error, cap breach) falls through to the freshly-
-        // constructed default shell — we never block startup.
-        match layout::load() {
-            Ok(Some(saved)) => {
-                logging::info(&format!(
-                    "layout: restoring {} pane(s)",
-                    leaf_count(&saved.root),
-                ));
-                renderer.restore_layout(saved);
+        if let Some(saved) = saved {
+            logging::info(&format!(
+                "layout: restoring {} pane(s)",
+                leaf_count(&saved.root),
+            ));
+            // Grab the persisted zoom before the layout is consumed;
+            // reapply it once the panes exist so terms re-measure at the
+            // size you left, not the configured default.
+            let font_size = saved.font_size;
+            renderer.restore_layout(saved);
+            if let Some(fs) = font_size {
+                renderer.set_font_size(fs);
             }
-            Ok(None) => {}
-            Err(e) => logging::warn(&format!("layout: load failed: {e}")),
         }
         self.renderer = Some(renderer);
     }
@@ -677,6 +708,21 @@ impl ApplicationHandler<UserEvent> for Terminite {
                             Some('v') => {
                                 if let Some(r) = self.renderer.as_mut() {
                                     r.paste();
+                                }
+                                return;
+                            }
+                            // Cmd+A: select the whole buffer (history +
+                            // screen) and copy it.
+                            Some('a') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.select_all();
+                                }
+                                return;
+                            }
+                            // Cmd+K: clear the active pane's scrollback.
+                            Some('k') => {
+                                if let Some(r) = self.renderer.as_mut() {
+                                    r.clear_scrollback();
                                 }
                                 return;
                             }

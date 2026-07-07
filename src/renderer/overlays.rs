@@ -285,17 +285,7 @@ impl Renderer {
             MenuAction::Copy => self.copy_selection(),
             MenuAction::Paste => self.paste(),
             MenuAction::OpenLink(uri) => open_uri(uri),
-            MenuAction::SelectAll => {
-                let ((sl, sc), (el, ec)) =
-                    self.active_tab_mut().live_term.whole_buffer();
-                self.active_tab_mut().selection = Some(Selection {
-                    anchor_line: sl,
-                    anchor_col: sc,
-                    head_line: el,
-                    head_col: ec,
-                });
-                self.copy_selection();
-            }
+            MenuAction::SelectAll => self.select_all(),
             MenuAction::SetTabKind { pane, kind } => {
                 let pane = *pane;
                 let kind = kind.clone();

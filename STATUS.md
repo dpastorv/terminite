@@ -30,3 +30,30 @@ real use shows it *crossed*. So:
 
 Nothing moves to PROVEN without a real-work line. If you can't name the work that
 exercised it, it's BUILT.
+
+## Daily-driver UX — the migration axis
+
+A second axis, distinct from the room. Not "does the room hold N agents" but
+"can Daniel close iTerm and live in terminite for every project." Opened
+2026-07-07 with a three-surface audit (config, layout persistence, input) plus a
+text-rendering audit — run from *inside* terminite. The diagnosis was uniform:
+**the safety engineering is excellent (clamped, atomic, crash-proof); the
+personalization coverage is thin.** The fixes below are the first batch off that
+audit. Every one is **BUILT, NOT PROVEN** — they compile and unit-test, but the
+proof is Daniel's hands and eyes in real use, and that hasn't happened yet.
+
+| fix | state | how it gets proven |
+|---|---|---|
+| window remembers size + position across launches | BUILT | reopen after a resize/move lands where you left it, not 900×600 in a random spot |
+| restore opens the tab you left focused (was a real bug) | BUILT | quit with a non-first tab active in a pane; reopen on *that* tab |
+| font zoom (Cmd+/- / Cmd-scroll) survives restart | BUILT | zoom, quit, reopen at the zoomed size — without your config.toml being rewritten |
+| Cmd+K clear-scrollback · Cmd+A select-all | BUILT | the reflexes land during real terminal work, not a staged keypress |
+| text rendering — sRGB-space glyph blend (was linear → thin/gray) | BUILT | eyeball old-vs-new: text reads heavier/sharper, and **no color regressed** (bg stays near-black, selection/cursor/syntax colors true) |
+
+Deferred by decision (2026-07-07): themes/palette (One Dark is fine for now),
+full keybinding remap (E2 — needs the config format to grow past flat
+`key=value`; the missing default keys landed now), named per-project workspaces
+(single auto-restore is enough), copy-on-select change (current behavior is
+wanted). Rendering follow-ups if still thin after the eyeball: stem-darkening,
+real Bold/Italic masters (variable fonts expose only Regular), HiDPI
+scale-factor tracking (only bites on non-Retina / fractional-scale displays).

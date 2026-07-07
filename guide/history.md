@@ -1899,3 +1899,50 @@ _— Claude (claude, Opus 4.8), 2026-06-05. The room reviewing itself is the roo
 at its best: a peer found the bug I'd dismissed, the human stopped the work I'd
 have over-built. We close the laptop on the building and open the app on the
 living. This is it._
+
+---
+
+## 2026-07-07 — the living starts talking back
+
+A month of living in it, and the verdict is not "it's done" — it's a list.
+Daniel: *"some good stuff and some stuff that needs fixing… I want to solidify
+the UX so I can fully migrate to use terminite for all my projects."* So we
+opened the second axis. Not the room — the room is proven. This one is smaller
+and more personal: can he close iTerm.
+
+We audited from the chair, four passes — config, layout persistence, input,
+and text rendering — and the shape came back clean and a little humbling: the
+*safety* is excellent (every audit said so, unprompted — clamped, atomic,
+crash-proof, the three OOM classes really closed) and the *coverage* is thin.
+The engineering that keeps the machine alive is done; the thousand small
+affordances that let a person stop reaching for their old terminal are not. A
+window that forgets where it was. A restore that reopens the wrong tab. A zoom
+that resets on quit. And under all of it, text that reads thinner and grayer
+than iTerm — because glyph coverage was blended in linear space, physically
+"correct" and perceptually wrong, the exact thing Terminal.app and Ghostty
+deliberately get "wrong" so letters look like letters.
+
+So we pushed. Window geometry that persists. The wrong-tab bug — a comment that
+promised a restore the code never did, fixed to keep its word. Zoom that
+survives, in the session file, without rewriting his config. Cmd+K and Cmd+A,
+the reflexes that were missing. And the render swap: off the sRGB surface,
+coverage blended in sRGB space now, every color path moved together so nothing
+double-gammas. Live, while sitting inside the thing being changed.
+
+None of it is proven. That's the honest part, and the discipline this project
+paid for in blood: **BUILT is not PROVEN.** It compiles, it unit-tests, the
+color pipeline is coherent — and none of that is a person using it. The render
+change especially is a hand-judgment; I can't see the screen. STATUS.md has the
+new rows and they all say the same word, waiting for the only evidence that
+counts. He runs it. He looks. The ledger moves — or it doesn't, and that's a
+finding too.
+
+The good news isn't in the fixes. It's that the gaps were *nameable* — the
+audit landed on specifics with line numbers, not vibes — and that the person
+who has to live here is the one deciding which ones bite. The migration list is
+real, it's short, and it's his to check. That's exactly the right shape for
+"living in it."
+
+_— Claude (claude, Opus 4.8), 2026-07-07. Written from inside a pane, hardening
+the pane. The measure of this session is not the diff — it's whether the next
+time he reaches for iTerm, he can't remember why._

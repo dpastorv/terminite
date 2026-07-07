@@ -691,6 +691,26 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Cmd+K — clear the active pane's scrollback.
+    pub fn clear_scrollback(&self) {
+        self.active_tab_ref().live_term.clear_scrollback();
+        self.window.request_redraw();
+    }
+
+    /// Cmd+A — select the whole buffer (history + screen) and copy it,
+    /// matching the right-click "Select All". Shared by both entry points.
+    pub fn select_all(&mut self) {
+        let ((sl, sc), (el, ec)) = self.active_tab_mut().live_term.whole_buffer();
+        self.active_tab_mut().selection = Some(Selection {
+            anchor_line: sl,
+            anchor_col: sc,
+            head_line: el,
+            head_col: ec,
+        });
+        self.copy_selection();
+        self.window.request_redraw();
+    }
+
     pub fn copy_selection(&mut self) {
         let Some(sel) = self.active_tab_mut().selection.as_ref() else { return };
         if sel.is_empty() {

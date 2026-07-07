@@ -693,6 +693,15 @@ impl LiveTerm {
         term.scroll_display(scroll);
     }
 
+    /// Wipe the scrollback history (Cmd+K), keeping the visible screen,
+    /// and snap the viewport back to the live bottom so a scrolled-up
+    /// view doesn't strand at a now-empty offset.
+    pub fn clear_scrollback(&self) {
+        let mut term = self.term.lock();
+        term.grid_mut().clear_history();
+        term.scroll_display(Scroll::Bottom);
+    }
+
     /// Scroll so an absolute line lands roughly a third of the way down the
     /// viewport — used to bring a find match into view.
     pub fn scroll_to_line(&self, abs_line: i32, rows: usize) {

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::EventLoopProxy;
@@ -73,24 +73,15 @@ const UNDERLINE_THICKNESS: f32 = 1.5;
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 4096;
 
-/// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
-/// re-encodes on store; convert sRGB → linear here so the authored colour lands
-/// true (otherwise a near-black bg double-encodes to grey). Matches the rect
-/// shader's `srgb_to_linear`.
+/// Config RGB (sRGB) → wgpu clear colour. The surface is a plain (non-sRGB)
+/// Unorm target, so the value is stored raw and shown as-is — pass the authored
+/// sRGB color straight through, no linearization.
 fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
-    fn lin(c: u8) -> f64 {
-        let s = c as f64 / 255.0;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    wgpu::Color { r: lin(r), g: lin(g), b: lin(b), a: 1.0 }
+    wgpu::Color { r: r as f64 / 255.0, g: g as f64 / 255.0, b: b as f64 / 255.0, a: 1.0 }
 }
 
-/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. RGB stays sRGB-encoded
-/// (the rect shader linearizes it); alpha is raw.
+/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. The rect shader passes
+/// RGB straight to the Unorm target (no linearization); alpha is raw.
 fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
 }
@@ -623,7 +614,15 @@ impl Renderer {
             other => crate::logging::error(&format!("wgpu uncaptured error: {other}")),
         }));
 
-        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        // Non-sRGB surface on purpose. With an sRGB target the blend
+        // hardware composites glyph coverage in *linear* space, which
+        // makes light-on-dark text look thin and gray. A plain Unorm
+        // target + glyphon's `ColorMode::Web` blends coverage in sRGB
+        // space (the "gamma-incorrect" path browsers and Ghostty use) so
+        // text reads heavier and sharper. Everything that draws here
+        // (rects, images, the clear color) outputs sRGB values directly
+        // to match — no shader linearization.
+        let format = wgpu::TextureFormat::Bgra8Unorm;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -667,7 +666,8 @@ impl Renderer {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let mut atlas =
+            TextAtlas::with_color_mode(&device, &queue, &cache, format, ColorMode::Web);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 

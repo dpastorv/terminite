@@ -38,6 +38,29 @@ pub const MAX_LAYOUT_TABS: usize = 512;
 /// they're <= `LAYOUT_VERSION`; newer ones bail and default-spawn.
 pub const LAYOUT_VERSION: u32 = 1;
 
+/// Window size + on-screen position, in logical (size) and physical
+/// (position) coordinates — enough to reopen where you left it.
+/// Every field is clamped on load: a corrupt or hostile value must
+/// not spawn a multi-thousand-pixel surface (that's the wgpu-OOM
+/// class we already closed once elsewhere).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+pub struct WindowGeom {
+    pub width: f32,
+    pub height: f32,
+    pub x: i32,
+    pub y: i32,
+}
+
+/// Hard bounds on a restored window. Size is logical px; a real
+/// display is nowhere near 10k logical px wide, so anything past that
+/// is corruption, not a preference.
+pub const MIN_WINDOW_DIM: f32 = 200.0;
+pub const MAX_WINDOW_DIM: f32 = 10_000.0;
+/// Position clamp — wide enough for any sane multi-monitor arrangement
+/// (including a monitor to the left, hence negative), tight enough to
+/// reject absurd offsets that would strand the window off every screen.
+pub const MAX_WINDOW_POS: i32 = 32_000;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Layout {
     pub version: u32,
@@ -46,6 +69,15 @@ pub struct Layout {
     /// (first/second child). `None` if the active pane couldn't be
     /// resolved at save time; restore picks the first leaf.
     pub active_pane_path: Option<Vec<u8>>,
+    /// Last window size/position. `None` on files written before this
+    /// field existed, or when geometry couldn't be read.
+    #[serde(default)]
+    pub window: Option<WindowGeom>,
+    /// Last live font size (the Cmd+/- / Cmd-scroll zoom). `None` →
+    /// fall back to the configured `font_size`. Restores the zoom
+    /// across restarts without rewriting the user's config file.
+    #[serde(default)]
+    pub font_size: Option<f32>,
     pub root: LayoutNode,
 }
 
@@ -203,6 +235,24 @@ pub fn load() -> std::io::Result<Option<Layout>> {
     // discard an otherwise-valid layout over them.
     let mut layout = layout;
     sanitize(&mut layout.root);
+    // Clamp window geometry: drop it entirely if size is non-finite,
+    // else bound size + position so a corrupt file can't spawn a giant
+    // surface or strand the window off-screen.
+    if let Some(w) = layout.window.as_mut() {
+        if !w.width.is_finite() || !w.height.is_finite() {
+            layout.window = None;
+        } else {
+            w.width = w.width.clamp(MIN_WINDOW_DIM, MAX_WINDOW_DIM);
+            w.height = w.height.clamp(MIN_WINDOW_DIM, MAX_WINDOW_DIM);
+            w.x = w.x.clamp(-MAX_WINDOW_POS, MAX_WINDOW_POS);
+            w.y = w.y.clamp(-MAX_WINDOW_POS, MAX_WINDOW_POS);
+        }
+    }
+    // Clamp the persisted zoom to the same bounds the config field uses,
+    // dropping non-finite values.
+    layout.font_size = layout.font_size.filter(|s| s.is_finite()).map(|s| {
+        s.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE)
+    });
     Ok(Some(layout))
 }
 
@@ -266,6 +316,8 @@ mod tests {
         Layout {
             version: LAYOUT_VERSION,
             active_pane_path: Some(vec![1, 0]),
+            window: Some(WindowGeom { width: 1200.0, height: 800.0, x: 100, y: 60 }),
+            font_size: Some(15.0),
             root: LayoutNode::Split {
                 dir: LayoutSplitDir::Vertical,
                 ratio: 0.6,

@@ -187,7 +187,13 @@ impl Renderer {
         // tuples while building so post-build switching doesn't have
         // to walk the layout tree again.
         let mut post_build: Vec<(PaneId, usize, TabContentKind, Option<String>)> = Vec::new();
-        let new_root = self.build_layout_node(layout.root, &mut post_build);
+        // The per-pane active tab as the layout persisted it. The
+        // post-build kind-switch loop below has to re-point each pane's
+        // active_tab to drive set_tab_kind, which clobbers this; we
+        // reinstate it once switching is done so panes come up on the
+        // tab you left focused, not the last one we touched.
+        let mut restore_active: Vec<(PaneId, usize)> = Vec::new();
+        let new_root = self.build_layout_node(layout.root, &mut post_build, &mut restore_active);
         let active = pane_id_at_path(&new_root, &active_path)
             .or_else(|| {
                 let mut first_id: Option<PaneId> = None;
@@ -244,9 +250,16 @@ impl Renderer {
                 }
             }
         }
-        // Restore active tab pointers per pane to whatever the
-        // layout said (we may have moved them above to drive
-        // set_tab_kind; reset to the persisted values).
+        // Restore active tab pointers per pane to whatever the layout
+        // said — the kind-switch loop above moved them to drive
+        // set_tab_kind, so reset to the persisted values now.
+        for (pid, tab_idx) in &restore_active {
+            if let Some(pane) = self.root.as_mut().and_then(|n| n.find_mut(*pid)) {
+                if *tab_idx < pane.tabs.len() {
+                    pane.active_tab = *tab_idx;
+                }
+            }
+        }
         self.sync_active_grid();
         self.window.set_title(super::io::WINDOW_TITLE);
         self.window.request_redraw();
@@ -260,6 +273,7 @@ impl Renderer {
         &mut self,
         node: crate::layout::LayoutNode,
         post_build: &mut Vec<(PaneId, usize, TabContentKind, Option<String>)>,
+        restore_active: &mut Vec<(PaneId, usize)>,
     ) -> PaneNode {
         match node {
             crate::layout::LayoutNode::Pane(pane_layout) => {
@@ -321,6 +335,7 @@ impl Renderer {
                     tabs.push(tab);
                 }
                 let active_tab = pane_layout.active_tab.min(tabs.len().saturating_sub(1));
+                restore_active.push((pid, active_tab));
                 let pane = Pane {
                     tabs,
                     active_tab,
@@ -337,8 +352,8 @@ impl Renderer {
                 PaneNode::Split {
                     dir,
                     ratio: ratio.clamp(0.1, 0.9),
-                    first: Box::new(self.build_layout_node(*first, post_build)),
-                    second: Box::new(self.build_layout_node(*second, post_build)),
+                    first: Box::new(self.build_layout_node(*first, post_build, restore_active)),
+                    second: Box::new(self.build_layout_node(*second, post_build, restore_active)),
                 }
             }
         }
@@ -353,9 +368,25 @@ impl Renderer {
             return;
         };
         let active_path = path_to(root, self.active_pane);
+        // Capture window geometry opportunistically. Size is logical
+        // (matches how we create the window); position is physical.
+        // Only emit it when the platform gives us a position — a bare
+        // size with no position would strand the window in a corner.
+        let window = self.window.outer_position().ok().map(|pos| {
+            let scale = self.window.scale_factor();
+            let sz = self.window.inner_size();
+            crate::layout::WindowGeom {
+                width: (sz.width as f64 / scale) as f32,
+                height: (sz.height as f64 / scale) as f32,
+                x: pos.x,
+                y: pos.y,
+            }
+        });
         let layout = crate::layout::Layout {
             version: crate::layout::LAYOUT_VERSION,
             active_pane_path: active_path,
+            window,
+            font_size: Some(self.font_size),
             root: snapshot_node(root),
         };
         if let Err(e) = crate::layout::save(&layout) {
