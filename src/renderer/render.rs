@@ -216,6 +216,8 @@ impl Renderer {
         // practice and the modal wins if both are somehow set.
         let overlay_rects = if self.modal.is_some() {
             self.build_modal_rects()
+        } else if self.palette.is_some() {
+            self.build_palette_rects()
         } else {
             self.build_menu_rects()
         };
@@ -350,6 +352,58 @@ impl Renderer {
                     &mut self.swash_cache,
                 )
                 .expect("terminite: menu text prepare failed");
+        } else if let (Some(pal), Some((x, y, first, visible))) =
+            (self.palette.as_ref(), self.palette_layout())
+        {
+            // Query prompt on the top row, then the visible command rows.
+            let text_inset = 18.0;
+            let prompt_color = Color::rgb(235, 235, 245);
+            let label_color = Color::rgb(210, 210, 222);
+            let sel_color = Color::rgb(245, 245, 255);
+            let row_bounds = |row_y: f32| TextBounds {
+                left: x as i32,
+                top: row_y as i32,
+                right: (x + PALETTE_WIDTH) as i32,
+                bottom: (row_y + PALETTE_ROW_H) as i32,
+            };
+            let mut areas: Vec<TextArea> = Vec::with_capacity(visible + 1);
+            areas.push(TextArea {
+                buffer: &pal.prompt_buf,
+                left: x + text_inset,
+                top: y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
+                scale: 1.0,
+                bounds: row_bounds(y),
+                default_color: prompt_color,
+                custom_glyphs: &[],
+            });
+            for row in 0..visible {
+                let item_idx = pal.filtered[first + row];
+                let row_y = y + PALETTE_ROW_H * (1 + row) as f32;
+                areas.push(TextArea {
+                    buffer: &pal.items[item_idx].label_buf,
+                    left: x + text_inset,
+                    top: row_y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
+                    scale: 1.0,
+                    bounds: row_bounds(row_y),
+                    default_color: if first + row == pal.selected {
+                        sel_color
+                    } else {
+                        label_color
+                    },
+                    custom_glyphs: &[],
+                });
+            }
+            self.modal_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: palette text prepare failed");
         }
 
         // Per-pane image placements: collected during phase 2 (root is
@@ -920,7 +974,7 @@ impl Renderer {
 
             // Modal and context menu sit on top of *everything* — they
             // share the rects_modal / modal_text_renderer pipelines.
-            if self.modal.is_some() || self.context_menu.is_some() {
+            if self.modal.is_some() || self.context_menu.is_some() || self.palette.is_some() {
                 self.rects_modal.render(&mut pass);
                 self.modal_text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)

@@ -418,6 +418,8 @@ pub struct Renderer {
     context_menu: Option<ContextMenu>,
     /// When Some, the find bar is open and keyboard input edits the query.
     find: Option<FindState>,
+    /// When Some, the command palette is open and keyboard input filters it.
+    palette: Option<PaletteState>,
 
     // Deadlines surfaced via `next_wakeup()` to the main loop's
     // `ControlFlow::WaitUntil(...)`. We used to spawn a fresh OS thread per
@@ -835,6 +837,7 @@ impl Renderer {
             modal: None,
             context_menu: None,
             find: None,
+            palette: None,
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
             next_surface_retry_deadline: None,

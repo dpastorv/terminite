@@ -691,6 +691,14 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    /// Cmd+Up / Cmd+Down (and Cmd+Home / Cmd+End) — jump the viewport to the
+    /// top of scrollback or back down to the live prompt.
+    pub fn scroll_to_edge(&self, top: bool) {
+        let s = if top { TermScroll::Top } else { TermScroll::Bottom };
+        self.active_tab_ref().live_term.scroll(s);
+        self.window.request_redraw();
+    }
+
     /// Cmd+K — clear the active pane's scrollback.
     pub fn clear_scrollback(&self) {
         self.active_tab_ref().live_term.clear_scrollback();

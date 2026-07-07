@@ -505,6 +505,193 @@ impl Renderer {
         self.window.request_redraw();
     }
 
+    // ── Command palette ───────────────────────────────────────────────────
+
+    pub fn has_palette(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    /// Open the command palette (Cmd+Shift+P): a filterable list of every
+    /// action + its shortcut, so the app's commands (including the novel
+    /// split/join gestures) are discoverable and runnable by name.
+    pub fn open_palette(&mut self) {
+        let items: Vec<PaletteItem> = PALETTE_COMMANDS
+            .iter()
+            .map(|(label, hint, action)| {
+                // Left-pad the label so the shortcut hint trails at a roughly
+                // consistent column. Proportional font, so it's approximate —
+                // readable, not pixel-aligned.
+                let text = format!("{label:<24}{hint}");
+                PaletteItem {
+                    label_buf: make_modal_buffer(&mut self.font_system, &text),
+                    search: label.to_lowercase(),
+                    action: *action,
+                }
+            })
+            .collect();
+        let filtered = (0..items.len()).collect();
+        let prompt_buf = make_modal_buffer(&mut self.font_system, "\u{203a} ");
+        self.palette = Some(PaletteState {
+            query: String::new(),
+            prompt_buf,
+            items,
+            filtered,
+            selected: 0,
+        });
+        self.window.request_redraw();
+    }
+
+    pub fn close_palette(&mut self) {
+        self.palette = None;
+        self.window.request_redraw();
+    }
+
+    pub fn palette_input(&mut self, ch: char) {
+        if let Some(p) = self.palette.as_mut() {
+            p.query.push(ch);
+        }
+        self.palette_refilter();
+    }
+
+    pub fn palette_backspace(&mut self) {
+        if let Some(p) = self.palette.as_mut() {
+            p.query.pop();
+        }
+        self.palette_refilter();
+    }
+
+    /// Move the selection up or down within the filtered list (wraps).
+    pub fn palette_move(&mut self, down: bool) {
+        if let Some(p) = self.palette.as_mut() {
+            let n = p.filtered.len();
+            if n == 0 {
+                return;
+            }
+            p.selected = if down {
+                (p.selected + 1) % n
+            } else if p.selected == 0 {
+                n - 1
+            } else {
+                p.selected - 1
+            };
+        }
+        self.window.request_redraw();
+    }
+
+    /// Recompute the filtered set for the current query and rebuild the
+    /// prompt line. Case-insensitive substring, matching find's simplicity.
+    pub(super) fn palette_refilter(&mut self) {
+        let (query, filtered) = match self.palette.as_ref() {
+            Some(p) => {
+                let q = p.query.to_lowercase();
+                let f: Vec<usize> = p
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, it)| q.is_empty() || it.search.contains(&q))
+                    .map(|(i, _)| i)
+                    .collect();
+                (p.query.clone(), f)
+            }
+            None => return,
+        };
+        let prompt = make_modal_buffer(&mut self.font_system, &format!("\u{203a} {query}"));
+        if let Some(p) = self.palette.as_mut() {
+            p.filtered = filtered;
+            p.selected = 0;
+            p.prompt_buf = prompt;
+        }
+        self.window.request_redraw();
+    }
+
+    /// Run the selected command and close the palette. Returns true if the
+    /// action should exit the app (Quit, or Close that shut the last pane) —
+    /// the caller owns the event loop.
+    pub fn palette_execute(&mut self) -> bool {
+        let action = self.palette.as_ref().and_then(|p| {
+            p.filtered.get(p.selected).map(|&i| p.items[i].action)
+        });
+        self.close_palette();
+        let Some(action) = action else { return false };
+        use PaletteAction::*;
+        match action {
+            NewTab => self.new_tab(),
+            SplitRight => self.split_active(SplitDir::Vertical, 0.5),
+            SplitDown => self.split_active(SplitDir::Horizontal, 0.5),
+            NextTab => self.next_tab(),
+            PrevTab => self.prev_tab(),
+            Find => self.open_find(),
+            ClearScrollback => self.clear_scrollback(),
+            SelectAll => self.select_all(),
+            ZoomIn => self.zoom_by(2.0),
+            ZoomOut => self.zoom_by(-2.0),
+            ZoomReset => self.zoom_reset(),
+            CycleFont => self.cycle_font(true),
+            ScrollTop => self.scroll_to_edge(true),
+            ScrollBottom => self.scroll_to_edge(false),
+            FocusLeft => self.focus_dir(-1.0, 0.0),
+            FocusRight => self.focus_dir(1.0, 0.0),
+            FocusUp => self.focus_dir(0.0, -1.0),
+            FocusDown => self.focus_dir(0.0, 1.0),
+            CloseTab => return self.close_active_tab(),
+            Quit => return true,
+        }
+        false
+    }
+
+    /// Palette box geometry: `(x, y, first_visible_idx, visible_count)`.
+    /// Shared by the rect and text passes so they never drift. `None` when
+    /// the palette is closed.
+    pub(super) fn palette_layout(&self) -> Option<(f32, f32, usize, usize)> {
+        let p = self.palette.as_ref()?;
+        let total = p.filtered.len();
+        let first = if p.selected >= PALETTE_MAX_ROWS {
+            p.selected - PALETTE_MAX_ROWS + 1
+        } else {
+            0
+        };
+        let visible = total.saturating_sub(first).min(PALETTE_MAX_ROWS);
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let x = ((surface_w - PALETTE_WIDTH) * 0.5).max(4.0);
+        let y = (surface_h * 0.16).max(8.0);
+        Some((x, y, first, visible))
+    }
+
+    pub(super) fn build_palette_rects(&self) -> Vec<RectInstance> {
+        let Some((x, y, first, visible)) = self.palette_layout() else {
+            return Vec::new();
+        };
+        let Some(p) = self.palette.as_ref() else { return Vec::new() };
+        // Query row on top, then the visible command rows.
+        let h = PALETTE_ROW_H * (1 + visible) as f32;
+        let border = 1.0;
+        let mut rects = vec![
+            RectInstance {
+                rect: [x - border, y - border, PALETTE_WIDTH + 2.0 * border, h + 2.0 * border],
+                color: MENU_BORDER,
+            },
+            RectInstance {
+                rect: [x, y, PALETTE_WIDTH, h],
+                color: MENU_BG,
+            },
+        ];
+        // Highlight the selected row (offset by the query row + scroll window).
+        if visible > 0 {
+            let sel_row = p.selected - first;
+            rects.push(RectInstance {
+                rect: [
+                    x,
+                    y + PALETTE_ROW_H * (1 + sel_row) as f32,
+                    PALETTE_WIDTH,
+                    PALETTE_ROW_H,
+                ],
+                color: MENU_HOVER_BG,
+            });
+        }
+        rects
+    }
+
 }
 
 // ── moved from mod.rs ───────────────────────────────
@@ -568,6 +755,79 @@ pub(super) const MENU_ITEM_H: f32 = 40.0;
 pub(super) const MENU_BG: [f32; 4] = [0.12, 0.12, 0.15, 1.0];
 pub(super) const MENU_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
 pub(super) const MENU_HOVER_BG: [f32; 4] = [0.22, 0.30, 0.46, 1.0];
+
+// ── Command palette ─────────────────────────────────────────────────────
+
+pub(super) const PALETTE_WIDTH: f32 = 560.0;
+pub(super) const PALETTE_ROW_H: f32 = MENU_ITEM_H;
+pub(super) const PALETTE_MAX_ROWS: usize = 10;
+
+#[derive(Clone, Copy)]
+pub(super) enum PaletteAction {
+    NewTab,
+    SplitRight,
+    SplitDown,
+    CloseTab,
+    NextTab,
+    PrevTab,
+    Find,
+    ClearScrollback,
+    SelectAll,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    CycleFont,
+    ScrollTop,
+    ScrollBottom,
+    FocusLeft,
+    FocusRight,
+    FocusUp,
+    FocusDown,
+    Quit,
+}
+
+/// One command in the palette: its rendered label buffer, a lowercased
+/// search key, and the action to run.
+pub(super) struct PaletteItem {
+    pub label_buf: Buffer,
+    pub search: String,
+    pub action: PaletteAction,
+}
+
+pub(super) struct PaletteState {
+    pub query: String,
+    pub prompt_buf: Buffer,
+    pub items: Vec<PaletteItem>,
+    /// Indices into `items` matching the current query, in display order.
+    pub filtered: Vec<usize>,
+    /// Index into `filtered` (not `items`) of the highlighted row.
+    pub selected: usize,
+}
+
+/// (label, shortcut hint, action). Order is the display order at empty query.
+/// Symbols: ⌘ super, ⇧ shift, ⌥ option, ↑↓←→ arrows.
+pub(super) const PALETTE_COMMANDS: &[(&str, &str, PaletteAction)] = &[
+    ("New Tab", "\u{2318}T", PaletteAction::NewTab),
+    ("Split Right", "\u{2318}D", PaletteAction::SplitRight),
+    ("Split Down", "\u{2318}\u{21e7}D", PaletteAction::SplitDown),
+    ("Close Tab / Pane", "\u{2318}W", PaletteAction::CloseTab),
+    ("Next Tab", "\u{2318}\u{21e7}]", PaletteAction::NextTab),
+    ("Previous Tab", "\u{2318}\u{21e7}[", PaletteAction::PrevTab),
+    ("Find", "\u{2318}F", PaletteAction::Find),
+    ("Clear Scrollback", "\u{2318}K", PaletteAction::ClearScrollback),
+    ("Select All", "\u{2318}A", PaletteAction::SelectAll),
+    ("Zoom In", "\u{2318}+", PaletteAction::ZoomIn),
+    ("Zoom Out", "\u{2318}-", PaletteAction::ZoomOut),
+    ("Reset Zoom", "\u{2318}0", PaletteAction::ZoomReset),
+    ("Cycle Font", "\u{2318}\u{21e7}F", PaletteAction::CycleFont),
+    ("Scroll to Top", "\u{2318}\u{2191}", PaletteAction::ScrollTop),
+    ("Scroll to Bottom", "\u{2318}\u{2193}", PaletteAction::ScrollBottom),
+    ("Focus Pane Left", "\u{2318}\u{2325}\u{2190}", PaletteAction::FocusLeft),
+    ("Focus Pane Right", "\u{2318}\u{2325}\u{2192}", PaletteAction::FocusRight),
+    ("Focus Pane Up", "\u{2318}\u{2325}\u{2191}", PaletteAction::FocusUp),
+    ("Focus Pane Down", "\u{2318}\u{2325}\u{2193}", PaletteAction::FocusDown),
+    ("Quit", "\u{2318}Q", PaletteAction::Quit),
+];
 
 // Find bar — a floating box at the top-right of the content area.
 pub(super) const FIND_BAR_W: f32 = 420.0;

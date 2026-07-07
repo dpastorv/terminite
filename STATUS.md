@@ -49,6 +49,9 @@ proof is Daniel's hands and eyes in real use, and that hasn't happened yet.
 | font zoom (Cmd+/- / Cmd-scroll) survives restart | BUILT | zoom, quit, reopen at the zoomed size — without your config.toml being rewritten |
 | Cmd+K clear-scrollback · Cmd+A select-all | BUILT | the reflexes land during real terminal work, not a staged keypress |
 | text rendering — sRGB-space glyph blend (was linear → thin/gray) | BUILT | eyeball old-vs-new: text reads heavier/sharper, and **no color regressed** (bg stays near-black, selection/cursor/syntax colors true) |
+| word-select grabs paths / URLs / hashes whole | BUILT | double-click `~/src/foo.rs` or a URL — one gesture selects it all |
+| keyboard scroll to top / bottom (Cmd+↑/↓, Cmd+Home/End) | BUILT | scroll deep, Cmd+↑ to the top, Cmd+↓ back to the prompt |
+| command palette (Cmd+⇧+P) — filter + run any action | BUILT | open it, type "split", Enter; every action + its shortcut is discoverable there |
 
 Deferred by decision (2026-07-07): themes/palette (One Dark is fine for now),
 full keybinding remap (E2 — needs the config format to grow past flat
@@ -57,3 +60,11 @@ full keybinding remap (E2 — needs the config format to grow past flat
 wanted). Rendering follow-ups if still thin after the eyeball: stem-darkening,
 real Bold/Italic masters (variable fonts expose only Regular), HiDPI
 scale-factor tracking (only bites on non-Retina / fractional-scale displays).
+
+Held for the next push (real features, not papercuts — half-building them on an
+unproven base is the trap): **block-surfacing** (exit-status gutter marks,
+command durations, prompt-jump — all need the OSC 133 session-absolute→live
+coordinate plumbing) and **wiring the settings pane** (the config-UI scaffold is
+dead code today). **Scroll-shear** (render §3) is *not* built: the audit flagged
+it low-confidence and it lives in the hot render path, so it waits until Daniel
+confirms he actually sees text/highlight shear during momentum scroll.

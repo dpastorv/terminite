@@ -584,6 +584,43 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         }
                         return;
                     }
+                    // Command palette open: type to filter, ↑/↓ to move,
+                    // Enter runs the selection, Esc (or Cmd+Shift+P) closes.
+                    if r.has_palette() && event.state == ElementState::Pressed {
+                        let cmd = self.modifiers.super_key();
+                        let ctrl = self.modifiers.control_key();
+                        if cmd {
+                            if let Key::Character(t) = &event.logical_key {
+                                if t.chars().next().map(|c| c.to_ascii_lowercase())
+                                    == Some('p')
+                                {
+                                    r.close_palette();
+                                    return;
+                                }
+                            }
+                        }
+                        match &event.logical_key {
+                            Key::Named(NamedKey::Escape) => r.close_palette(),
+                            Key::Named(NamedKey::Enter) => {
+                                if r.palette_execute() {
+                                    event_loop.exit();
+                                }
+                            }
+                            Key::Named(NamedKey::ArrowDown) => r.palette_move(true),
+                            Key::Named(NamedKey::ArrowUp) => r.palette_move(false),
+                            Key::Named(NamedKey::Backspace) => r.palette_backspace(),
+                            Key::Named(NamedKey::Space) => r.palette_input(' '),
+                            Key::Character(t) if !cmd && !ctrl => {
+                                for ch in t.chars() {
+                                    if !ch.is_control() {
+                                        r.palette_input(ch);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        return;
+                    }
                     // Find bar open: keyboard edits the query. Cmd+F closes
                     // it; Esc closes; Enter / Shift+Enter cycle matches;
                     // Backspace edits; printable chars append.
@@ -642,6 +679,19 @@ impl ApplicationHandler<UserEvent> for Terminite {
                             return;
                         }
                     }
+                    // Cmd+Up/Down (and Cmd+Home/End for external keyboards):
+                    // jump to the top of scrollback or back to the live prompt.
+                    let edge = match &event.logical_key {
+                        Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::Home) => Some(true),
+                        Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::End) => Some(false),
+                        _ => None,
+                    };
+                    if let Some(top) = edge {
+                        if let Some(r) = self.renderer.as_mut() {
+                            r.scroll_to_edge(top);
+                        }
+                        return;
+                    }
                     if let Key::Character(text) = &event.logical_key {
                         let ch = text.chars().next().map(|c| c.to_ascii_lowercase());
                         let shift = self.modifiers.shift_key();
@@ -672,6 +722,13 @@ impl ApplicationHandler<UserEvent> for Terminite {
                                 Some('f') => {
                                     if let Some(r) = self.renderer.as_mut() {
                                         r.cycle_font(true);
+                                    }
+                                    return;
+                                }
+                                // Cmd+Shift+P: open the command palette.
+                                Some('p') => {
+                                    if let Some(r) = self.renderer.as_mut() {
+                                        r.open_palette();
                                     }
                                     return;
                                 }

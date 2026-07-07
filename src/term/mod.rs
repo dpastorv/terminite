@@ -542,9 +542,13 @@ impl LiveTerm {
         }
     }
 
-    /// Find the word boundaries around (line, col). Word chars: alphanumeric
-    /// and `_`. If the target cell isn't a word char, returns a single-cell
-    /// "word." `line` is in absolute alacritty coordinates.
+    /// Find the word boundaries around (line, col). "Word" here is the
+    /// terminal-useful sense: alphanumerics plus the punctuation that keeps a
+    /// file path, URL, flag, or hash in one piece (`_-./~:@%+=#?&`), so a
+    /// double-click grabs `~/src/foo.rs`, `https://x.y/z`, or a git SHA whole
+    /// instead of stopping at the first dot or slash. If the target cell isn't
+    /// a word char, returns a single-cell "word." `line` is in absolute
+    /// alacritty coordinates.
     pub fn word_at(&self, line: i32, col: usize) -> ((i32, usize), (i32, usize)) {
         let term = self.term.lock();
         let grid = term.grid();
@@ -556,7 +560,8 @@ impl LiveTerm {
             return ((line, col), (line, col));
         }
         let col = col.min(cols - 1);
-        let is_word = |c: char| c.is_alphanumeric() || c == '_';
+        let is_word =
+            |c: char| c.is_alphanumeric() || "_-./~:@%+=#?&".contains(c);
         let row = &grid[Line(line)];
         let target = row[Column(col)].c;
         if !is_word(target) {
