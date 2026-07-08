@@ -52,6 +52,7 @@ proof is Daniel's hands and eyes in real use, and that hasn't happened yet.
 | word-select grabs paths / URLs / hashes whole | BUILT | double-click `~/src/foo.rs` or a URL — one gesture selects it all |
 | keyboard scroll to top / bottom (Cmd+↑/↓, Cmd+Home/End) | BUILT | scroll deep, Cmd+↑ to the top, Cmd+↓ back to the prompt |
 | command palette (Cmd+⇧+P) — filter + run any action | BUILT | open it, type "split", Enter; every action + its shortcut is discoverable there |
+| HiDPI — UI scales to the display (fixes oversized text on 1× monitors) | BUILT | Daniel hit it live 2026-07-07 switching to a non-Retina monitor. Reference-scale model (config tuned for 2×, ×`scale/2`): Retina unchanged, 1× halved. Relaunch on each monitor is the real fix; live-drag rescales text now, chrome on relaunch |
 
 Deferred by decision (2026-07-07): themes/palette (One Dark is fine for now),
 full keybinding remap (E2 — needs the config format to grow past flat
