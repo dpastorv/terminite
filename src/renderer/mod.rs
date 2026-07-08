@@ -370,6 +370,8 @@ pub struct Renderer {
     /// the grid math and the chrome layout.
     tab_bar_height: f32,
     font_size: f32,
+    /// Content font weight (`wght` axis). Startup-applied from config.
+    font_weight: u16,
     font_family: String,
     grid_cols: usize,
     grid_rows: usize,
@@ -648,6 +650,7 @@ impl Renderer {
         let config = Config::load();
         let font_size = config.font_size;
         let font_family = config.font_family.clone();
+        let font_weight = config.font_weight as u16;
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let bg_color = rgb_to_clear(config.background);
         let focus_tint = rgba_to_floats(config.focus_tint);
@@ -814,6 +817,7 @@ impl Renderer {
             tab_line_h,
             tab_bar_height,
             font_size,
+            font_weight,
             font_family,
             grid_cols: cols,
             grid_rows: rows,

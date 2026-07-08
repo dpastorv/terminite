@@ -18,6 +18,10 @@ use std::path::PathBuf;
 // per-frame RSS kill switch can react. Every numeric field is clamped.
 pub(crate) const MIN_FONT_SIZE: f32 = 6.0;
 pub(crate) const MAX_FONT_SIZE: f32 = 200.0;
+/// Font weight bounds — the `wght` variation axis of the bundled variable
+/// fonts (JetBrains Mono spans 100–800; keep a touch of headroom).
+pub(crate) const MIN_FONT_WEIGHT: f32 = 100.0;
+pub(crate) const MAX_FONT_WEIGHT: f32 = 900.0;
 const MAX_PADDING: f32 = 400.0;
 const MAX_SCROLLBACK: i64 = 50_000;
 const MIN_LINE_HEIGHT: f32 = 0.7;
@@ -59,6 +63,10 @@ pub struct Config {
     pub font_family: String,
     /// Text size in pixels. Startup-applied.
     pub font_size: f32,
+    /// Content font weight (the variable font's `wght` axis): 400 = Regular,
+    /// 500–600 = heavier stems (crisper small text on low-DPI screens).
+    /// Startup-applied.
+    pub font_weight: f32,
     /// Window background colour (RGB). Hot-reloaded on focus-gain — set it as a
     /// hex string in config (`background = "#1a1b26"`), click back in, it applies.
     pub background: (u8, u8, u8),
@@ -178,6 +186,8 @@ pub fn schema() -> Vec<ConfigKey> {
           "Monospace family. Bundled: JetBrains Mono, Fira Code, DM Mono, PT Mono, Roboto Mono. Empty = platform default."),
         k("font_size", ConfigKind::Float, ConfigValue::Float(28.0), false,
           "Content font size in pixels. Startup-applied."),
+        k("font_weight", ConfigKind::Float, ConfigValue::Float(400.0), false,
+          "Content font weight (100–900). 400 = Regular; try 500–600 for crisper text on low-DPI monitors. Startup-applied."),
         k("background", ConfigKind::String, ConfigValue::String("#0a0a0f"), true,
           "Window background colour, hex (#rrggbb). Hot-reloaded."),
         k("show_block_labels", ConfigKind::Bool, ConfigValue::Bool(false), true,
@@ -237,6 +247,7 @@ impl Default for Config {
         Self {
             font_family: crate::fonts::DEFAULT_FAMILY.to_string(),
             font_size: 28.0,
+            font_weight: 400.0,
             background: crate::palette::BACKGROUND_RGB,
             show_block_labels: false,
             focus_tint: (255, 255, 255, 1),
@@ -310,6 +321,13 @@ impl Config {
                     if let Some(n) = val.as_f32() {
                         if n.is_finite() {
                             self.font_size = n.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+                        }
+                    }
+                }
+                "font_weight" => {
+                    if let Some(n) = val.as_f32() {
+                        if n.is_finite() {
+                            self.font_weight = n.clamp(MIN_FONT_WEIGHT, MAX_FONT_WEIGHT);
                         }
                     }
                 }

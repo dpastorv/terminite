@@ -455,6 +455,7 @@ impl Renderer {
                     line_height,
                     cell_advance,
                     &self.font_family,
+                    self.font_weight,
                 );
                 self.glyph_cache.insert((text, bold, italic, fs_bits), buf);
             }
@@ -1238,14 +1239,19 @@ pub(super) fn make_glyph_buffer(
     line_height: f32,
     cell_advance: f32,
     family: &str,
+    weight: u16,
 ) -> Buffer {
     let mut buf = Buffer::new(font_system, Metrics::new(font_size, line_height));
     // Room for a double-width glyph so it isn't wrapped/clipped during shaping.
     buf.set_size(font_system, Some(cell_advance * 2.0 + 2.0), Some(line_height));
     buf.set_monospace_width(font_system, Some(cell_advance));
-    let mut attrs = Attrs::new().family(font_family(family));
+    // Non-bold cells shape at the configured weight — for a variable font this
+    // drives the real `wght` axis, so 500–600 renders heavier stems (crisper
+    // small text) rather than faux-bold. Bold cells stay a distinct step above.
+    let base_weight = Weight(weight);
+    let mut attrs = Attrs::new().family(font_family(family)).weight(base_weight);
     if bold {
-        attrs = attrs.weight(Weight::BOLD);
+        attrs = attrs.weight(Weight(weight.max(Weight::BOLD.0)));
     }
     if italic {
         attrs = attrs.style(Style::Italic);
