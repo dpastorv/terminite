@@ -7,16 +7,6 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        // A move to a different-density monitor changes the scale factor
-        // (winit sends this Resized right after ScaleFactorChanged). Re-derive
-        // the physical font metrics so text keeps its perceptual size. Chrome
-        // (padding / tab bar) re-scales fully on the next relaunch; here we
-        // rescale the dominant element — text — live.
-        let new_scale = self.window.scale_factor() as f32;
-        if (new_scale - self.scale_factor).abs() > f32::EPSILON {
-            self.scale_factor = new_scale;
-            self.apply_font_metrics();
-        }
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
@@ -182,29 +172,17 @@ impl Renderer {
     /// propagate to the next frame automatically; `relayout` recomputes
     /// the grid with the new pad on top.
     pub(super) fn apply_live_layout(&mut self) {
-        // Every physical metric is the config's reference-scale value times the
-        // display's ui factor — scale here too, or a focus-reload would snap
-        // padding / gutters back to unscaled and break HiDPI.
-        let ui = self.ui_scale();
         let new_line_height =
             (self.font_size * LINE_H_RATIO * self.config.line_height).round();
-        let new_pad = scale_padding(self.config.padding, ui);
-        let new_gutter_left = self.config.gutter_left * ui;
-        let new_gutter_gap = self.config.gutter_gap * ui;
-        let new_highlight_pad_x = self.config.highlight_pad_x * ui;
-        let new_highlight_pad_y = self.config.highlight_pad_y * ui;
-        let new_highlight_offset_y = self.config.highlight_offset_y * ui;
-        let new_tab_min_width = self.config.tab_min_width * ui;
-        let new_tab_max_width = self.config.tab_max_width * ui;
         let line_height_changed = (new_line_height - self.line_height).abs() > f32::EPSILON;
-        let pad_or_gutter_changed = self.pad != new_pad
-            || self.gutter_left != new_gutter_left
-            || self.gutter_gap != new_gutter_gap
-            || self.highlight_pad_x != new_highlight_pad_x
-            || self.highlight_pad_y != new_highlight_pad_y
-            || self.highlight_offset_y != new_highlight_offset_y
-            || self.tab_min_width != new_tab_min_width
-            || self.tab_max_width != new_tab_max_width;
+        let pad_or_gutter_changed = self.pad != self.config.padding
+            || self.gutter_left != self.config.gutter_left
+            || self.gutter_gap != self.config.gutter_gap
+            || self.highlight_pad_x != self.config.highlight_pad_x
+            || self.highlight_pad_y != self.config.highlight_pad_y
+            || self.highlight_offset_y != self.config.highlight_offset_y
+            || self.tab_min_width != self.config.tab_min_width
+            || self.tab_max_width != self.config.tab_max_width;
         let new_bg = rgb_to_clear(self.config.background);
         let new_tint = rgba_to_floats(self.config.focus_tint);
         let new_cursor = rgba_to_floats(self.config.cursor_color);
@@ -221,14 +199,14 @@ impl Renderer {
         self.cursor_color = new_cursor;
         self.selection_color = new_selection;
 
-        self.pad = new_pad;
-        self.gutter_left = new_gutter_left;
-        self.gutter_gap = new_gutter_gap;
-        self.highlight_pad_x = new_highlight_pad_x;
-        self.highlight_pad_y = new_highlight_pad_y;
-        self.highlight_offset_y = new_highlight_offset_y;
-        self.tab_min_width = new_tab_min_width;
-        self.tab_max_width = new_tab_max_width;
+        self.pad = self.config.padding;
+        self.gutter_left = self.config.gutter_left;
+        self.gutter_gap = self.config.gutter_gap;
+        self.highlight_pad_x = self.config.highlight_pad_x;
+        self.highlight_pad_y = self.config.highlight_pad_y;
+        self.highlight_offset_y = self.config.highlight_offset_y;
+        self.tab_min_width = self.config.tab_min_width;
+        self.tab_max_width = self.config.tab_max_width;
         self.line_height = new_line_height;
 
         if line_height_changed {
@@ -249,21 +227,18 @@ impl Renderer {
         self.window.request_redraw();
     }
 
-    /// The HiDPI multiplier for the current display — physical metrics are
-    /// the config's reference-scale values times this.
-    pub(super) fn ui_scale(&self) -> f32 {
-        self.scale_factor / REFERENCE_SCALE
-    }
-
-    /// Re-derive the physical font metrics from `base_font_size × ui_scale`,
-    /// re-shape every tab's grid metrics, and drop the per-cell glyph cache so
-    /// it re-warms at the new size. Does NOT relayout — the caller does (both
-    /// callers follow with `relayout` + `sync_active_grid`).
-    pub(super) fn apply_font_metrics(&mut self) {
-        self.font_size = (self.base_font_size * self.ui_scale()).round().max(1.0);
-        self.cell_advance =
-            measure_cell_advance(&mut self.font_system, self.font_size, &self.font_family);
-        self.line_height = (self.font_size * LINE_H_RATIO * self.config.line_height).round();
+    /// Live font-size change — Cmd +/-/0 and Ctrl+wheel zoom. Re-measures the
+    /// cell for the new size, updates every buffer's metrics, regrids + resizes
+    /// the PTYs (`relayout`), and drops the per-cell glyph cache so it re-warms
+    /// at the new size. Clamped to the same bounds as the config field.
+    pub fn set_font_size(&mut self, new_size: f32) {
+        let new_size = new_size.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE);
+        if (new_size - self.font_size).abs() < 0.05 {
+            return;
+        }
+        self.font_size = new_size;
+        self.cell_advance = measure_cell_advance(&mut self.font_system, new_size, &self.font_family);
+        self.line_height = (new_size * LINE_H_RATIO * self.config.line_height).round();
         let metrics = Metrics::new(self.font_size, self.line_height);
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
@@ -272,33 +247,18 @@ impl Renderer {
             tab.buffer_dirty = true;
         }
         self.glyph_cache.clear();
-    }
-
-    /// Live font-size change — Cmd +/-/0 and Ctrl+wheel zoom. Sets the *base*
-    /// (pre-HiDPI) size; the physical raster size is re-derived by the display
-    /// scale, so the zoom you pick survives a move to a denser/sparser monitor.
-    /// Clamped to the same bounds as the config field.
-    pub fn set_font_size(&mut self, new_base: f32) {
-        let new_base =
-            new_base.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE);
-        if (new_base - self.base_font_size).abs() < 0.05 {
-            return;
-        }
-        self.base_font_size = new_base;
-        self.apply_font_metrics();
         self.relayout();
         self.sync_active_grid();
         // Persist the new zoom so it survives a restart (stored in the
-        // layout-state file, not the user's config). Base size, so it's
-        // monitor-independent.
+        // layout-state file, not the user's config).
         self.persist_layout();
         self.window.request_redraw();
     }
 
-    /// Nudge the base font size by `delta` points (rounded for crisp cells).
-    /// Used by the zoom keys and Ctrl+wheel.
+    /// Nudge the font size by `delta` px (rounded to whole pixels for crisp
+    /// cells). Used by the zoom keys and Ctrl+wheel.
     pub fn zoom_by(&mut self, delta: f32) {
-        self.set_font_size((self.base_font_size + delta).round());
+        self.set_font_size((self.font_size + delta).round());
     }
 
     /// Reset the font size to the configured default.

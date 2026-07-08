@@ -48,11 +48,20 @@ proof is Daniel's hands and eyes in real use, and that hasn't happened yet.
 | restore opens the tab you left focused (was a real bug) | BUILT | quit with a non-first tab active in a pane; reopen on *that* tab |
 | font zoom (Cmd+/- / Cmd-scroll) survives restart | BUILT | zoom, quit, reopen at the zoomed size — without your config.toml being rewritten |
 | Cmd+K clear-scrollback · Cmd+A select-all | BUILT | the reflexes land during real terminal work, not a staged keypress |
-| text rendering — sRGB-space glyph blend (was linear → thin/gray) | BUILT | eyeball old-vs-new: text reads heavier/sharper, and **no color regressed** (bg stays near-black, selection/cursor/syntax colors true) |
 | word-select grabs paths / URLs / hashes whole | BUILT | double-click `~/src/foo.rs` or a URL — one gesture selects it all |
 | keyboard scroll to top / bottom (Cmd+↑/↓, Cmd+Home/End) | BUILT | scroll deep, Cmd+↑ to the top, Cmd+↓ back to the prompt |
 | command palette (Cmd+⇧+P) — filter + run any action | BUILT | open it, type "split", Enter; every action + its shortcut is discoverable there |
-| HiDPI — UI scales to the display (fixes oversized text on 1× monitors) | BUILT | Daniel hit it live 2026-07-07 switching to a non-Retina monitor. Reference-scale model (config tuned for 2×, ×`scale/2`): Retina unchanged, 1× halved. Relaunch on each monitor is the real fix; live-drag rescales text now, chrome on relaunch |
+
+**Reverted 2026-07-07 — regressed on a standard 1080p monitor.** Two render
+changes (the sRGB-space glyph blend "gamma" fix, and the HiDPI auto-scale) were
+backed out after they made text **thin / faint / washed** at small physical
+sizes on a low-DPI external display — the single most common external monitor.
+Lesson: both were *blind* changes to rendering I couldn't see; stacking two of
+them buried the signal. The real goals stand — **correct sizing across displays
+(HiDPI)** and **legible small text on low-DPI (hinting / stem-darkening)** — but
+they're a deliberate, eyeball-in-the-loop effort, one variable at a time, not a
+blind push. The renderer is back to the exact known-good state Daniel
+daily-drove.
 
 Deferred by decision (2026-07-07): themes/palette (One Dark is fine for now),
 full keybinding remap (E2 — needs the config format to grow past flat

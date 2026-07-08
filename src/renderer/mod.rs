@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
 use glyphon::{
-    Attrs, Buffer, Cache, Color, ColorMode, Family, FontSystem, Metrics, Resolution, Shaping,
-    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::EventLoopProxy;
@@ -73,27 +73,26 @@ const UNDERLINE_THICKNESS: f32 = 1.5;
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 4096;
 
-/// Config RGB (sRGB) → wgpu clear colour. The surface is a plain (non-sRGB)
-/// Unorm target, so the value is stored raw and shown as-is — pass the authored
-/// sRGB color straight through, no linearization.
+/// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
+/// re-encodes on store; convert sRGB → linear here so the authored colour lands
+/// true (otherwise a near-black bg double-encodes to grey). Matches the rect
+/// shader's `srgb_to_linear`.
 fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
-    wgpu::Color { r: r as f64 / 255.0, g: g as f64 / 255.0, b: b as f64 / 255.0, a: 1.0 }
+    fn lin(c: u8) -> f64 {
+        let s = c as f64 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    wgpu::Color { r: lin(r), g: lin(g), b: lin(b), a: 1.0 }
 }
 
-/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. The rect shader passes
-/// RGB straight to the Unorm target (no linearization); alpha is raw.
+/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. RGB stays sRGB-encoded
+/// (the rect shader linearizes it); alpha is raw.
 fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
-}
-
-/// Scale each edge of a `Padding` by the HiDPI ui factor.
-fn scale_padding(p: Padding, ui: f32) -> Padding {
-    Padding {
-        left: p.left * ui,
-        right: p.right * ui,
-        top: p.top * ui,
-        bottom: p.bottom * ui,
-    }
 }
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
@@ -144,12 +143,6 @@ const TAB_SEPARATOR: [f32; 4] = [0.16, 0.16, 0.20, 1.0];
 /// Ratio used to derive tab line height from `tab_font_size`. Matches
 /// the prior hardcoded 26 / 18.
 const TAB_LINE_RATIO: f32 = 26.0 / 18.0;
-/// The display scale the config's pixel dimensions were tuned for — a 2x
-/// Retina panel (where every default was authored). At runtime we multiply
-/// every physical metric by `scale_factor / REFERENCE_SCALE`, so the UI is
-/// the same perceptual size on a 1x monitor as on Retina: on Retina this is
-/// x1.0 (identical to before, no config change), on a 1x external it's x0.5.
-const REFERENCE_SCALE: f32 = 2.0;
 /// Horizontal inset from the tab's left edge to where the title text starts.
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
@@ -376,15 +369,7 @@ pub struct Renderer {
     /// Height of the per-pane tab-bar strip in pixels. Threads through
     /// the grid math and the chrome layout.
     tab_bar_height: f32,
-    /// Physical raster font size — `base_font_size * (scale_factor / REFERENCE_SCALE)`.
     font_size: f32,
-    /// The user's chosen font size before HiDPI scaling (config default or a
-    /// zoom). Zoom + persistence operate on this; `font_size` derives from it,
-    /// so the zoom you set survives a move to a different-density monitor.
-    base_font_size: f32,
-    /// The window's current display scale factor (physical px per logical px).
-    /// Re-read on resize; a change re-derives every scaled metric.
-    scale_factor: f32,
     font_family: String,
     grid_cols: usize,
     grid_rows: usize,
@@ -640,15 +625,7 @@ impl Renderer {
             other => crate::logging::error(&format!("wgpu uncaptured error: {other}")),
         }));
 
-        // Non-sRGB surface on purpose. With an sRGB target the blend
-        // hardware composites glyph coverage in *linear* space, which
-        // makes light-on-dark text look thin and gray. A plain Unorm
-        // target + glyphon's `ColorMode::Web` blends coverage in sRGB
-        // space (the "gamma-incorrect" path browsers and Ghostty use) so
-        // text reads heavier and sharper. Everything that draws here
-        // (rects, images, the clear color) outputs sRGB values directly
-        // to match — no shader linearization.
-        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -669,36 +646,30 @@ impl Renderer {
         // Layout metrics from the config, locked for this run. line_height
         // derives from font_size; cell_advance is measured from the font.
         let config = Config::load();
-        // HiDPI: scale every physical dimension by the display's scale relative
-        // to the 2x reference the config was tuned for (see REFERENCE_SCALE).
-        let scale_factor = window.scale_factor() as f32;
-        let ui = scale_factor / REFERENCE_SCALE;
-        let base_font_size = config.font_size;
-        let font_size = (base_font_size * ui).round().max(1.0);
+        let font_size = config.font_size;
         let font_family = config.font_family.clone();
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
         let bg_color = rgb_to_clear(config.background);
         let focus_tint = rgba_to_floats(config.focus_tint);
         let cursor_color = rgba_to_floats(config.cursor_color);
         let selection_color = rgba_to_floats(config.selection_color);
-        let pad = scale_padding(config.padding, ui);
-        let gutter_left = config.gutter_left * ui;
-        let gutter_gap = config.gutter_gap * ui;
-        let highlight_pad_x = config.highlight_pad_x * ui;
-        let highlight_pad_y = config.highlight_pad_y * ui;
-        let highlight_offset_y = config.highlight_offset_y * ui;
-        let tab_min_width = config.tab_min_width * ui;
-        let tab_max_width = config.tab_max_width * ui;
-        let tab_font_size = (config.tab_font_size * ui).round().max(1.0);
+        let pad = config.padding;
+        let gutter_left = config.gutter_left;
+        let gutter_gap = config.gutter_gap;
+        let highlight_pad_x = config.highlight_pad_x;
+        let highlight_pad_y = config.highlight_pad_y;
+        let highlight_offset_y = config.highlight_offset_y;
+        let tab_min_width = config.tab_min_width;
+        let tab_max_width = config.tab_max_width;
+        let tab_font_size = config.tab_font_size;
         let tab_line_h = (tab_font_size * TAB_LINE_RATIO).round();
-        let tab_bar_height = (config.tab_bar_height * ui).round();
+        let tab_bar_height = config.tab_bar_height;
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
-        let mut atlas =
-            TextAtlas::with_color_mode(&device, &queue, &cache, format, ColorMode::Web);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
@@ -843,8 +814,6 @@ impl Renderer {
             tab_line_h,
             tab_bar_height,
             font_size,
-            base_font_size,
-            scale_factor,
             font_family,
             grid_cols: cols,
             grid_rows: rows,

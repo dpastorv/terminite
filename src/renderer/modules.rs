@@ -386,8 +386,7 @@ impl Renderer {
             version: crate::layout::LAYOUT_VERSION,
             active_pane_path: active_path,
             window,
-            // Base (pre-HiDPI) size, so a restored zoom is monitor-independent.
-            font_size: Some(self.base_font_size),
+            font_size: Some(self.font_size),
             root: snapshot_node(root),
         };
         if let Err(e) = crate::layout::save(&layout) {

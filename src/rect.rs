@@ -57,14 +57,20 @@ fn vs_main(
     return out;
 }
 
-// Colours are authored in sRGB space (a palette value / 255). The surface is a
-// plain (non-sRGB) Unorm target, so the shader output is stored raw and shown
-// as-is — pass the authored sRGB colour straight through. This matches the
-// glyph path (glyphon `ColorMode::Web`), so text and rects composite in the
-// same space.
+// Colours are authored in sRGB space (a palette value / 255). The surface is
+// sRGB, so the GPU re-encodes the shader output to sRGB on write — which would
+// double-encode and brighten/grey everything (a near-black bg shows as grey).
+// Convert sRGB → linear here so the round-trip lands on the authored colour,
+// matching how glyphon renders the text. Alpha is already linear.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lower = c / 12.92;
+    let higher = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(higher, lower, c <= vec3<f32>(0.04045));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return in.color;
+    return vec4<f32>(srgb_to_linear(in.color.rgb), in.color.a);
 }
 "#;
 
