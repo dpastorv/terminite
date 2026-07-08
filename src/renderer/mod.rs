@@ -94,6 +94,16 @@ fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
 fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
 }
+
+/// Scale each edge of a `Padding` by the display scale factor (HiDPI).
+fn scale_padding(p: Padding, scale: f32) -> Padding {
+    Padding {
+        left: p.left * scale,
+        right: p.right * scale,
+        top: p.top * scale,
+        bottom: p.bottom * scale,
+    }
+}
 const DOUBLE_UNDERLINE_GAP: f32 = 2.0;
 const STRIKEOUT_THICKNESS: f32 = 1.5;
 
@@ -370,6 +380,13 @@ pub struct Renderer {
     /// the grid math and the chrome layout.
     tab_bar_height: f32,
     font_size: f32,
+    /// The pre-HiDPI (logical / 1x) content font size — config default or a
+    /// zoom. Zoom + persistence use this; `font_size` = `base_font_size ×
+    /// scale_factor`, so a zoom survives a move to a different-density monitor.
+    base_font_size: f32,
+    /// Display scale factor (physical px per logical px). Re-read on resize;
+    /// a change re-derives every scaled metric.
+    scale_factor: f32,
     /// Content font weight (`wght` axis). Startup-applied from config.
     font_weight: u16,
     font_family: String,
@@ -648,7 +665,14 @@ impl Renderer {
         // Layout metrics from the config, locked for this run. line_height
         // derives from font_size; cell_advance is measured from the font.
         let config = Config::load();
-        let font_size = config.font_size;
+        // HiDPI: config dimensions are logical (1x) sizes; every physical
+        // metric is multiplied by the display's scale factor. On a standard
+        // 1x monitor that's x1 — metrics render exactly as configured; on a
+        // 2x Retina panel it's x2, so the UI keeps the same perceptual size
+        // on both. `base_font_size` is the pre-scale size zoom/persistence use.
+        let scale_factor = window.scale_factor() as f32;
+        let base_font_size = config.font_size;
+        let font_size = (base_font_size * scale_factor).round().max(1.0);
         let font_family = config.font_family.clone();
         let font_weight = config.font_weight as u16;
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
@@ -656,17 +680,17 @@ impl Renderer {
         let focus_tint = rgba_to_floats(config.focus_tint);
         let cursor_color = rgba_to_floats(config.cursor_color);
         let selection_color = rgba_to_floats(config.selection_color);
-        let pad = config.padding;
-        let gutter_left = config.gutter_left;
-        let gutter_gap = config.gutter_gap;
-        let highlight_pad_x = config.highlight_pad_x;
-        let highlight_pad_y = config.highlight_pad_y;
-        let highlight_offset_y = config.highlight_offset_y;
-        let tab_min_width = config.tab_min_width;
-        let tab_max_width = config.tab_max_width;
-        let tab_font_size = config.tab_font_size;
+        let pad = scale_padding(config.padding, scale_factor);
+        let gutter_left = config.gutter_left * scale_factor;
+        let gutter_gap = config.gutter_gap * scale_factor;
+        let highlight_pad_x = config.highlight_pad_x * scale_factor;
+        let highlight_pad_y = config.highlight_pad_y * scale_factor;
+        let highlight_offset_y = config.highlight_offset_y * scale_factor;
+        let tab_min_width = config.tab_min_width * scale_factor;
+        let tab_max_width = config.tab_max_width * scale_factor;
+        let tab_font_size = (config.tab_font_size * scale_factor).round().max(1.0);
         let tab_line_h = (tab_font_size * TAB_LINE_RATIO).round();
-        let tab_bar_height = config.tab_bar_height;
+        let tab_bar_height = (config.tab_bar_height * scale_factor).round();
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -817,6 +841,8 @@ impl Renderer {
             tab_line_h,
             tab_bar_height,
             font_size,
+            base_font_size,
+            scale_factor,
             font_weight,
             font_family,
             grid_cols: cols,

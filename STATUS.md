@@ -51,6 +51,8 @@ proof is Daniel's hands and eyes in real use, and that hasn't happened yet.
 | word-select grabs paths / URLs / hashes whole | BUILT | double-click `~/src/foo.rs` or a URL — one gesture selects it all |
 | keyboard scroll to top / bottom (Cmd+↑/↓, Cmd+Home/End) | BUILT | scroll deep, Cmd+↑ to the top, Cmd+↓ back to the prompt |
 | command palette (Cmd+⇧+P) — filter + run any action | BUILT | open it, type "split", Enter; every action + its shortcut is discoverable there |
+| `font_weight` knob (step 1) — heavier stems for crisp small text on low-DPI | BUILT | it's a dial (100–900, default 400 = today); real `wght` axis of the variable font. Prove: 16px text at 500 vs 400 on a 1080p screen |
+| HiDPI (step 2) — config = 1× sizes, ×scale_factor per display | BUILT | the "bump on Retina" model: 1080p renders config as-is (×1, no-op), Retina ×2. Fixes gigantic tabs + per-monitor hand-tuning. Prove: same perceptual size on both screens. Daniel's config migrated to 1× |
 
 **Reverted 2026-07-07 — regressed on a standard 1080p monitor.** Two render
 changes (the sRGB-space glyph blend "gamma" fix, and the HiDPI auto-scale) were
@@ -78,3 +80,10 @@ coordinate plumbing) and **wiring the settings pane** (the config-UI scaffold is
 dead code today). **Scroll-shear** (render §3) is *not* built: the audit flagged
 it low-confidence and it lives in the hot render path, so it waits until Daniel
 confirms he actually sees text/highlight shear during momentum scroll.
+
+**Follow-up owed (public-release):** the code config *defaults* are still
+Retina-tuned (2×) values. Daniel's own config was migrated to 1× so it's
+correct for him, and he overrides every dimensional field — so defaults don't
+bite him — but a fresh install on Retina would render everything ×2-too-big.
+Halve the dimensional defaults in `config.rs` (`Default` + `schema`) before the
+public release.
