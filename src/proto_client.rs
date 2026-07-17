@@ -948,6 +948,43 @@ fn install_grok_hooks(
     Ok(true)
 }
 
+/// Write (or refresh) a Claude hooks file with PostToolUse see-half +
+/// SessionStart room-join. Same JSON shape as Grok's hooks but written to
+/// the Claude profile's `hooks/` directory. Idempotent: returns Ok(false)
+/// when both commands are already present.
+fn install_claude_hooks(
+    hook_path: &std::path::Path,
+    emit_cmd: &str,
+    join_cmd: &str,
+) -> Result<bool, String> {
+    if let Some(parent) = hook_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let existing = std::fs::read_to_string(hook_path).unwrap_or_default();
+    if existing.contains(emit_cmd) && existing.contains(join_cmd) {
+        return Ok(false);
+    }
+    let body = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [
+                    { "type": "command", "command": join_cmd }
+                ]
+            }],
+            "PostToolUse": [{
+                "hooks": [
+                    { "type": "command", "command": emit_cmd }
+                ]
+            }]
+        }
+    });
+    let pretty = serde_json::to_string_pretty(&body).map_err(|e| format!("serialize: {e}"))?;
+    crate::io_util::atomic_write(hook_path, pretty.as_bytes(), 0o644)
+        .map_err(|e| format!("write {}: {e}", hook_path.display()))?;
+    Ok(true)
+}
+
 /// For offline / custom-home installs: ensure `[mcp_servers.lounge]` points at
 /// this terminite binary. Replaces an existing lounge block; leaves other
 /// servers alone. Uses line-oriented edit so we don't pull toml_edit into a
@@ -1264,6 +1301,19 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
         }
     };
 
+    // 2b. SessionStart room-join — a separate hooks file so Claude auto-joins
+    //     the room when its session starts. Idempotent; non-destructive.
+    let join_cmd = format!("{} room-join --actor claude", bin.display());
+    let hooks_dir = config_dir.join("hooks");
+    let hook_file = hooks_dir.join("terminite-lounge.json");
+    let join_added = match install_claude_hooks(&hook_file, &hook_cmd, &join_cmd) {
+        Ok(added) => added,
+        Err(e) => {
+            eprintln!("terminite install: warning — couldn't add SessionStart hook ({e})");
+            false
+        }
+    };
+
     // 3. Register the MCP server via claude's own CLI, so the config edit is
     //    claude's (robust) not ours.
     let manual = format!(
@@ -1300,15 +1350,24 @@ fn install_claude_terminite(args: &[String]) -> ExitCode {
     match status {
         Ok(s) if s.success() => {
             println!("installed claude-terminite into {}", config_dir.display());
-            println!("  skill: {}", skill_path.display());
+            println!("  skill:     {}", skill_path.display());
             println!(
-                "  hook:  PostToolUse → {} tool-emit-hook{}",
+                "  hook:      PostToolUse → {} tool-emit-hook{}",
                 bin.display(),
                 if hook_added { "" } else { " (already present)" }
             );
-            println!("  mcp:   lounge → {} mcp --actor claude", bin.display());
+            println!(
+                "  join:      SessionStart → {}{}",
+                join_cmd,
+                if join_added { "" } else { " (already present)" }
+            );
+            println!("  mcp:       lounge → {} mcp --actor claude", bin.display());
             println!("\nplain `claude` in a terminite pane now joins the room + streams its work.");
-            println!("reverse with: claude mcp remove lounge   (and rm -r {})", skill_dir.display());
+            println!(
+                "reverse with: claude mcp remove lounge   (and rm -r {} {})",
+                skill_dir.display(),
+                hooks_dir.display()
+            );
             ExitCode::SUCCESS
         }
         Ok(s) => {
