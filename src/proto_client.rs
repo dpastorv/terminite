@@ -277,7 +277,7 @@ fn cmd_release(actor: Option<&String>) -> ExitCode {
 
 /// `terminite last-crash` — print the most recent crash dump to stdout.
 fn cmd_last_crash() -> ExitCode {
-    match crate::last_crash_path() {
+    match crate::crash::last_crash_path() {
         Some(path) => {
             match std::fs::read_to_string(&path) {
                 Ok(body) => println!("{}", body),

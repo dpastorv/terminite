@@ -17,6 +17,7 @@ mod blocks;
 mod codex_bridge;
 mod config;
 mod config_io;
+mod crash;
 mod fileclaims;
 mod fonts;
 mod highlight;
@@ -40,9 +41,6 @@ use renderer::{Renderer, SplitDir};
 
 // ── Layout constants shared across modules ─────────────────────────────────
 
-/// Per-process cap on retained crash dumps. Older dumps are dropped.
-const MAX_CRASH_DUMPS: usize = 20;
-
 /// Install a panic hook that writes a crash dump (panic message,
 /// source location, backtrace) to `~/.terminite/log/crashes/`. Also
 /// logs the panic to the regular log so a debug pane can pick it up.
@@ -64,83 +62,11 @@ fn install_panic_hook() {
         };
         let backtrace = std::backtrace::Backtrace::force_capture();
         logging::error(&format!("panic at {location}: {payload}"));
-        write_crash_dump(&location, &payload, &backtrace.to_string());
+        crash::write_crash_dump(&payload, &location, &backtrace.to_string());
         // Let the default hook also fire (stderr) — useful when running
         // `cargo run` in a console.
         default(info);
     }));
-}
-
-/// Write one crash-dump file and trim the oldest if the cap is hit.
-/// Also updates `last-crash.log` so the most recent crash is always at a
-/// known path — useful when the window is gone and the user only has a
-/// terminal to find what happened.
-fn write_crash_dump(location: &str, payload: &str, backtrace: &str) {
-    let Some(dir) = logging::crash_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let filename = format!("{}.txt", logging::filename_timestamp_now());
-    let path = dir.join(&filename);
-    let body = format!(
-        "terminite crash dump\nversion: {}\nlocation: {}\nmessage: {}\n\nbacktrace:\n{}\n",
-        env!("CARGO_PKG_VERSION"),
-        location,
-        payload,
-        backtrace,
-    );
-    let _ = std::fs::write(&path, &body);
-    // Update the canonical pointer so `terminite last-crash` and the
-    // next-launch notice always find the right file. Atomic rename.
-    let last_path = dir.join("last-crash.log");
-    let tmp = last_path.with_extension("tmp");
-    let _ = std::fs::write(&tmp, &body);
-    let _ = std::fs::rename(tmp, &last_path);
-    trim_crash_dumps(&dir);
-}
-
-/// Return the path to `last-crash.log` (in the crash dir), if it exists.
-pub fn last_crash_path() -> Option<std::path::PathBuf> {
-    logging::crash_dir().map(|d| d.join("last-crash.log"))
-}
-
-/// Check for a recent crash dump and return its path + message, if within
-/// `MAX_CRASH_AGE`. Used by the next-launch notice.
-pub fn recent_crash(max_age: std::time::Duration) -> Option<(std::path::PathBuf, String)> {
-    let path = last_crash_path()?;
-    let meta = std::fs::metadata(&path).ok()?;
-    let modified = meta.modified().ok()?;
-    if modified.elapsed().ok()? > max_age {
-        return None;
-    }
-    let body = std::fs::read_to_string(&path).ok()?;
-    // Extract just the message line for a short notice.
-    let msg = body
-        .lines()
-        .find(|l| l.starts_with("message:"))
-        .map(|l| l.trim_start_matches("message:").trim().to_string())
-        .unwrap_or_else(|| "panic".to_string());
-    Some((path, msg))
-}
-
-/// Keep at most `MAX_CRASH_DUMPS`; drop oldest by mtime.
-fn trim_crash_dumps(dir: &std::path::Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = entries
-        .filter_map(|e| e.ok())
-        .filter_map(|e| {
-            let p = e.path();
-            let m = e.metadata().ok()?.modified().ok()?;
-            Some((p, m))
-        })
-        .collect();
-    if files.len() <= MAX_CRASH_DUMPS {
-        return;
-    }
-    files.sort_by_key(|(_, m)| *m);
-    for (p, _) in &files[..files.len() - MAX_CRASH_DUMPS] {
-        let _ = std::fs::remove_file(p);
-    }
 }
 
 /// Decode the embedded app icon to an RGBA `winit::window::Icon`. Compiled
@@ -488,6 +414,8 @@ impl ApplicationHandler<UserEvent> for Terminite {
         // Allow IME composition input (dead keys, accents, CJK input methods).
         window.set_ime_allowed(true);
         let mut renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
+        // Check for a recent crash before showing anything else.
+        renderer.check_recent_crash();
         if let Some(saved) = saved {
             logging::info(&format!(
                 "layout: restoring {} pane(s)",

@@ -26,6 +26,17 @@ impl Renderer {
                 let _ = self.close_active_pane();
                 false
             }
+            ModalAction::CrashNotice => {
+                // "View Last Crash" — print the dump to stdout and exit so
+                // the shell can capture it (e.g. `terminite 2>&1 | tee crash.log`).
+                use crate::crash::last_crash_path;
+                if let Some(path) = last_crash_path() {
+                    if let Ok(body) = std::fs::read_to_string(&path) {
+                        println!("{}", body);
+                    }
+                }
+                true // exit after printing
+            }
         }
     }
 
@@ -707,6 +718,8 @@ impl Renderer {
 pub(super) enum ModalAction {
     CloseTab,
     ClosePane,
+    /// Crash notice — shown at startup when a recent crash is detected.
+    CrashNotice,
 }
 
 /// An action invoked from the right-click context menu.

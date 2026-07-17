@@ -1550,6 +1550,31 @@ impl Renderer {
         let pane = self.root_ref().find(self.active_pane)?;
         self.roster.slug_for_pane(pane.tabs[pane.active_tab].id.0)
     }
+
+    // ── Crash notice (next-launch) ───────────────────────────────
+    /// Check for a recent crash dump and open a modal dialog if one is
+    /// found within the last 24 hours. Called once right after the
+    /// renderer is constructed so the user sees it before anything else.
+    pub(crate) fn check_recent_crash(&mut self) {
+        use crate::crash::recent_crash;
+        let Some((_path, msg)) = recent_crash(std::time::Duration::from_secs(24 * 3600)) else {
+            return;
+        };
+        let title = "Terminite crashed recently";
+        let body = format!(
+            "A crash was detected within the last 24 hours.\n\
+             Message: {}\n\n\
+             Run `terminite last-crash` to see the full dump.",
+            msg
+        );
+        self.open_modal(
+            ModalAction::CrashNotice,
+            title.to_string(),
+            body,
+            "Dismiss",
+            "View Last Crash",
+        );
+    }
 }
 
 // ── helpers moved from mod.rs ──────────────────────
