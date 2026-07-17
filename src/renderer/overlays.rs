@@ -896,6 +896,33 @@ pub(super) struct Modal {
     pub(super) confirm_rect: (f32, f32, f32, f32),
 }
 
+// ── File claims overlay — in-window card showing active claims ──
+
+pub(super) const FILE_CLAIMS_W: f32 = 480.0;
+pub(super) const FILE_CLAIMS_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
+pub(super) const FILE_CLAIMS_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+
+/// In-progress file-claims overlay (Room Files). A small card showing
+/// active claims keyed by path, rendered above content but below the modal.
+pub(super) struct FileClaimsOverlay {
+    /// Rendered title: "Room Files" or "Room Who — N actor(s)".
+    pub(super) title_buf: Buffer,
+    /// Body text: one line per item.
+    pub(super) body_buf: Buffer,
+}
+
+impl Renderer {
+    /// Close the file-claims overlay (Room Who / Room Files).
+    pub(crate) fn close_file_claims(&mut self) {
+        self.claims_overlay = None;
+        self.window.request_redraw();
+    }
+
+    /// Is the file-claims overlay currently open?
+    pub(crate) fn has_file_claims(&self) -> bool {
+        self.claims_overlay.is_some()
+    }
+}
 
 
 // ── moved from mod.rs ───────────────────────────────

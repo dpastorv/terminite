@@ -1518,31 +1518,72 @@ impl Renderer {
         }
     }
 
-    /// Show the room presence roster via the status / event channel.
-    pub(super) fn show_room_who(&self) {
-        let who = self.proto_room_who();
-        // Emit as an event so any connected subscriber sees it.
-        if let crate::proto::OutPayload::RoomWho { actors } = &who {
-            for a in actors {
-                eprintln!(
-                    "[room] {}  color={:?}  status={}  activity={}",
-                    a.slug, a.color, a.status.as_deref().unwrap_or("-"), a.activity
-                );
-            }
+    /// Show the room presence roster via an in-window overlay.
+    pub(super) fn show_room_who(&mut self) {
+        let now_ms = crate::presence::now_ms();
+        let actors = self.roster.present(now_ms);
+        let title = format!("Room Who — {} actor(s)", actors.len());
+        let mut body_lines: Vec<String> = Vec::new();
+        for p in &actors {
+            let status = self.shown_status(&p.slug);
+            let activity = self.activity_state(&p.slug);
+            body_lines.push(format!(
+                "{}  status={}  activity={}",
+                p.slug,
+                status.as_deref().unwrap_or("-"),
+                activity
+            ));
         }
+        if body_lines.is_empty() {
+            body_lines.push("No actors present.".into());
+        }
+        let title_buf = crate::renderer::make_modal_buffer(
+            &mut self.font_system,
+            &title,
+        );
+        let body_text = body_lines.join("\n");
+        let body_buf = crate::renderer::make_modal_buffer(
+            &mut self.font_system,
+            &body_text,
+        );
+        self.claims_overlay = Some(crate::renderer::overlays::FileClaimsOverlay {
+            title_buf,
+            body_buf,
+        });
+        self.window.request_redraw();
     }
 
-    /// Show active file claims via the status / event channel.
-    pub(super) fn show_room_files(&self) {
+    /// Show active file claims via an in-window overlay.
+    pub(super) fn show_room_files(&mut self) {
         // Approximate milliseconds-since-epoch from monotonic clock.
         // Good enough for TTL pruning; doesn't need wall-clock accuracy.
         let now_ms = self
             .start_time
             .elapsed()
             .as_millis() as u64; // coarse but monotonic
-        for (path, claim) in self.file_claims.live(now_ms) {
-            eprintln!("[room] {} → {}", path, claim.slug);
+        let claims = self.file_claims.live(now_ms);
+        let title = format!("Room Files — {} claim(s)", claims.len());
+        let mut body_lines: Vec<String> = Vec::new();
+        for (path, claim) in &claims {
+            body_lines.push(format!("{} → {}", path, claim.slug));
         }
+        if body_lines.is_empty() {
+            body_lines.push("No active claims.".into());
+        }
+        let title_buf = crate::renderer::make_modal_buffer(
+            &mut self.font_system,
+            &title,
+        );
+        let body_text = body_lines.join("\n");
+        let body_buf = crate::renderer::make_modal_buffer(
+            &mut self.font_system,
+            &body_text,
+        );
+        self.claims_overlay = Some(crate::renderer::overlays::FileClaimsOverlay {
+            title_buf,
+            body_buf,
+        });
+        self.window.request_redraw();
     }
 
     /// Slug of the actor present in the focused pane's active tab, if any.

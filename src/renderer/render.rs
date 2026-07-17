@@ -189,6 +189,27 @@ impl Renderer {
             None
         };
 
+        // File claims / Room Who overlay — centered card above content.
+        let file_claims_origin = if self.claims_overlay.is_some() {
+            let surface_w = self.surface_config.width as f32;
+            let surface_h = self.surface_config.height as f32;
+            let card_w = FILE_CLAIMS_W;
+            let card_h = MODAL_CARD_H; // reuse modal card height
+            let cx = (surface_w - card_w) * 0.5;
+            let cy = (surface_h - card_h) * 0.5;
+            above.push(RectInstance {
+                rect: [cx - 1.5, cy - 1.5, card_w + 3.0, card_h + 3.0],
+                color: FILE_CLAIMS_BORDER,
+            });
+            above.push(RectInstance {
+                rect: [cx, cy, card_w, card_h],
+                color: FILE_CLAIMS_BG,
+            });
+            Some((cx, cy))
+        } else {
+            None
+        };
+
         // Bell flash: a soft warm overlay over the whole surface. Auto-clears
         // when the deadline passes; a thread already scheduled a wakeup.
         if let Some(until) = self.bell_flash_until {
@@ -310,7 +331,60 @@ impl Renderer {
                     &mut self.swash_cache,
                 )
                 .expect("terminite: modal text prepare failed");
-        } else if let Some(menu) = self.context_menu.as_ref() {
+        }
+
+        // File claims / Room Who overlay text — same renderer pipeline.
+        if let Some(overlay) = self.claims_overlay.as_ref() {
+            if let Some((cx, cy)) = file_claims_origin {
+                let card_w = FILE_CLAIMS_W;
+                let inset = 28.0;
+                let title_color = Color::rgb(235, 235, 245);
+                let body_color = Color::rgb(180, 180, 195);
+                let title_top = cy + inset;
+                let body_top = title_top + MODAL_LINE_H + 8.0;
+                let card_bounds = TextBounds {
+                    left: cx as i32,
+                    top: cy as i32,
+                    right: (cx + card_w) as i32,
+                    bottom: (cy + MODAL_CARD_H) as i32,
+                };
+                let areas = [
+                    TextArea {
+                        buffer: &overlay.title_buf,
+                        left: cx + inset,
+                        top: title_top,
+                        scale: 1.0,
+                        bounds: card_bounds,
+                        default_color: title_color,
+                        custom_glyphs: &[],
+                    },
+                    TextArea {
+                        buffer: &overlay.body_buf,
+                        left: cx + inset,
+                        top: body_top,
+                        scale: 1.0,
+                        bounds: card_bounds,
+                        default_color: body_color,
+                        custom_glyphs: &[],
+                    },
+                ];
+                self.rects_modal
+                    .prepare(&self.queue, &[], resolution);
+                self.modal_text_renderer
+                    .prepare(
+                        &self.device,
+                        &self.queue,
+                        &mut self.font_system,
+                        &mut self.atlas,
+                        &self.viewport,
+                        areas,
+                        &mut self.swash_cache,
+                    )
+                    .expect("terminite: file-claims text prepare failed");
+            }
+        }
+
+        if let Some(menu) = self.context_menu.as_ref() {
             // Context-menu item labels go through the same text renderer.
             let label_color = Color::rgb(225, 225, 235);
             let disabled_color = Color::rgb(110, 110, 125);

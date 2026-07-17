@@ -461,6 +461,8 @@ pub struct Renderer {
     context_menu: Option<ContextMenu>,
     /// When Some, the find bar is open and keyboard input edits the query.
     find: Option<FindState>,
+    /// When Some, the file-claims overlay (Room Files) is visible.
+    claims_overlay: Option<FileClaimsOverlay>,
     /// When Some, the command palette is open and keyboard input filters it.
     palette: Option<PaletteState>,
 
@@ -906,6 +908,7 @@ impl Renderer {
             activities: crate::activities::ActivityStore::new(),
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
+            claims_overlay: None,
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,

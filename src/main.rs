@@ -545,6 +545,13 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         }
                         return;
                     }
+                    // File claims / Room Who overlay: Esc dismisses.
+                    if r.has_file_claims() && event.state == ElementState::Pressed {
+                        if let Key::Named(NamedKey::Escape) = &event.logical_key {
+                            r.close_file_claims();
+                        }
+                        return;
+                    }
                     // Command palette open: type to filter, ↑/↓ to move,
                     // Enter runs the selection, Esc (or Cmd+Shift+P) closes.
                     if r.has_palette() && event.state == ElementState::Pressed {
