@@ -735,6 +735,8 @@ pub(super) struct DisplaySettingsOverlay {
     pub(super) title_buf: Buffer,
     /// "Zoom: 100%" or similar.
     pub(super) zoom_buf: Buffer,
+    /// Display info: resolution, DPI, scale factor, suggestion.
+    pub(super) display_buf: Buffer,
     /// Button hit boxes in surface coordinates.
     pub(super) btn_in: HitBox,
     pub(super) btn_out: HitBox,
@@ -747,15 +749,35 @@ impl Renderer {
         let zoom = self.current_zoom_pct();
         let title = "Display Settings".to_string();
         let zoom_text = format!("Zoom: {}%", zoom);
+
+        // Display info: scale factor, resolution, suggested zoom.
+        let scale = self.scale_factor;
+        let surface_w = self.surface_config.width;
+        let surface_h = self.surface_config.height;
+        let logical_w = (surface_w as f32 / scale) as i32;
+        let logical_h = (surface_h as f32 / scale) as i32;
+        let dpi = (scale * 96.0).round() as i32;
+        let suggestion = if scale > 1.5 {
+            "Consider zooming out for sharper text"
+        } else if scale < 1.1 && (surface_w > 2500 || surface_h > 1400) {
+            "Consider zooming in for readability"
+        } else {
+            "Display looks good"
+        };
+
         let title_buf = make_modal_buffer(&mut self.font_system, &title);
-        let zoom_buf = make_modal_buffer(&mut self.font_system, &zoom_text.as_str());
+        let zoom_buf = make_modal_buffer(&mut self.font_system, &zoom_text);
+        let display_info = format!(
+            "{}×{} @ {}dpi (scale {:.1}×)\n{}",
+            logical_w, logical_h, dpi, scale, suggestion
+        );
+        let display_buf = make_modal_buffer(&mut self.font_system, &display_info);
 
         // Compute button hit boxes — centered below the text.
-        let surface_w = self.surface_config.width as f32;
-        let surface_h = self.surface_config.height as f32;
         let card_w = DISPLAY_SETTINGS_W;
-        let card_x = (surface_w - card_w) * 0.5;
-        let card_y = (surface_h - MODAL_CARD_H) * 0.5;
+        let card_h = MODAL_CARD_H;
+        let card_x = (surface_w as f32 - card_w) * 0.5;
+        let card_y = (surface_h as f32 - card_h) * 0.5;
         let btn_h = 36.0;
         let btn_w = 80.0;
         let gap = 12.0;
@@ -766,6 +788,7 @@ impl Renderer {
         self.display_settings = Some(DisplaySettingsOverlay {
             title_buf,
             zoom_buf,
+            display_buf,
             btn_in: (start_x, btn_y, btn_w, btn_h),
             btn_out: (start_x + btn_w + gap, btn_y, btn_w, btn_h),
             btn_reset: (start_x + (btn_w + gap) * 2.0, btn_y, btn_w, btn_h),

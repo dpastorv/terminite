@@ -403,8 +403,6 @@ impl Renderer {
             });
             // Buttons — filled rects with labels.
             let btn_bg = [0.16, 0.16, 0.22, 1.0];
-            let _btn_hover = [0.22, 0.22, 0.30, 1.0];
-            // We'll render buttons as simple rects; labels via text renderer below.
             for (_label, rect) in [
                 ("+", ds.btn_in),
                 ("-", ds.btn_out),
@@ -419,13 +417,15 @@ impl Renderer {
                     color: btn_bg,
                 });
             }
-            // Text: title + zoom level + button labels.
+            // Text: title + zoom level + display info + button labels — all in ONE prepare call.
             let inset = 28.0;
             let title_color = Color::rgb(235, 235, 245);
             let zoom_color = Color::rgb(180, 180, 195);
+            let display_color = Color::rgb(140, 140, 160); // dimmer for info text
             let btn_color = Color::rgb(220, 220, 230);
             let title_top = cy + inset;
             let zoom_top = title_top + MODAL_LINE_H + 4.0;
+            let display_top = zoom_top + MODAL_LINE_H * 2.0 + 8.0; // zoom takes 2 lines
             let card_bounds = TextBounds {
                 left: cx as i32,
                 top: cy as i32,
@@ -451,23 +451,15 @@ impl Renderer {
                     default_color: zoom_color,
                     custom_glyphs: &[],
                 },
-            ];
-            self.rects_modal
-                .prepare(&self.queue, &[], resolution);
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: display-settings text prepare failed");
-
-            // Button labels — positioned at button centers.
-            let btn_text_areas = [
+                TextArea {
+                    buffer: &ds.display_buf,
+                    left: cx + inset,
+                    top: display_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: display_color,
+                    custom_glyphs: &[],
+                },
                 TextArea {
                     buffer: &make_modal_buffer(&mut self.font_system, "+"),
                     left: ds.btn_in.0 + (ds.btn_in.2 - 14.0) * 0.5,
@@ -511,6 +503,8 @@ impl Renderer {
                     custom_glyphs: &[],
                 },
             ];
+            self.rects_modal
+                .prepare(&self.queue, &[], resolution);
             self.modal_text_renderer
                 .prepare(
                     &self.device,
@@ -518,10 +512,10 @@ impl Renderer {
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
-                    btn_text_areas,
+                    areas,
                     &mut self.swash_cache,
                 )
-                .expect("terminite: display-settings buttons text prepare failed");
+                .expect("terminite: display-settings text prepare failed");
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
