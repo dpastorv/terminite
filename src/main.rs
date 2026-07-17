@@ -552,18 +552,17 @@ impl ApplicationHandler<UserEvent> for Terminite {
                         }
                         return;
                     }
-                    // Display settings: Esc dismisses, Cmd+Shift+D toggles.
+                    // Display settings: Esc dismisses, Cmd+G toggles.
                     if event.state == ElementState::Pressed {
                         let cmd = self.modifiers.super_key();
-                        let shift = self.modifiers.shift_key();
                         if r.has_display_settings() {
                             if let Key::Named(NamedKey::Escape) = &event.logical_key {
                                 r.close_display_settings();
                                 return;
                             }
-                        } else if cmd && shift {
+                        } else if cmd {
                             if let Key::Character(t) = &event.logical_key {
-                                if t.chars().next().map(|c| c.to_ascii_lowercase()) == Some('d') {
+                                if t.chars().next().map(|c| c.to_ascii_lowercase()) == Some('g') {
                                     r.open_display_settings();
                                     return;
                                 }
