@@ -26,9 +26,6 @@ const MESSAGE_STATE_CAP: usize = 4096;
 /// Cap on waiters queued per file (bounds memory; oldest dropped).
 const FILE_WAITERS_CAP: usize = 16;
 
-/// PTY floor: an actor silent this long is treated as idle (at its prompt), so a
-/// held room message can be typed into its pane. Coarse cross-vendor proxy.
-const PTY_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// How recently the human must have typed in a pane for it to count as "in use"
 /// (so the floor holds). Watching without typing past this lets a wake land.
 const HUMAN_TYPING_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
@@ -586,19 +583,37 @@ impl Renderer {
         }
     }
 
-    /// The human is *actively typing* in this pane — never inject there (we'd
-    /// stomp their keystrokes). Only the focused active tab can qualify, and only
-    /// if it's seen human input within `HUMAN_TYPING_WINDOW`. Watching a focused
-    /// pane without typing does NOT block injection — so you can sit and watch a
-    /// wake land on the very pane you're looking at.
+    /// Is the human *in* this pane — i.e. should the PTY floor hold injection?
+    /// Policy depends on config:
+    /// - `"focus"` (default): block while the human has focus on this pane.
+    ///   Shared-experience: you work in the pane, don't interrupt mid-thought.
+    /// - `"typing"`: only block while actively typing. Lets wakes land while
+    ///   you watch (older behavior).
     fn human_at_pane(&self, pane: u64) -> bool {
         if !(self.focused && self.active_tab_ref().id.0 == pane) {
             return false;
         }
-        match self.last_human_input.get(&pane) {
-            Some(t) => std::time::Instant::now().duration_since(*t) < HUMAN_TYPING_WINDOW,
-            None => false,
+        match self.config.inject_policy.as_str() {
+            "typing" => {
+                // Old behavior: only block while actively typing.
+                match self.last_human_input.get(&pane) {
+                    Some(t) => std::time::Instant::now().duration_since(*t) < HUMAN_TYPING_WINDOW,
+                    None => false,
+                }
+            }
+            _ => {
+                // Default: focus-hold. If the human has focus on this pane,
+                // hold — shared-experience, don't interrupt.
+                true
+            }
         }
+    }
+
+    /// Is there a pending floor message queued for this actor (injected text
+    /// waiting to land)? Used by the badge layer.
+    pub(super) fn has_pending_floor(&self, slug: &str) -> bool {
+        self.pending.get(slug).is_some_and(|q| !q.is_empty())
+            && !self.room_subscribers.contains_key(slug)
     }
 
     /// Write raw bytes into a pane's terminal by id. The low-level half of the
@@ -1466,6 +1481,74 @@ impl Renderer {
             // rather than let it stall the main thread.
             self.proto_subscriber = None;
         }
+    }
+
+    // ── Governance palette helpers ───────────────────────────────
+    /// Called from the command palette: STOP the actor in the focused pane.
+    pub(super) fn governance_stop(&mut self) {
+        if let Some(slug) = self.focused_slug() {
+            let params = serde_json::json!({"actor": slug});
+            let result = self.proto_room_stop(&params);
+            eprintln!("[palette] STOP → {slug}: {result:?}");
+        } else {
+            eprintln!("[palette] STOP → no actor in focused pane");
+        }
+    }
+
+    /// Called from the command palette: HALT (quarantine) the actor in the
+    /// focused pane.
+    pub(super) fn governance_halt(&mut self) {
+        if let Some(slug) = self.focused_slug() {
+            let params = serde_json::json!({"actor": slug});
+            let result = self.proto_room_halt(&params);
+            eprintln!("[palette] HALT → {slug}: {result:?}");
+        } else {
+            eprintln!("[palette] HALT → no actor in focused pane");
+        }
+    }
+
+    /// Called from the command palette: RELEASE the actor in the focused pane.
+    pub(super) fn governance_release(&mut self) {
+        if let Some(slug) = self.focused_slug() {
+            let params = serde_json::json!({"actor": slug});
+            let result = self.proto_room_release(&params);
+            eprintln!("[palette] RELEASE → {slug}: {result:?}");
+        } else {
+            eprintln!("[palette] RELEASE → no actor in focused pane");
+        }
+    }
+
+    /// Show the room presence roster via the status / event channel.
+    pub(super) fn show_room_who(&self) {
+        let who = self.proto_room_who();
+        // Emit as an event so any connected subscriber sees it.
+        if let crate::proto::OutPayload::RoomWho { actors } = &who {
+            for a in actors {
+                eprintln!(
+                    "[room] {}  color={:?}  status={}  activity={}",
+                    a.slug, a.color, a.status.as_deref().unwrap_or("-"), a.activity
+                );
+            }
+        }
+    }
+
+    /// Show active file claims via the status / event channel.
+    pub(super) fn show_room_files(&self) {
+        // Approximate milliseconds-since-epoch from monotonic clock.
+        // Good enough for TTL pruning; doesn't need wall-clock accuracy.
+        let now_ms = self
+            .start_time
+            .elapsed()
+            .as_millis() as u64; // coarse but monotonic
+        for (path, claim) in self.file_claims.live(now_ms) {
+            eprintln!("[room] {} → {}", path, claim.slug);
+        }
+    }
+
+    /// Slug of the actor present in the focused pane's active tab, if any.
+    fn focused_slug(&self) -> Option<String> {
+        let pane = self.root_ref().find(self.active_pane)?;
+        self.roster.slug_for_pane(pane.tabs[pane.active_tab].id.0)
     }
 }
 

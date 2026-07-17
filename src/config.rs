@@ -137,6 +137,13 @@ pub struct Config {
     /// window reach each other). Off = record-only (messages wait in the log
     /// until read), the pre-comms behavior. The human's opt-out.
     pub comms_delivery: bool,
+
+    /// How the PTY floor decides whether to inject a room message into an agent
+    /// pane. `"focus"` (default) — the floor holds while the human has focus on
+    /// that pane (shared-experience: you work in the pane, don't interrupt).
+    /// `"typing"` — only holds while the human is actively typing (older
+    /// behavior, lets wakes land while you watch).
+    pub inject_policy: String, // "focus" or "typing"
 }
 
 /// One row of `schema()` — a known config key with its type, default,
@@ -239,6 +246,11 @@ pub fn schema() -> Vec<ConfigKey> {
         k("comms_delivery", ConfigKind::Bool, ConfigValue::Bool(true), true,
           "Push directed room messages to their addressee (the room is alive). \
            Off = record-only."),
+        k("inject_policy", ConfigKind::String, ConfigValue::String("focus"), true,
+          "When the PTY floor injects a room message into an agent pane. \
+           \"focus\" = hold while the human has focus on that pane (default). \
+           \"typing\" = only hold while actively typing (older behavior, lets \
+           wakes land while you watch)."),
     ]
 }
 
@@ -273,6 +285,7 @@ impl Default for Config {
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
             comms_delivery: true,
+            inject_policy: "focus".to_string(), // hold while focused on the pane
         }
     }
 }
@@ -458,6 +471,14 @@ impl Config {
                 "comms_delivery" => {
                     if let Value::Bool(b) = val {
                         self.comms_delivery = b;
+                    }
+                }
+                "inject_policy" => {
+                    if let Value::Str(s) = &val {
+                        let s = s.trim().to_lowercase();
+                        if s == "focus" || s == "typing" {
+                            self.inject_policy = s;
+                        }
                     }
                 }
                 "bell_style" => {

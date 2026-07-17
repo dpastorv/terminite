@@ -72,6 +72,9 @@ fn install_panic_hook() {
 }
 
 /// Write one crash-dump file and trim the oldest if the cap is hit.
+/// Also updates `last-crash.log` so the most recent crash is always at a
+/// known path — useful when the window is gone and the user only has a
+/// terminal to find what happened.
 fn write_crash_dump(location: &str, payload: &str, backtrace: &str) {
     let Some(dir) = logging::crash_dir() else { return };
     if std::fs::create_dir_all(&dir).is_err() {
@@ -86,8 +89,38 @@ fn write_crash_dump(location: &str, payload: &str, backtrace: &str) {
         payload,
         backtrace,
     );
-    let _ = std::fs::write(&path, body);
+    let _ = std::fs::write(&path, &body);
+    // Update the canonical pointer so `terminite last-crash` and the
+    // next-launch notice always find the right file. Atomic rename.
+    let last_path = dir.join("last-crash.log");
+    let tmp = last_path.with_extension("tmp");
+    let _ = std::fs::write(&tmp, &body);
+    let _ = std::fs::rename(tmp, &last_path);
     trim_crash_dumps(&dir);
+}
+
+/// Return the path to `last-crash.log` (in the crash dir), if it exists.
+pub fn last_crash_path() -> Option<std::path::PathBuf> {
+    logging::crash_dir().map(|d| d.join("last-crash.log"))
+}
+
+/// Check for a recent crash dump and return its path + message, if within
+/// `MAX_CRASH_AGE`. Used by the next-launch notice.
+pub fn recent_crash(max_age: std::time::Duration) -> Option<(std::path::PathBuf, String)> {
+    let path = last_crash_path()?;
+    let meta = std::fs::metadata(&path).ok()?;
+    let modified = meta.modified().ok()?;
+    if modified.elapsed().ok()? > max_age {
+        return None;
+    }
+    let body = std::fs::read_to_string(&path).ok()?;
+    // Extract just the message line for a short notice.
+    let msg = body
+        .lines()
+        .find(|l| l.starts_with("message:"))
+        .map(|l| l.trim_start_matches("message:").trim().to_string())
+        .unwrap_or_else(|| "panic".to_string());
+    Some((path, msg))
 }
 
 /// Keep at most `MAX_CRASH_DUMPS`; drop oldest by mtime.

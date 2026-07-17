@@ -1101,6 +1101,60 @@ impl Renderer {
                     color,
                 });
             }
+            // ── Pane status badge ──────────────────────────────────────
+            // A small dot above the colour band, right-aligned before the
+            // close button. Shows the agent's current room state so you can
+            // scan the whole lounge at a glance. Priority: halted > busy >
+            // working > waiting > auto > inject-queued.
+            let close_left = x + w - TAB_CLOSE_WIDTH + 8.0;
+            if let Some(slug) = self.roster.slug_for_pane(tab.id.0) {
+                let mut badge: Option<[f32; 4]> = None;
+                // halted — red (human hold, most urgent)
+                if self.quarantined.contains(&slug) {
+                    badge = Some(BADGE_HALTED);
+                }
+                // busy — amber (declared busy, don't interrupt)
+                else if let Some((state, set)) = self.actor_status.get(&slug) {
+                    let is_busy = state == "busy"
+                        && std::time::Instant::now()
+                            .duration_since(*set)
+                            < std::time::Duration::from_secs(20 * 60); // STATUS_TTL
+                    if is_busy {
+                        badge = Some(BADGE_BUSY);
+                    }
+                }
+                // working — green (active in a turn, not idle)
+                else if !self.is_actor_idle_inner(&slug) {
+                    badge = Some(BADGE_WORKING);
+                }
+                // waiting / stuck — yellow (idle but holding unacted message)
+                else if self.pending.get(&slug).is_some_and(|q| !q.is_empty())
+                    || self.delivery_watch.contains_key(&slug)
+                {
+                    badge = Some(BADGE_WAITING);
+                }
+                // auto lane — blue (standing consent to be driven)
+                else if self.actor_auto.get(&slug).is_some_and(|t| {
+                    std::time::Instant::now()
+                        .duration_since(*t)
+                        < std::time::Duration::from_secs(60 * 60) // AUTO_TTL
+                }) {
+                    badge = Some(BADGE_AUTO);
+                }
+                // inject-queued — cyan (floor message waiting to land)
+                else if self.has_pending_floor(&slug) {
+                    badge = Some(BADGE_QUEUED);
+                }
+                if let Some(color) = badge {
+                    // Stack badges vertically, right-aligned.
+                    let right = (close_left - 6.0).max(x + w * 0.5); // clamp to half-width min
+                    let cx = right - BADGE_SIZE / 2.0;
+                    out.push(RectInstance {
+                        rect: [cx, bar_top + BADGE_Y, BADGE_SIZE, BADGE_SIZE],
+                        color,
+                    });
+                }
+            }
             let label_left = x + TAB_LABEL_INSET;
             let label_right = (x + w - TAB_CLOSE_WIDTH).max(label_left);
             let close_left = x + w - TAB_CLOSE_WIDTH + 8.0;
@@ -1142,6 +1196,15 @@ impl Renderer {
             },
         );
         slots
+    }
+
+    /// Is the actor silent past `PTY_IDLE` — i.e. treated as idle (at its
+    /// prompt). No record ⇒ never active ⇒ idle. Mirrors `ProtoBuilder::is_actor_idle`.
+    fn is_actor_idle_inner(&self, slug: &str) -> bool {
+        match self.last_activity.get(slug) {
+            Some(t) => std::time::Instant::now().duration_since(*t) > PTY_IDLE,
+            None => true,
+        }
     }
 
 }

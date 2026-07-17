@@ -77,6 +77,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "stop" => Some(cmd_stop(args.get(1))),
         "halt" => Some(cmd_halt(args.get(1))),
         "release" => Some(cmd_release(args.get(1))),
+        "last-crash" => Some(cmd_last_crash()),
         "room-who" => Some(cmd_room_who()),
         "room-join" => Some(cmd_room_join(&args[1..])),
         "room-listen" => Some(cmd_room_listen(&args[1..])),
@@ -156,11 +157,12 @@ USAGE
   terminite release <actor>          lift a halt; the agent rejoins the room
   terminite install claude-terminite [--profile <name|dir>]
   terminite install codex-terminite  [--home <dir>]
+  terminite install grok-terminite   [--home <dir>]
                                      make a plain agent terminite-aware —
                                      writes the room skill + MCP server into
                                      its profile (claude: ~/.claude; codex:
-                                     ~/.codex). Reverse: `<cli> mcp remove
-                                     lounge`
+                                     ~/.codex; grok: ~/.grok). Reverse:
+                                     `<cli> mcp remove lounge`
   terminite module list              registered modules (extension surface)
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module
@@ -273,6 +275,20 @@ fn cmd_release(actor: Option<&String>) -> ExitCode {
     ))
 }
 
+/// `terminite last-crash` — print the most recent crash dump to stdout.
+fn cmd_last_crash() -> ExitCode {
+    match crate::last_crash_path() {
+        Some(path) => {
+            match std::fs::read_to_string(&path) {
+                Ok(body) => println!("{}", body),
+                Err(e) => eprintln!("couldn't read last-crash.log: {}", e),
+            }
+        }
+        None => eprintln!("no crash log found"),
+    }
+    ExitCode::SUCCESS
+}
+
 /// `terminite outbox <actor>` — an agent's sent messages and their states.
 fn cmd_outbox(actor: Option<&String>) -> ExitCode {
     let Some(actor) = actor else {
@@ -361,7 +377,9 @@ fn cmd_tool_emit_hook() -> ExitCode {
     let detail = v
         .get("tool_input")
         .and_then(|ti| {
-            ti.get("file_path")
+            // Grok uses target_file; Claude/Codex-style use file_path / command.
+            ti.get("target_file")
+                .or_else(|| ti.get("file_path"))
                 .or_else(|| ti.get("command"))
                 .or_else(|| ti.get("pattern"))
                 .or_else(|| ti.get("path"))
@@ -398,11 +416,13 @@ const CODEX_SKILL: &str = include_str!("../faculty/codex-terminite/SKILL.md");
 const KIMI_SKILL: &str = include_str!("../faculty/kimi-terminite/SKILL.md");
 const QWEN_SKILL: &str = include_str!("../faculty/qwen-terminite/SKILL.md");
 const AGY_SKILL: &str = include_str!("../faculty/agy-terminite/SKILL.md");
+const GROK_SKILL: &str = include_str!("../faculty/grok-terminite/SKILL.md");
 
 /// `terminite install <faculty> [...]` — write a faculty into an AI CLI's
 /// profile so a plain agent becomes terminite-aware. Opt-in (the user runs it)
-/// and reversible. Today: claude, codex, kimi, qwen — each a thin per-vendor
-/// adapter over the same room (skill + MCP, see-half where the CLI allows it).
+/// and reversible. Today: claude, codex, kimi, qwen, agy, grok — each a thin
+/// per-vendor adapter over the same room (skill + MCP, see-half where the CLI
+/// allows it).
 fn cmd_install(args: &[String]) -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         Some("claude-terminite") | Some("claude") => install_claude_terminite(&args[1..]),
@@ -411,14 +431,15 @@ fn cmd_install(args: &[String]) -> ExitCode {
         Some("kimi-terminite") | Some("kimi") => install_kimi_terminite(&args[1..]),
         Some("qwen-terminite") | Some("qwen") => install_qwen_terminite(&args[1..]),
         Some("agy-terminite") | Some("agy") => install_agy_terminite(&args[1..]),
+        Some("grok-terminite") | Some("grok") => install_grok_terminite(&args[1..]),
         Some(other) => {
             eprintln!(
-                "terminite install: unknown faculty `{other}` — try claude / codex / kimi / qwen / agy (-terminite)"
+                "terminite install: unknown faculty `{other}` — try claude / codex / kimi / qwen / agy / grok (-terminite)"
             );
             ExitCode::from(2)
         }
         None => {
-            eprintln!("usage: terminite install <claude|codex|kimi|qwen|agy>-terminite [--profile <name|dir>]");
+            eprintln!("usage: terminite install <claude|codex|kimi|qwen|agy|grok>-terminite [--profile <name|dir>]");
             ExitCode::from(2)
         }
     }
@@ -762,6 +783,213 @@ fn install_qwen_terminite(args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Install the grok faculty: place the skill into `~/.grok/skills/`, register
+/// the `lounge` MCP via `grok mcp add`, and write a see-half PostToolUse hook
+/// under `~/.grok/hooks/` (Grok's hook discovery merges those JSON files).
+/// Grok joins as `terminite mcp --actor grok`. `--home <dir>` overrides the
+/// grok config root (default `~/.grok`).
+fn install_grok_terminite(args: &[String]) -> ExitCode {
+    let bin = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("terminite install: can't resolve own path: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let explicit_home = args.iter().position(|a| a == "--home").and_then(|i| args.get(i + 1));
+    let grok_dir = match explicit_home {
+        Some(dir) => PathBuf::from(dir),
+        None => match std::env::var_os("GROK_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".grok")))
+        {
+            Some(p) => p,
+            None => {
+                eprintln!("terminite install: no HOME / GROK_HOME to install into");
+                return ExitCode::from(1);
+            }
+        },
+    };
+
+    // 1. Place the skill.
+    let skill_dir = grok_dir.join("skills/terminite-room");
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        eprintln!("terminite install: can't create {}: {e}", skill_dir.display());
+        return ExitCode::from(1);
+    }
+    let skill_path = skill_dir.join("SKILL.md");
+    if let Err(e) = std::fs::write(&skill_path, GROK_SKILL) {
+        eprintln!("terminite install: can't write {}: {e}", skill_path.display());
+        return ExitCode::from(1);
+    }
+
+    // 2. See-half + optional SessionStart join — dedicated hook file so we
+    //    don't have to merge into settings.json (Grok loads ~/.grok/hooks/*.json).
+    let hook_cmd = format!("{} tool-emit-hook", bin.display());
+    let join_cmd = format!("{} room-join --actor grok", bin.display());
+    let hooks_dir = grok_dir.join("hooks");
+    let hook_path = hooks_dir.join("terminite-lounge.json");
+    let see = match install_grok_hooks(&hook_path, &hook_cmd, &join_cmd) {
+        Ok(true) => "added",
+        Ok(false) => "already present",
+        Err(e) => {
+            eprintln!("terminite install: warning — couldn't add see-half hook ({e})");
+            "skipped"
+        }
+    };
+
+    // 3. Register the lounge MCP via grok's CLI when installing into the live
+    //    user config. For a custom --home, write the [mcp_servers.lounge]
+    //    section into that tree's config.toml directly.
+    let manual = format!(
+        "grok mcp add lounge -s user -- {} mcp --actor grok",
+        bin.display()
+    );
+    if explicit_home.is_some() {
+        match install_grok_mcp_toml(&grok_dir.join("config.toml"), &bin) {
+            Ok(()) => {
+                println!("installed grok-terminite into {}", grok_dir.display());
+                println!("  skill:    {}", skill_path.display());
+                println!("  mcp:      lounge → {} mcp --actor grok (config.toml)", bin.display());
+                println!("  see-half: PostToolUse → {} ({see})", hook_cmd);
+                println!("  join:     SessionStart → {} ({see})", join_cmd);
+                println!("\ngrok in a terminite pane now joins the room + streams its work.");
+                println!(
+                    "reverse: remove [mcp_servers.lounge] from {}; rm -r {}; rm {}",
+                    grok_dir.join("config.toml").display(),
+                    skill_dir.display(),
+                    hook_path.display()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("terminite install: skill + hooks placed, but config.toml MCP write failed ({e}).");
+                eprintln!("add the MCP server yourself:\n  {manual}");
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        let _ = std::process::Command::new("grok")
+            .args(["mcp", "remove", "lounge"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let status = std::process::Command::new("grok")
+            .args(["mcp", "add", "lounge", "-s", "user", "--"])
+            .arg(&bin)
+            .args(["mcp", "--actor", "grok"])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("installed grok-terminite into {}", grok_dir.display());
+                println!("  skill:    {}", skill_path.display());
+                println!("  mcp:      lounge → {} mcp --actor grok", bin.display());
+                println!("  see-half: PostToolUse → {} ({see})", hook_cmd);
+                println!("  join:     SessionStart → {} ({see})", join_cmd);
+                println!("\nplain `grok` in a terminite pane now joins the room + streams its work.");
+                println!(
+                    "reverse: grok mcp remove lounge; rm -r {}; rm {}",
+                    skill_dir.display(),
+                    hook_path.display()
+                );
+                ExitCode::SUCCESS
+            }
+            Ok(s) => {
+                eprintln!("terminite install: skill + hooks placed, but `grok mcp add` failed ({s}).");
+                eprintln!("add the MCP server yourself:\n  {manual}");
+                ExitCode::from(1)
+            }
+            Err(e) => {
+                eprintln!(
+                    "terminite install: skill + hooks placed, but couldn't run `grok` ({e}) — is it on PATH?"
+                );
+                eprintln!("add the MCP server yourself:\n  {manual}");
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+/// Write (or refresh) `~/.grok/hooks/terminite-lounge.json` with PostToolUse
+/// see-half + SessionStart room-join. Idempotent: returns Ok(false) when the
+/// file already carries both commands.
+fn install_grok_hooks(
+    hook_path: &std::path::Path,
+    emit_cmd: &str,
+    join_cmd: &str,
+) -> Result<bool, String> {
+    if let Some(parent) = hook_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let existing = std::fs::read_to_string(hook_path).unwrap_or_default();
+    if existing.contains(emit_cmd) && existing.contains(join_cmd) {
+        return Ok(false);
+    }
+    let body = serde_json::json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [
+                    { "type": "command", "command": join_cmd }
+                ]
+            }],
+            "PostToolUse": [{
+                "hooks": [
+                    { "type": "command", "command": emit_cmd }
+                ]
+            }]
+        }
+    });
+    let pretty = serde_json::to_string_pretty(&body).map_err(|e| format!("serialize: {e}"))?;
+    crate::io_util::atomic_write(hook_path, pretty.as_bytes(), 0o644)
+        .map_err(|e| format!("write {}: {e}", hook_path.display()))?;
+    Ok(true)
+}
+
+/// For offline / custom-home installs: ensure `[mcp_servers.lounge]` points at
+/// this terminite binary. Replaces an existing lounge block; leaves other
+/// servers alone. Uses line-oriented edit so we don't pull toml_edit into a
+/// second writer path — the section is small and machine-owned.
+fn install_grok_mcp_toml(config_path: &std::path::Path, bin: &std::path::Path) -> Result<(), String> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let bin_s = bin.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let section = format!(
+        "\n[mcp_servers.lounge]\ncommand = \"{bin_s}\"\nargs = [\"mcp\", \"--actor\", \"grok\"]\nenabled = true\n"
+    );
+    let original = std::fs::read_to_string(config_path).unwrap_or_default();
+    let mut out = String::new();
+    let mut skipping = false;
+    for line in original.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[mcp_servers.lounge]" {
+            skipping = true;
+            continue;
+        }
+        if skipping {
+            // Leave the old lounge block when the next table header appears.
+            if trimmed.starts_with('[') && trimmed.ends_with(']') {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        if !skipping {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !out.ends_with('\n') && !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&section);
+    crate::io_util::atomic_write(config_path, out.as_bytes(), 0o644)
+        .map_err(|e| format!("write {}: {e}", config_path.display()))?;
+    Ok(())
 }
 
 /// Merge entries into agy's permission allow-list

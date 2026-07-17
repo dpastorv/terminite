@@ -634,6 +634,11 @@ impl Renderer {
             FocusUp => self.focus_dir(0.0, -1.0),
             FocusDown => self.focus_dir(0.0, 1.0),
             CloseTab => return self.close_active_tab(),
+            Stop => self.governance_stop(),
+            Halt => self.governance_halt(),
+            Release => self.governance_release(),
+            RoomWho => self.show_room_who(),
+            RoomFiles => self.show_room_files(),
             Quit => return true,
         }
         false
@@ -783,6 +788,16 @@ pub(super) enum PaletteAction {
     FocusRight,
     FocusUp,
     FocusDown,
+    /// STOP — Ctrl-C into the focused actor's pane (bypasses busy).
+    Stop,
+    /// HALT — interrupt + quarantine the focused actor.
+    Halt,
+    /// RELEASE — lift a HALT on the focused actor.
+    Release,
+    /// Room who — show the presence roster in the status line.
+    RoomWho,
+    /// Room files — show active file claims in the status line.
+    RoomFiles,
     Quit,
 }
 
@@ -826,6 +841,13 @@ pub(super) const PALETTE_COMMANDS: &[(&str, &str, PaletteAction)] = &[
     ("Focus Pane Right", "\u{2318}\u{2325}\u{2192}", PaletteAction::FocusRight),
     ("Focus Pane Up", "\u{2318}\u{2325}\u{2191}", PaletteAction::FocusUp),
     ("Focus Pane Down", "\u{2318}\u{2325}\u{2193}", PaletteAction::FocusDown),
+    // ── Governance (human-only) ──────────────────────────────────
+    ("STOP — interrupt focused actor", "", PaletteAction::Stop),
+    ("HALT — quarantine focused actor", "", PaletteAction::Halt),
+    ("RELEASE — lift HALT on focused actor", "", PaletteAction::Release),
+    // ── Room substrate ───────────────────────────────────────────
+    ("Room Who — presence roster", "", PaletteAction::RoomWho),
+    ("Room Files — active claims", "", PaletteAction::RoomFiles),
     ("Quit", "\u{2318}Q", PaletteAction::Quit),
 ];
 

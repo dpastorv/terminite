@@ -50,6 +50,9 @@ use tabs::*;
 /// Re-check interval for a held PTY-floor message's gate (unfocused + idle)
 /// while it waits. Only ticks while one is undelivered (see `has_pending_pty_work`).
 const PTY_RETRY: std::time::Duration = std::time::Duration::from_millis(1500);
+/// An actor silent this long is treated as idle (at its prompt), so the
+/// PTY floor can safely type a held room message into its pane.
+const PTY_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 /// Gap between typing a floor message's text and sending its Enter. TUIs read a
 /// fast text+Enter burst as a *paste*, where the trailing newline is buffered as
 /// content, not a submit — so the message lands in the prompt but never fires
@@ -157,6 +160,18 @@ const TAB_LINE_RATIO: f32 = 26.0 / 18.0;
 const TAB_LABEL_INSET: f32 = 18.0;
 /// Right-edge space reserved for the `×` close affordance.
 const TAB_CLOSE_WIDTH: f32 = 32.0;
+
+/// Pane status badges — small dots above the color band, right-aligned.
+const BADGE_SIZE: f32 = 5.0;
+const BADGE_Y: f32 = 2.0; // y offset from top of tab bar
+/// Badge colours by status: halted (red), busy (amber), working (green),
+/// waiting / stuck (yellow), inject-queued (cyan), auto (blue ring).
+const BADGE_HALTED: [f32; 4] = [1.0, 0.35, 0.30, 1.0];
+const BADGE_BUSY: [f32; 4] = [1.0, 0.70, 0.15, 1.0];
+const BADGE_WORKING: [f32; 4] = [0.30, 0.90, 0.40, 1.0];
+const BADGE_WAITING: [f32; 4] = [1.0, 0.90, 0.15, 1.0];
+const BADGE_QUEUED: [f32; 4] = [0.25, 0.80, 1.0, 1.0];
+const BADGE_AUTO: [f32; 4] = [0.40, 0.60, 1.0, 0.70];
 
 // Modal dialog (in-window). Centered card with Cancel/Confirm buttons.
 const MODAL_BG_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.55];

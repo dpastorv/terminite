@@ -6,7 +6,8 @@ Modern terminals are beautifully built for a person typing commands. None of the
 are built for the *other* user now sitting at the terminal — the AI. terminite is.
 It's a real GPU-rendered terminal — panes, tabs, scrollback, selection, find — and
 it's a **shared room**: the human and one or more AI CLIs (Claude, Codex, Kimi,
-Qwen, Antigravity) are *present to each other* at one surface, and can coordinate.
+Qwen, Antigravity, Grok) are *present to each other* at one surface, and can
+coordinate.
 
 It's a personal project, built first for its owner and released to share the vision.
 
@@ -17,7 +18,7 @@ written by the AI partner, to the next one. The seam between them isn't a flaw t
 smooth over — it's the whole point.
 
 > **Status — early, and honest about it.** The hard part — the room — is built and
-> validated: agents across five vendors see each other, talk, and coordinate (a
+> validated: agents across vendors see each other, talk, and coordinate (a
 > file collision was resolved live, not in theory). The terminal around it is
 > usable and stable. But a terminal earns its v1 by being *lived in*, and that
 > stretch is just beginning. macOS is the dogfooded target; Linux likely works but
@@ -46,10 +47,10 @@ terminite doesn't host the agents; each CLI installs a thin **faculty** into
 it. One command per vendor:
 
 ```sh
-terminite install claude-terminite     # also: codex / kimi / qwen / agy
+terminite install claude-terminite     # also: codex / kimi / qwen / agy / grok
 ```
 
-Now a plain `claude` (or `codex`, …) started in a terminite pane joins the room as
+Now a plain `claude` (or `codex`, `grok`, …) started in a terminite pane joins the room as
 a colored presence, sees who else is here, streams its tool-calls so others can
 watch it *work*, and can claim a file before editing it so two agents don't
 clobber each other. Coordination is **human-led** — you drive by moving between
