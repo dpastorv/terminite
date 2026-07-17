@@ -722,6 +722,96 @@ pub(super) enum ModalAction {
     CrashNotice,
 }
 
+// ── Display settings overlay — zoom controls ─────────────
+
+pub(super) const DISPLAY_SETTINGS_W: f32 = 360.0;
+pub(super) const DISPLAY_SETTINGS_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
+pub(super) const DISPLAY_SETTINGS_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
+/// Button hit boxes: (x, y, w, h) relative to surface origin.
+pub(super) type HitBox = (f32, f32, f32, f32);
+
+/// Display settings overlay: shows current zoom level and + / - / Reset buttons.
+pub(super) struct DisplaySettingsOverlay {
+    pub(super) title_buf: Buffer,
+    /// "Zoom: 100%" or similar.
+    pub(super) zoom_buf: Buffer,
+    /// Button hit boxes in surface coordinates.
+    pub(super) btn_in: HitBox,
+    pub(super) btn_out: HitBox,
+    pub(super) btn_reset: HitBox,
+}
+
+impl Renderer {
+    /// Open the display settings overlay card.
+    pub(crate) fn open_display_settings(&mut self) {
+        let zoom = self.current_zoom_pct();
+        let title = "Display Settings".to_string();
+        let zoom_text = format!("Zoom: {}%", zoom);
+        let title_buf = make_modal_buffer(&mut self.font_system, &title);
+        let zoom_buf = make_modal_buffer(&mut self.font_system, &zoom_text.as_str());
+
+        // Compute button hit boxes — centered below the text.
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let card_w = DISPLAY_SETTINGS_W;
+        let card_x = (surface_w - card_w) * 0.5;
+        let card_y = (surface_h - MODAL_CARD_H) * 0.5;
+        let btn_h = 36.0;
+        let btn_w = 80.0;
+        let gap = 12.0;
+        let btn_y = card_y + MODAL_CARD_H - btn_h - 24.0;
+        let total_btns_w = btn_w * 3.0 + gap * 2.0;
+        let start_x = card_x + (card_w - total_btns_w) * 0.5;
+
+        self.display_settings = Some(DisplaySettingsOverlay {
+            title_buf,
+            zoom_buf,
+            btn_in: (start_x, btn_y, btn_w, btn_h),
+            btn_out: (start_x + btn_w + gap, btn_y, btn_w, btn_h),
+            btn_reset: (start_x + (btn_w + gap) * 2.0, btn_y, btn_w, btn_h),
+        });
+        self.window.request_redraw();
+    }
+
+    /// Close the display settings overlay.
+    pub(crate) fn close_display_settings(&mut self) {
+        self.display_settings = None;
+        self.window.request_redraw();
+    }
+
+    /// Is the display settings overlay currently open?
+    pub(crate) fn has_display_settings(&self) -> bool {
+        self.display_settings.is_some()
+    }
+
+    /// Current zoom level as a percentage of base font size.
+    pub(super) fn current_zoom_pct(&self) -> i32 {
+        if self.base_font_size == 0.0 {
+            return 100;
+        }
+        ((self.font_size / self.base_font_size) * 100.0).round() as i32
+    }
+
+    /// Hit-test display settings buttons at a surface coordinate. Returns
+    /// which button was clicked, if any.
+    pub(crate) fn hit_display_settings(&self, x: f32, y: f32) -> Option<&'static str> {
+        let ds = self.display_settings.as_ref()?;
+        let in_rect = |r: HitBox| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
+        if in_rect(ds.btn_in) {
+            Some("zoom_in")
+        } else if in_rect(ds.btn_out) {
+            Some("zoom_out")
+        } else if in_rect(ds.btn_reset) {
+            Some("zoom_reset")
+        } else {
+            None
+        }
+    }
+}
+
+
+// ── moved from mod.rs ───────────────────────────────
+
 /// An action invoked from the right-click context menu.
 pub(super) enum MenuAction {
     Copy,

@@ -247,6 +247,21 @@ impl Renderer {
             return;
         }
 
+        // Display settings overlay — hit-test buttons.
+        if let Some(action) = self.hit_display_settings(self.mouse_pos.0, self.mouse_pos.1) {
+            if button == MouseButton::Left {
+                match action {
+                    "zoom_in" => self.zoom_by(2.0),
+                    "zoom_out" => self.zoom_by(-2.0),
+                    "zoom_reset" => self.zoom_reset(),
+                    _ => {}
+                }
+                // Rebuild the overlay text with updated zoom level.
+                self.open_display_settings(); // refreshes zoom_buf + hit boxes
+            }
+            return;
+        }
+
         // A left-press on a split divider starts a resize drag.
         if button == MouseButton::Left {
             if let Some((path, outer, dir)) = self.root_ref().divider_at(

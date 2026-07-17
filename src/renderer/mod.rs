@@ -463,6 +463,8 @@ pub struct Renderer {
     find: Option<FindState>,
     /// When Some, the file-claims overlay (Room Files) is visible.
     claims_overlay: Option<FileClaimsOverlay>,
+    /// When Some, the display settings overlay (zoom controls) is visible.
+    display_settings: Option<DisplaySettingsOverlay>,
     /// When Some, the command palette is open and keyboard input filters it.
     palette: Option<PaletteState>,
 
@@ -909,6 +911,7 @@ impl Renderer {
             roster: crate::presence::Roster::new(),
             file_claims: crate::fileclaims::FileClaims::new(),
             claims_overlay: None,
+            display_settings: None,
             frame_samples: std::collections::VecDeque::with_capacity(FRAME_TIMER_CAP),
             last_frame_end: None,
             frame_count: 0,

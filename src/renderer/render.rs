@@ -384,6 +384,146 @@ impl Renderer {
             }
         }
 
+        // Display settings overlay — card with zoom buttons.
+        if let Some(ds) = self.display_settings.as_ref() {
+            let surface_w = self.surface_config.width as f32;
+            let surface_h = self.surface_config.height as f32;
+            let card_w = DISPLAY_SETTINGS_W;
+            let card_h = MODAL_CARD_H;
+            let cx = (surface_w - card_w) * 0.5;
+            let cy = (surface_h - card_h) * 0.5;
+            // Card background + border.
+            above.push(RectInstance {
+                rect: [cx - 1.5, cy - 1.5, card_w + 3.0, card_h + 3.0],
+                color: DISPLAY_SETTINGS_BORDER,
+            });
+            above.push(RectInstance {
+                rect: [cx, cy, card_w, card_h],
+                color: DISPLAY_SETTINGS_BG,
+            });
+            // Buttons — filled rects with labels.
+            let btn_bg = [0.16, 0.16, 0.22, 1.0];
+            let _btn_hover = [0.22, 0.22, 0.30, 1.0];
+            // We'll render buttons as simple rects; labels via text renderer below.
+            for (_label, rect) in [
+                ("+", ds.btn_in),
+                ("-", ds.btn_out),
+                ("Reset", ds.btn_reset),
+            ] {
+                above.push(RectInstance {
+                    rect: [rect.0 - 1.0, rect.1 - 1.0, rect.2 + 2.0, rect.3 + 2.0],
+                    color: btn_bg,
+                });
+                above.push(RectInstance {
+                    rect: [rect.0, rect.1, rect.2, rect.3],
+                    color: btn_bg,
+                });
+            }
+            // Text: title + zoom level + button labels.
+            let inset = 28.0;
+            let title_color = Color::rgb(235, 235, 245);
+            let zoom_color = Color::rgb(180, 180, 195);
+            let btn_color = Color::rgb(220, 220, 230);
+            let title_top = cy + inset;
+            let zoom_top = title_top + MODAL_LINE_H + 4.0;
+            let card_bounds = TextBounds {
+                left: cx as i32,
+                top: cy as i32,
+                right: (cx + card_w) as i32,
+                bottom: (cy + card_h) as i32,
+            };
+            let areas = [
+                TextArea {
+                    buffer: &ds.title_buf,
+                    left: cx + inset,
+                    top: title_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: title_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &ds.zoom_buf,
+                    left: cx + inset,
+                    top: zoom_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: zoom_color,
+                    custom_glyphs: &[],
+                },
+            ];
+            self.rects_modal
+                .prepare(&self.queue, &[], resolution);
+            self.modal_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: display-settings text prepare failed");
+
+            // Button labels — positioned at button centers.
+            let btn_text_areas = [
+                TextArea {
+                    buffer: &make_modal_buffer(&mut self.font_system, "+"),
+                    left: ds.btn_in.0 + (ds.btn_in.2 - 14.0) * 0.5,
+                    top: ds.btn_in.1 + (ds.btn_in.3 - MODAL_LINE_H) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ds.btn_in.0 as i32,
+                        top: ds.btn_in.1 as i32,
+                        right: (ds.btn_in.0 + ds.btn_in.2) as i32,
+                        bottom: (ds.btn_in.1 + ds.btn_in.3) as i32,
+                    },
+                    default_color: btn_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &make_modal_buffer(&mut self.font_system, "-"),
+                    left: ds.btn_out.0 + (ds.btn_out.2 - 14.0) * 0.5,
+                    top: ds.btn_out.1 + (ds.btn_out.3 - MODAL_LINE_H) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ds.btn_out.0 as i32,
+                        top: ds.btn_out.1 as i32,
+                        right: (ds.btn_out.0 + ds.btn_out.2) as i32,
+                        bottom: (ds.btn_out.1 + ds.btn_out.3) as i32,
+                    },
+                    default_color: btn_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &make_modal_buffer(&mut self.font_system, "Reset"),
+                    left: ds.btn_reset.0 + (ds.btn_reset.2 - 40.0) * 0.5,
+                    top: ds.btn_reset.1 + (ds.btn_reset.3 - MODAL_LINE_H) * 0.5,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: ds.btn_reset.0 as i32,
+                        top: ds.btn_reset.1 as i32,
+                        right: (ds.btn_reset.0 + ds.btn_reset.2) as i32,
+                        bottom: (ds.btn_reset.1 + ds.btn_reset.3) as i32,
+                    },
+                    default_color: btn_color,
+                    custom_glyphs: &[],
+                },
+            ];
+            self.modal_text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    btn_text_areas,
+                    &mut self.swash_cache,
+                )
+                .expect("terminite: display-settings buttons text prepare failed");
+        }
+
         if let Some(menu) = self.context_menu.as_ref() {
             // Context-menu item labels go through the same text renderer.
             let label_color = Color::rgb(225, 225, 235);
