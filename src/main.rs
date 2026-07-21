@@ -383,6 +383,29 @@ impl ApplicationHandler<UserEvent> for Terminite {
         // default size and then jump. Load failure (missing file, parse
         // error, cap breach) → None, and we fall through to defaults;
         // we never block startup on it.
+        //
+        // Query display scale factor *before* window creation so we can
+        // compute retina-aware defaults (smaller base font + smaller logical
+        // window on high-DPI screens).  `primary_monitor()` returns the
+        // monitor the cursor is currently over, which is the one the user
+        // will see first.
+        let scale_factor = event_loop
+            .primary_monitor()
+            .map(|m| m.scale_factor())
+            .unwrap_or(1.0);
+
+        // Start from retina-aware defaults, then overlay any user config.
+        // This way window_width / window_height are always scaled correctly,
+        // while user-set values (font_size, etc.) still take priority.
+        let mut config = crate::config::Config::with_scale(scale_factor);
+        if let Some(path) = crate::config::Config::path() {
+            if path.exists() {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    config.apply(&text);
+                }
+            }
+        }
+
         let saved = match layout::load() {
             Ok(s) => s,
             Err(e) => {
@@ -394,7 +417,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
             .as_ref()
             .and_then(|s| s.window)
             .map(|w| (w.width, w.height))
-            .unwrap_or((900.0, 600.0));
+            .unwrap_or((config.window_width, config.window_height));
         let mut attributes = Window::default_attributes()
             .with_title("terminite")
             .with_inner_size(LogicalSize::new(init_w, init_h));

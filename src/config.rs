@@ -32,6 +32,10 @@ const MIN_TAB_FONT_SIZE: f32 = 8.0;
 const MAX_TAB_FONT_SIZE: f32 = 96.0;
 const MIN_TAB_BAR_HEIGHT: f32 = 16.0;
 const MAX_TAB_BAR_HEIGHT: f32 = 200.0;
+const MIN_WINDOW_WIDTH: f32 = 320.0;
+const MAX_WINDOW_WIDTH: f32 = 4096.0;
+const MIN_WINDOW_HEIGHT: f32 = 200.0;
+const MAX_WINDOW_HEIGHT: f32 = 4096.0;
 
 /// What `\a` (BEL) does.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -144,6 +148,11 @@ pub struct Config {
     /// `"typing"` — only holds while the human is actively typing (older
     /// behavior, lets wakes land while you watch).
     pub inject_policy: String, // "focus" or "typing"
+
+    /// Initial window width in logical pixels. Startup-applied.
+    pub window_width: f32,
+    /// Initial window height in logical pixels. Startup-applied.
+    pub window_height: f32,
 }
 
 /// One row of `schema()` — a known config key with its type, default,
@@ -251,14 +260,56 @@ pub fn schema() -> Vec<ConfigKey> {
            \"focus\" = hold while the human has focus on that pane (default). \
            \"typing\" = only hold while actively typing (older behavior, lets \
            wakes land while you watch)."),
+        k("window_width", ConfigKind::Float, ConfigValue::Float(750.0), false,
+          "Initial window width in logical pixels. Startup-applied."),
+        k("window_height", ConfigKind::Float, ConfigValue::Float(500.0), false,
+          "Initial window height in logical pixels. Startup-applied."),
     ]
 }
 
 impl Default for Config {
     fn default() -> Self {
+        Config::with_scale(1.0)
+    }
+}
+
+/// Smart defaults that account for display scale (Retina).
+/// On a 2× Retina display the base font is halved so `base × scale`
+/// produces the same physical pixel size as 28 px on a 1× screen.
+/// Window dimensions shrink proportionally so the physical footprint
+/// fits comfortably on the display.
+impl Config {
+    /// The config path — the single resolver shared with the config-pane
+    /// writer, so the renderer reads exactly the file the pane edits.
+    /// `$XDG_CONFIG_HOME/terminite/config.toml` if set, else
+    /// `~/.config/terminite/config.toml`. (Previously the loader was
+    /// `$HOME`-only while the writer honored XDG — they could diverge.)
+    pub fn path() -> Option<PathBuf> {
+        crate::config_io::config_path()
+    }
+
+    /// Smart defaults that account for display scale (Retina).
+    /// On a 2× Retina display the base font is halved so `base × scale`
+    /// produces the same physical pixel size as 28 px on a 1× screen.
+    /// Window dimensions shrink proportionally so the physical footprint
+    /// fits comfortably on the display.
+    pub fn with_scale(scale_factor: f64) -> Self {
+        // Retina-aware base font: 28 px physical at 1× → 14 px at 2× Retina.
+        let font_size = (28.0_f32 / scale_factor as f32).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        // Tab labels follow the same logic but start from 18 px physical.
+        let tab_font_size = (18.0_f32 / scale_factor as f32)
+            .clamp(MIN_TAB_FONT_SIZE, MAX_TAB_FONT_SIZE);
+
+        // Window size: target ~1920×1280 physical on Retina (fits a 3024×1964
+        // MacBook Pro with room for macOS chrome). On 1× that's 1280×800.
+        let window_width = (1280.0_f32 / scale_factor as f32)
+            .clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+        let window_height = (800.0_f32 / scale_factor as f32)
+            .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+
         Self {
             font_family: crate::fonts::DEFAULT_FAMILY.to_string(),
-            font_size: 28.0,
+            font_size,
             font_weight: 400.0,
             background: crate::palette::BACKGROUND_RGB,
             show_block_labels: false,
@@ -267,9 +318,6 @@ impl Default for Config {
             cursor_color: (255, 200, 80, 180),
             selection_color: (82, 117, 191, 89),
             option_as_meta: true,
-            // Defaults dialed in via the hot-reload loop — Daniel's
-            // tuned values land more breathing room around the content
-            // and a noticeable gap between the block label and the line.
             padding: Padding { left: 55.0, right: 24.0, top: 16.0, bottom: 16.0 },
             gutter_left: 8.0,
             gutter_gap: 8.0,
@@ -279,25 +327,16 @@ impl Default for Config {
             line_height: 1.0,
             tab_min_width: 140.0,
             tab_max_width: 360.0,
-            tab_font_size: 18.0,
+            tab_font_size,
             tab_bar_height: 44.0,
             cursor_blink: true,
             bell_style: BellStyle::Visual,
             scrollback: 10_000,
             comms_delivery: true,
-            inject_policy: "focus".to_string(), // hold while focused on the pane
+            inject_policy: "focus".to_string(),
+            window_width,
+            window_height,
         }
-    }
-}
-
-impl Config {
-    /// The config path — the single resolver shared with the config-pane
-    /// writer, so the renderer reads exactly the file the pane edits.
-    /// `$XDG_CONFIG_HOME/terminite/config.toml` if set, else
-    /// `~/.config/terminite/config.toml`. (Previously the loader was
-    /// `$HOME`-only while the writer honored XDG — they could diverge.)
-    pub fn path() -> Option<PathBuf> {
-        crate::config_io::config_path()
     }
 
     /// Load from the standard path. A missing file, an unreadable file, or
@@ -322,7 +361,7 @@ impl Config {
         cfg
     }
 
-    fn apply(&mut self, text: &str) {
+    pub(crate) fn apply(&mut self, text: &str) {
         for (key, val) in parse_flat_toml(text) {
             match key.as_str() {
                 "font_family" => {
@@ -494,6 +533,16 @@ impl Config {
                 "scrollback" => {
                     if let Value::Int(n) = val {
                         self.scrollback = n.clamp(0, MAX_SCROLLBACK) as usize;
+                    }
+                }
+                "window_width" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.window_width = n.clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+                    }
+                }
+                "window_height" => {
+                    if let Some(n) = val.as_f32().filter(|v| v.is_finite()) {
+                        self.window_height = n.clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
                     }
                 }
                 _ => {}
@@ -713,6 +762,22 @@ mod tests {
     }
 
     #[test]
+    fn window_size_fields() {
+        let mut c = Config::default();
+        c.apply("window_width = 800\nwindow_height = 600\n");
+        assert_eq!(c.window_width, 800.0);
+        assert_eq!(c.window_height, 600.0);
+    }
+
+    #[test]
+    fn window_size_clamps() {
+        let mut c = Config::default();
+        c.apply("window_width = 100\nwindow_height = 99999\n");
+        assert_eq!(c.window_width, 320.0);
+        assert_eq!(c.window_height, 4096.0);
+    }
+
+    #[test]
     fn out_of_range_metrics_are_clamped() {
         // Out-of-range numbers clamp to the safe bounds — they can't be
         // allowed to drive the Term grid allocation to OOM.
@@ -740,5 +805,37 @@ mod tests {
         c.apply("padding = 24\n");
         assert_eq!(c.padding.left, 55.0);
         assert_eq!(c.padding.right, 24.0);
+    }
+
+    #[test]
+    fn with_scale_produces_retina_adjusted_defaults() {
+        // 1× display: same as current defaults.
+        let c1 = Config::with_scale(1.0);
+        assert_eq!(c1.font_size, 28.0);
+        assert_eq!(c1.tab_font_size, 18.0);
+        assert_eq!(c1.window_width, 1280.0);
+        assert_eq!(c1.window_height, 800.0);
+
+        // 2× Retina: base font halved, window shrunk proportionally.
+        let c2 = Config::with_scale(2.0);
+        assert_eq!(c2.font_size, 14.0);
+        assert_eq!(c2.tab_font_size, 9.0);
+        assert_eq!(c2.window_width, 640.0);
+        assert_eq!(c2.window_height, 400.0);
+
+        // 1.5× display (HiDPI laptop): intermediate values.
+        let c3 = Config::with_scale(1.5);
+        assert!((c3.font_size - 18.666666).abs() < 0.01);
+        assert!((c3.window_width - 853.3333).abs() < 0.1);
+        assert!((c3.window_height - 533.3333).abs() < 0.1);
+    }
+
+    #[test]
+    fn with_scale_clamps_to_bounds() {
+        // Extreme scale factor should clamp, not panic.
+        let c = Config::with_scale(10.0);
+        assert_eq!(c.font_size, MIN_FONT_SIZE); // 28/10 = 2.8, clamped to 6.0
+        assert!(c.window_width >= MIN_WINDOW_WIDTH);
+        assert!(c.window_height >= MIN_WINDOW_HEIGHT);
     }
 }
