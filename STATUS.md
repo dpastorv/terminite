@@ -65,6 +65,19 @@ they're a deliberate, eyeball-in-the-loop effort, one variable at a time, not a
 blind push. The renderer is back to the exact known-good state Daniel
 daily-drove.
 
+**Settled 2026-07-21 — the sizing model is Model A (content/chrome decoupled).**
+After circling the font/scale model more than once (the ×0.5 attempt above is
+the scar), we confirmed the design against real terminals — WezTerm (fancy tab
+bar = separate `window_frame.font_size`), Ghostty and iTerm2 (native chrome,
+sized by the OS), Kitty (couples only because its tab bar *is* terminal cells).
+The consensus for a terminal that draws its own chrome: **content font and
+chrome are independent axes; only the display scale factor scales everything.**
+So terminite keeps three independent logical (1×) base sizes — content font,
+tab-bar font, tab-bar height — each `× scale_factor` for physical px, each
+persisted. Surfaced as three sliders in the Cmd+G card (`ff31f24`). **Do not
+re-litigate this as "make one zoom scale the whole UI" — that's the loop.** The
+open question is *rendering* (thin text on low-DPI), never the *model*.
+
 Deferred by decision (2026-07-07): themes/palette (One Dark is fine for now),
 full keybinding remap (E2 — needs the config format to grow past flat
 `key=value`; the missing default keys landed now), named per-project workspaces
