@@ -368,8 +368,11 @@ impl Renderer {
                         custom_glyphs: &[],
                     },
                 ];
-                self.rects_modal
-                    .prepare(&self.queue, &[], resolution);
+                // NOTE: do NOT re-prepare rects_modal here. This block used to
+                // prepare it with an empty slice, which wiped the menu/palette/
+                // modal background prepared above whenever this overlay was up
+                // at the same time. The claims card's own background is drawn
+                // via the `above` layer, so it needs nothing from rects_modal.
                 self.modal_text_renderer
                     .prepare(
                         &self.device,
@@ -384,48 +387,74 @@ impl Renderer {
             }
         }
 
-        // Display settings overlay — card with zoom buttons.
+        // Display settings overlay — card with two font-size sliders + Reset.
         if let Some(ds) = self.display_settings.as_ref() {
             let surface_w = self.surface_config.width as f32;
             let surface_h = self.surface_config.height as f32;
             let card_w = DISPLAY_SETTINGS_W;
-            let card_h = MODAL_CARD_H;
+            let card_h = DISPLAY_SETTINGS_H;
             let cx = (surface_w - card_w) * 0.5;
             let cy = (surface_h - card_h) * 0.5;
+            // Card rects go through the modal rect layer (prepared below at the
+            // rects_modal.prepare call), NOT `above` — `above` was already
+            // uploaded to the GPU earlier this frame, so pushes here would never
+            // draw. The modal layer is drawn on top of everything.
+            let mut card_rects: Vec<RectInstance> = Vec::new();
             // Card background + border.
-            above.push(RectInstance {
+            card_rects.push(RectInstance {
                 rect: [cx - 1.5, cy - 1.5, card_w + 3.0, card_h + 3.0],
                 color: DISPLAY_SETTINGS_BORDER,
             });
-            above.push(RectInstance {
+            card_rects.push(RectInstance {
                 rect: [cx, cy, card_w, card_h],
                 color: DISPLAY_SETTINGS_BG,
             });
-            // Buttons — filled rects with labels.
+            // Reset button — filled rect (label added to the text areas below).
             let btn_bg = [0.16, 0.16, 0.22, 1.0];
-            for (_label, rect) in [
-                ("+", ds.btn_in),
-                ("-", ds.btn_out),
-                ("Reset", ds.btn_reset),
+            card_rects.push(RectInstance {
+                rect: [ds.btn_reset.0, ds.btn_reset.1, ds.btn_reset.2, ds.btn_reset.3],
+                color: btn_bg,
+            });
+            // Three sliders: thin track + thumb each. Thumb x derives live from
+            // the base values, so it tracks keyboard zoom too. Each is clamped
+            // to its own range (content 8–40 pt, tab 8–28 pt, height 24–80 px).
+            let (c_min, c_max) = slider_range(SliderKind::Content);
+            let (t_min, t_max) = slider_range(SliderKind::Tab);
+            let (th_min, th_max) = slider_range(SliderKind::TabHeight);
+            for (track, thumb_pt, min, max) in [
+                (ds.content_track, self.base_font_size, c_min, c_max),
+                (ds.tab_track, self.base_tab_font_size, t_min, t_max),
+                (ds.tabh_track, self.base_tab_bar_height, th_min, th_max),
             ] {
-                above.push(RectInstance {
-                    rect: [rect.0 - 1.0, rect.1 - 1.0, rect.2 + 2.0, rect.3 + 2.0],
-                    color: btn_bg,
+                let track_cy = track.1 + track.3 * 0.5;
+                card_rects.push(RectInstance {
+                    rect: [track.0, track_cy - 2.0, track.2, 4.0],
+                    color: SLIDER_TRACK_BG,
                 });
-                above.push(RectInstance {
-                    rect: [rect.0, rect.1, rect.2, rect.3],
-                    color: btn_bg,
+                let thumb_cx = slider_pt_to_x(thumb_pt, track, min, max);
+                card_rects.push(RectInstance {
+                    rect: [thumb_cx - SLIDER_THUMB_W * 0.5, track_cy - 10.0, SLIDER_THUMB_W, 20.0],
+                    color: SLIDER_THUMB_BG,
                 });
             }
-            // Text: title + zoom level + display info + button labels — all in ONE prepare call.
+            // Text — all in ONE prepare call.
             let inset = 28.0;
             let title_color = Color::rgb(235, 235, 245);
-            let zoom_color = Color::rgb(180, 180, 195);
+            let label_color = Color::rgb(190, 190, 205);
             let display_color = Color::rgb(140, 140, 160); // dimmer for info text
             let btn_color = Color::rgb(220, 220, 230);
-            let title_top = cy + inset;
-            let zoom_top = title_top + MODAL_LINE_H + 4.0;
-            let display_top = zoom_top + MODAL_LINE_H * 2.0 + 8.0; // zoom takes 2 lines
+            // Labels sit just above each track; info + Reset below the last one.
+            let content_label_top = ds.content_track.1 - MODAL_LINE_H - 4.0;
+            let tab_label_top = ds.tab_track.1 - MODAL_LINE_H - 4.0;
+            let tabh_label_top = ds.tabh_track.1 - MODAL_LINE_H - 4.0;
+            let display_top = ds.tabh_track.1 + ds.tabh_track.3 + 16.0;
+            // Reset label centered in its button by MEASURING the shaped text
+            // (a fixed width guess left it visibly off-centre).
+            let reset_buf = make_modal_buffer(&mut self.font_system, "Reset");
+            let reset_w = reset_buf
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0_f32, f32::max);
             let card_bounds = TextBounds {
                 left: cx as i32,
                 top: cy as i32,
@@ -436,19 +465,37 @@ impl Renderer {
                 TextArea {
                     buffer: &ds.title_buf,
                     left: cx + inset,
-                    top: title_top,
+                    top: cy + inset,
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: title_color,
                     custom_glyphs: &[],
                 },
                 TextArea {
-                    buffer: &ds.zoom_buf,
+                    buffer: &ds.content_label_buf,
                     left: cx + inset,
-                    top: zoom_top,
+                    top: content_label_top,
                     scale: 1.0,
                     bounds: card_bounds,
-                    default_color: zoom_color,
+                    default_color: label_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &ds.tab_label_buf,
+                    left: cx + inset,
+                    top: tab_label_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: label_color,
+                    custom_glyphs: &[],
+                },
+                TextArea {
+                    buffer: &ds.tabh_label_buf,
+                    left: cx + inset,
+                    top: tabh_label_top,
+                    scale: 1.0,
+                    bounds: card_bounds,
+                    default_color: label_color,
                     custom_glyphs: &[],
                 },
                 TextArea {
@@ -461,36 +508,8 @@ impl Renderer {
                     custom_glyphs: &[],
                 },
                 TextArea {
-                    buffer: &make_modal_buffer(&mut self.font_system, "+"),
-                    left: ds.btn_in.0 + (ds.btn_in.2 - 14.0) * 0.5,
-                    top: ds.btn_in.1 + (ds.btn_in.3 - MODAL_LINE_H) * 0.5,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: ds.btn_in.0 as i32,
-                        top: ds.btn_in.1 as i32,
-                        right: (ds.btn_in.0 + ds.btn_in.2) as i32,
-                        bottom: (ds.btn_in.1 + ds.btn_in.3) as i32,
-                    },
-                    default_color: btn_color,
-                    custom_glyphs: &[],
-                },
-                TextArea {
-                    buffer: &make_modal_buffer(&mut self.font_system, "-"),
-                    left: ds.btn_out.0 + (ds.btn_out.2 - 14.0) * 0.5,
-                    top: ds.btn_out.1 + (ds.btn_out.3 - MODAL_LINE_H) * 0.5,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: ds.btn_out.0 as i32,
-                        top: ds.btn_out.1 as i32,
-                        right: (ds.btn_out.0 + ds.btn_out.2) as i32,
-                        bottom: (ds.btn_out.1 + ds.btn_out.3) as i32,
-                    },
-                    default_color: btn_color,
-                    custom_glyphs: &[],
-                },
-                TextArea {
-                    buffer: &make_modal_buffer(&mut self.font_system, "Reset"),
-                    left: ds.btn_reset.0 + (ds.btn_reset.2 - 40.0) * 0.5,
+                    buffer: &reset_buf,
+                    left: ds.btn_reset.0 + (ds.btn_reset.2 - reset_w) * 0.5,
                     top: ds.btn_reset.1 + (ds.btn_reset.3 - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
                     bounds: TextBounds {
@@ -504,7 +523,7 @@ impl Renderer {
                 },
             ];
             self.rects_modal
-                .prepare(&self.queue, &[], resolution);
+                .prepare(&self.queue, &card_rects, resolution);
             self.modal_text_renderer
                 .prepare(
                     &self.device,
@@ -1181,9 +1200,14 @@ impl Renderer {
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .expect("terminite: tab bar text render failed");
 
-            // Modal and context menu sit on top of *everything* — they
-            // share the rects_modal / modal_text_renderer pipelines.
-            if self.modal.is_some() || self.context_menu.is_some() || self.palette.is_some() {
+            // Modal, context menu, palette, and the display-settings card sit
+            // on top of *everything* — they share the rects_modal /
+            // modal_text_renderer pipelines (mutually exclusive in practice).
+            if self.modal.is_some()
+                || self.context_menu.is_some()
+                || self.palette.is_some()
+                || self.display_settings.is_some()
+            {
                 self.rects_modal.render(&mut pass);
                 self.modal_text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)

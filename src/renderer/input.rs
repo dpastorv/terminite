@@ -99,6 +99,24 @@ impl Renderer {
             return;
         }
 
+        // Dragging a display-settings font-size slider. The `*_inner` setters
+        // early-return when the rounded size is unchanged (so trackpad
+        // micro-moves don't churn the grid) and report whether it changed — we
+        // only rebuild the card's thumb + label on a real step.
+        if let Some(kind) = self.slider_drag {
+            if let Some(pt) = self.display_slider_drag_pt(kind, x) {
+                let changed = match kind {
+                    SliderKind::Content => self.set_font_size_inner(pt),
+                    SliderKind::Tab => self.set_tab_font_size_inner(pt),
+                    SliderKind::TabHeight => self.set_tab_bar_height_inner(pt),
+                };
+                if changed {
+                    self.open_display_settings();
+                }
+            }
+            return;
+        }
+
         // Dragging a split divider — resize the split it belongs to.
         if let Some(drag) = self.divider_drag.as_ref() {
             let (outer, dir, path) = (drag.outer, drag.dir, drag.path.clone());
@@ -247,19 +265,27 @@ impl Renderer {
             return;
         }
 
-        // Display settings overlay — hit-test buttons.
-        if let Some(action) = self.hit_display_settings(self.mouse_pos.0, self.mouse_pos.1) {
-            if button == MouseButton::Left {
-                match action {
-                    "zoom_in" => self.zoom_by(2.0),
-                    "zoom_out" => self.zoom_by(-2.0),
-                    "zoom_reset" => self.zoom_reset(),
-                    _ => {}
-                }
-                // Rebuild the overlay text with updated zoom level.
-                self.open_display_settings(); // refreshes zoom_buf + hit boxes
+        // Display settings overlay — a press on a slider track starts a drag;
+        // a press on Reset restores both axes to their configured defaults.
+        // Drags apply via the non-persisting `*_inner`; mouse_up persists once.
+        if button == MouseButton::Left && self.has_display_settings() {
+            if let Some((kind, pt)) = self.display_slider_at(self.mouse_pos.0, self.mouse_pos.1) {
+                self.slider_drag = Some(kind);
+                match kind {
+                    SliderKind::Content => self.set_font_size_inner(pt),
+                    SliderKind::Tab => self.set_tab_font_size_inner(pt),
+                    SliderKind::TabHeight => self.set_tab_bar_height_inner(pt),
+                };
+                self.open_display_settings(); // refresh thumb + label
+                return;
             }
-            return;
+            if self.hit_display_reset(self.mouse_pos.0, self.mouse_pos.1) {
+                self.set_font_size(self.config.font_size);
+                self.set_tab_font_size(self.config.tab_font_size);
+                self.set_tab_bar_height(self.config.tab_bar_height);
+                self.open_display_settings();
+                return;
+            }
         }
 
         // A left-press on a split divider starts a resize drag.
@@ -411,6 +437,13 @@ impl Renderer {
     }
 
     pub fn mouse_up(&mut self, button: MouseButton, modifiers: ModifiersState) {
+        // End a font-size slider drag. Drags applied via the non-persisting
+        // `*_inner` setters, so persist the final size once here.
+        if self.slider_drag.take().is_some() {
+            self.persist_layout();
+            return;
+        }
+
         // Finish a corner gesture: drag in splits the pane at the cursor,
         // drag back out removes it; a short drag cancels.
         if let Some(g) = self.split_gesture.take() {

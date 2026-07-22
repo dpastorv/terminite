@@ -448,9 +448,17 @@ impl ApplicationHandler<UserEvent> for Terminite {
             // reapply it once the panes exist so terms re-measure at the
             // size you left, not the configured default.
             let font_size = saved.font_size;
+            let tab_font_size = saved.tab_font_size;
+            let tab_bar_height = saved.tab_bar_height;
             renderer.restore_layout(saved);
             if let Some(fs) = font_size {
                 renderer.set_font_size(fs);
+            }
+            if let Some(tfs) = tab_font_size {
+                renderer.set_tab_font_size(tfs);
+            }
+            if let Some(tbh) = tab_bar_height {
+                renderer.set_tab_bar_height(tbh);
             }
         }
         self.renderer = Some(renderer);

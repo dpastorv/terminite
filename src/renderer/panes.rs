@@ -272,19 +272,90 @@ impl Renderer {
     /// display scale, so the zoom you pick survives a move to a denser/sparser
     /// monitor. Clamped to the same bounds as the config field.
     pub fn set_font_size(&mut self, new_base: f32) {
+        if self.set_font_size_inner(new_base) {
+            // Persist the new zoom (base size, monitor-independent) so it
+            // survives a restart — in the layout-state file, not the config.
+            self.persist_layout();
+        }
+    }
+
+    /// Apply a new base content font size WITHOUT persisting; returns whether
+    /// it actually changed. Slider drags call this per motion step and persist
+    /// once on release, so a drag doesn't write the state file on every pixel.
+    pub(super) fn set_font_size_inner(&mut self, new_base: f32) -> bool {
         let new_base =
             new_base.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE);
         if (new_base - self.base_font_size).abs() < 0.05 {
-            return;
+            return false;
         }
         self.base_font_size = new_base;
         self.apply_font_metrics();
         self.relayout();
         self.sync_active_grid();
-        // Persist the new zoom (base size, monitor-independent) so it survives
-        // a restart — stored in the layout-state file, not the user's config.
-        self.persist_layout();
         self.window.request_redraw();
+        true
+    }
+
+    /// Re-derive the physical tab-bar font metrics from `base_tab_font_size ×
+    /// scale_factor` and re-shape every tab's title buffer. The chrome mirror
+    /// of `apply_font_metrics` — independent of the content font. Does NOT
+    /// relayout; the caller does.
+    pub(super) fn apply_tab_font_metrics(&mut self) {
+        self.tab_font_size = (self.base_tab_font_size * self.scale_factor).round().max(1.0);
+        self.tab_line_h = (self.tab_font_size * TAB_LINE_RATIO).round();
+        let (fs, lh, maxw) = (self.tab_font_size, self.tab_line_h, self.tab_max_width);
+        let mut tabs: Vec<&mut Tab> = Vec::new();
+        self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);
+        for tab in tabs {
+            tab.title_buffer = make_title_buffer(&mut self.font_system, &tab.title, fs, lh, maxw);
+        }
+    }
+
+    /// Persisting wrapper for the Tab-bar font slider — mirrors `set_font_size`.
+    pub fn set_tab_font_size(&mut self, new_base: f32) {
+        if self.set_tab_font_size_inner(new_base) {
+            self.persist_layout();
+        }
+    }
+
+    /// Apply a new base tab-bar font size WITHOUT persisting; returns whether
+    /// it changed. Clamped to the same bounds as the `tab_font_size` config.
+    pub(super) fn set_tab_font_size_inner(&mut self, new_base: f32) -> bool {
+        let new_base = new_base
+            .clamp(crate::config::MIN_TAB_FONT_SIZE, crate::config::MAX_TAB_FONT_SIZE);
+        if (new_base - self.base_tab_font_size).abs() < 0.05 {
+            return false;
+        }
+        self.base_tab_font_size = new_base;
+        self.apply_tab_font_metrics();
+        self.relayout();
+        self.window.request_redraw();
+        true
+    }
+
+    /// Persisting wrapper for the Tab-height slider — mirrors `set_font_size`.
+    pub fn set_tab_bar_height(&mut self, new_base: f32) {
+        if self.set_tab_bar_height_inner(new_base) {
+            self.persist_layout();
+        }
+    }
+
+    /// Apply a new base tab-bar strip height (logical px) WITHOUT persisting;
+    /// returns whether it changed. Only the strip height moves — the tab font
+    /// is its own axis — so this just re-derives the physical height and
+    /// relayouts (the grid's usable rows depend on the bar height).
+    pub(super) fn set_tab_bar_height_inner(&mut self, new_base: f32) -> bool {
+        let new_base = new_base
+            .clamp(crate::config::MIN_TAB_BAR_HEIGHT, crate::config::MAX_TAB_BAR_HEIGHT);
+        if (new_base - self.base_tab_bar_height).abs() < 0.05 {
+            return false;
+        }
+        self.base_tab_bar_height = new_base;
+        self.tab_bar_height = (new_base * self.scale_factor).round().max(1.0);
+        self.relayout();
+        self.sync_active_grid();
+        self.window.request_redraw();
+        true
     }
 
     /// Nudge the base font size by `delta` points (rounded for crisp cells).

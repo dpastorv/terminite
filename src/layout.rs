@@ -78,6 +78,15 @@ pub struct Layout {
     /// across restarts without rewriting the user's config file.
     #[serde(default)]
     pub font_size: Option<f32>,
+    /// Last live tab-bar font size (the display-settings Tab slider). `None`
+    /// → fall back to the configured `tab_font_size`. Same rationale as
+    /// `font_size` — an independent chrome axis persisted across restarts.
+    #[serde(default)]
+    pub tab_font_size: Option<f32>,
+    /// Last live tab-bar strip height (the display-settings Tab-height slider).
+    /// `None` → fall back to the configured `tab_bar_height`.
+    #[serde(default)]
+    pub tab_bar_height: Option<f32>,
     pub root: LayoutNode,
 }
 
@@ -253,6 +262,12 @@ pub fn load() -> std::io::Result<Option<Layout>> {
     layout.font_size = layout.font_size.filter(|s| s.is_finite()).map(|s| {
         s.clamp(crate::config::MIN_FONT_SIZE, crate::config::MAX_FONT_SIZE)
     });
+    layout.tab_font_size = layout.tab_font_size.filter(|s| s.is_finite()).map(|s| {
+        s.clamp(crate::config::MIN_TAB_FONT_SIZE, crate::config::MAX_TAB_FONT_SIZE)
+    });
+    layout.tab_bar_height = layout.tab_bar_height.filter(|s| s.is_finite()).map(|s| {
+        s.clamp(crate::config::MIN_TAB_BAR_HEIGHT, crate::config::MAX_TAB_BAR_HEIGHT)
+    });
     Ok(Some(layout))
 }
 
@@ -318,6 +333,8 @@ mod tests {
             active_pane_path: Some(vec![1, 0]),
             window: Some(WindowGeom { width: 1200.0, height: 800.0, x: 100, y: 60 }),
             font_size: Some(15.0),
+            tab_font_size: Some(18.0),
+            tab_bar_height: Some(44.0),
             root: LayoutNode::Split {
                 dir: LayoutSplitDir::Vertical,
                 ratio: 0.6,

@@ -725,30 +725,85 @@ pub(super) enum ModalAction {
 // ── Display settings overlay — zoom controls ─────────────
 
 pub(super) const DISPLAY_SETTINGS_W: f32 = 360.0;
+/// Card height — dedicated (not the shared MODAL_CARD_H) so the display card
+/// has room for three labelled sliders plus the display info and Reset.
+pub(super) const DISPLAY_SETTINGS_H: f32 = 460.0;
 pub(super) const DISPLAY_SETTINGS_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
 pub(super) const DISPLAY_SETTINGS_BORDER: [f32; 4] = [0.20, 0.20, 0.26, 1.0];
-/// Button hit boxes: (x, y, w, h) relative to surface origin.
+/// Slider ranges, in logical (pre-HiDPI) points — the same unit config
+/// `font_size` / `tab_font_size` and the persisted sizes use. Friendly
+/// sub-ranges of the full `MIN/MAX_*` clamps. The tab range tops out where the
+/// label still fits the default tab-bar height; keyboard zoom can go past it.
+pub(super) const SLIDER_CONTENT_MIN_PT: f32 = 8.0;
+pub(super) const SLIDER_CONTENT_MAX_PT: f32 = 40.0;
+pub(super) const SLIDER_TAB_MIN_PT: f32 = 8.0;
+pub(super) const SLIDER_TAB_MAX_PT: f32 = 28.0;
+/// Tab-bar strip height range, in logical px (not points).
+pub(super) const SLIDER_TABH_MIN_PX: f32 = 24.0;
+pub(super) const SLIDER_TABH_MAX_PX: f32 = 80.0;
+/// Visuals for the slider track + thumb.
+pub(super) const SLIDER_TRACK_BG: [f32; 4] = [0.24, 0.24, 0.30, 1.0];
+pub(super) const SLIDER_THUMB_BG: [f32; 4] = [0.55, 0.58, 0.75, 1.0];
+pub(super) const SLIDER_THUMB_W: f32 = 14.0;
+/// Button / track hit boxes: (x, y, w, h) relative to surface origin.
 pub(super) type HitBox = (f32, f32, f32, f32);
 
-/// Display settings overlay: shows current zoom level and + / - / Reset buttons.
+/// The logical-point range a given slider spans.
+pub(super) fn slider_range(kind: SliderKind) -> (f32, f32) {
+    match kind {
+        SliderKind::Content => (SLIDER_CONTENT_MIN_PT, SLIDER_CONTENT_MAX_PT),
+        SliderKind::Tab => (SLIDER_TAB_MIN_PT, SLIDER_TAB_MAX_PT),
+        SliderKind::TabHeight => (SLIDER_TABH_MIN_PX, SLIDER_TABH_MAX_PX),
+    }
+}
+
+/// Map a logical point size to the thumb-center x within a track hit box.
+/// Clamped to `[min, max]` so the thumb can't leave the track even if the
+/// actual size (set via keyboard zoom past an edge) is outside the range.
+pub(super) fn slider_pt_to_x(pt: f32, track: HitBox, min: f32, max: f32) -> f32 {
+    let t = ((pt - min) / (max - min)).clamp(0.0, 1.0);
+    track.0 + t * track.2
+}
+
+/// Map an x within a track hit box back to a whole-point size, clamped to
+/// `[min, max]`.
+pub(super) fn slider_x_to_pt(x: f32, track: HitBox, min: f32, max: f32) -> f32 {
+    let t = ((x - track.0) / track.2.max(1.0)).clamp(0.0, 1.0);
+    (min + t * (max - min)).round()
+}
+
+/// Display settings overlay: two independent font-size sliders (terminal
+/// content + tab bar) plus display info and a Reset button.
 pub(super) struct DisplaySettingsOverlay {
     pub(super) title_buf: Buffer,
-    /// "Zoom: 100%" or similar.
-    pub(super) zoom_buf: Buffer,
+    /// "Terminal text — 14 pt" (content font, logical points).
+    pub(super) content_label_buf: Buffer,
+    /// "Tab bar — 18 pt" (chrome font, logical points).
+    pub(super) tab_label_buf: Buffer,
+    /// "Tab height — 44 px" (chrome strip height, logical px).
+    pub(super) tabh_label_buf: Buffer,
     /// Display info: resolution, DPI, scale factor, suggestion.
     pub(super) display_buf: Buffer,
-    /// Button hit boxes in surface coordinates.
-    pub(super) btn_in: HitBox,
-    pub(super) btn_out: HitBox,
+    /// Slider track grab boxes. Thumb x is derived live from the base sizes so
+    /// they always reflect the true value (incl. after keyboard zoom).
+    pub(super) content_track: HitBox,
+    pub(super) tab_track: HitBox,
+    pub(super) tabh_track: HitBox,
+    /// Reset-to-config-defaults button.
     pub(super) btn_reset: HitBox,
 }
 
 impl Renderer {
     /// Open the display settings overlay card.
     pub(crate) fn open_display_settings(&mut self) {
-        let zoom = self.current_zoom_pct();
         let title = "Display Settings".to_string();
-        let zoom_text = format!("Zoom: {}%", zoom);
+        // Honest, display-independent unit for both axes: logical points (the
+        // base sizes the sliders drive), not the HiDPI scale factor.
+        let content_text =
+            format!("Terminal text — {} pt", self.base_font_size.round() as i32);
+        let tab_text = format!("Tab bar — {} pt", self.base_tab_font_size.round() as i32);
+        let tabh_text =
+            format!("Tab height — {} px", self.base_tab_bar_height.round() as i32);
 
         // Display info: scale factor, resolution, suggested zoom.
         let scale = self.scale_factor;
@@ -766,32 +821,49 @@ impl Renderer {
         };
 
         let title_buf = make_modal_buffer(&mut self.font_system, &title);
-        let zoom_buf = make_modal_buffer(&mut self.font_system, &zoom_text);
+        let content_label_buf = make_modal_buffer(&mut self.font_system, &content_text);
+        let tab_label_buf = make_modal_buffer(&mut self.font_system, &tab_text);
+        let tabh_label_buf = make_modal_buffer(&mut self.font_system, &tabh_text);
         let display_info = format!(
             "{}×{} @ {}dpi (scale {:.1}×)\n{}",
             logical_w, logical_h, dpi, scale, suggestion
         );
         let display_buf = make_modal_buffer(&mut self.font_system, &display_info);
 
-        // Compute button hit boxes — centered below the text.
+        // Card + control geometry. Layout, top→bottom: title, then three
+        // (label + slider) rows, display info, then a centered Reset. Rows are
+        // 86 px apart; labels sit just above each track (see render.rs).
         let card_w = DISPLAY_SETTINGS_W;
-        let card_h = MODAL_CARD_H;
+        let card_h = DISPLAY_SETTINGS_H;
         let card_x = (surface_w as f32 - card_w) * 0.5;
         let card_y = (surface_h as f32 - card_h) * 0.5;
+        let inset = 28.0;
+
+        // All tracks share x + width; the grab box is taller than the visual
+        // line so it's easy to grab.
+        let track_x = card_x + inset;
+        let track_w = card_w - inset * 2.0;
+        let track_grab_h = 24.0;
+        let content_track = (track_x, card_y + 96.0, track_w, track_grab_h);
+        let tab_track = (track_x, card_y + 182.0, track_w, track_grab_h);
+        let tabh_track = (track_x, card_y + 268.0, track_w, track_grab_h);
+
+        // Reset button, centered near the bottom.
         let btn_h = 36.0;
-        let btn_w = 80.0;
-        let gap = 12.0;
-        let btn_y = card_y + MODAL_CARD_H - btn_h - 24.0;
-        let total_btns_w = btn_w * 3.0 + gap * 2.0;
-        let start_x = card_x + (card_w - total_btns_w) * 0.5;
+        let btn_w = 100.0;
+        let btn_y = card_y + card_h - btn_h - 24.0;
+        let btn_reset = (card_x + (card_w - btn_w) * 0.5, btn_y, btn_w, btn_h);
 
         self.display_settings = Some(DisplaySettingsOverlay {
             title_buf,
-            zoom_buf,
+            content_label_buf,
+            tab_label_buf,
+            tabh_label_buf,
             display_buf,
-            btn_in: (start_x, btn_y, btn_w, btn_h),
-            btn_out: (start_x + btn_w + gap, btn_y, btn_w, btn_h),
-            btn_reset: (start_x + (btn_w + gap) * 2.0, btn_y, btn_w, btn_h),
+            content_track,
+            tab_track,
+            tabh_track,
+            btn_reset,
         });
         self.window.request_redraw();
     }
@@ -807,29 +879,49 @@ impl Renderer {
         self.display_settings.is_some()
     }
 
-    /// Current zoom level as a percentage of base font size.
-    pub(super) fn current_zoom_pct(&self) -> i32 {
-        if self.base_font_size == 0.0 {
-            return 100;
-        }
-        ((self.font_size / self.base_font_size) * 100.0).round() as i32
+    /// True if `(x, y)` is on the display-settings Reset button.
+    pub(crate) fn hit_display_reset(&self, x: f32, y: f32) -> bool {
+        self.display_settings
+            .as_ref()
+            .map(|ds| in_box(ds.btn_reset, x, y))
+            .unwrap_or(false)
     }
 
-    /// Hit-test display settings buttons at a surface coordinate. Returns
-    /// which button was clicked, if any.
-    pub(crate) fn hit_display_settings(&self, x: f32, y: f32) -> Option<&'static str> {
+    /// If `(x, y)` falls on a slider track, return which slider and the logical
+    /// point size that position maps to. Used to *start* a drag.
+    pub(crate) fn display_slider_at(&self, x: f32, y: f32) -> Option<(SliderKind, f32)> {
         let ds = self.display_settings.as_ref()?;
-        let in_rect = |r: HitBox| x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3;
-        if in_rect(ds.btn_in) {
-            Some("zoom_in")
-        } else if in_rect(ds.btn_out) {
-            Some("zoom_out")
-        } else if in_rect(ds.btn_reset) {
-            Some("zoom_reset")
-        } else {
-            None
+        for (kind, track) in [
+            (SliderKind::Content, ds.content_track),
+            (SliderKind::Tab, ds.tab_track),
+            (SliderKind::TabHeight, ds.tabh_track),
+        ] {
+            if in_box(track, x, y) {
+                let (min, max) = slider_range(kind);
+                return Some((kind, slider_x_to_pt(x, track, min, max)));
+            }
         }
+        None
     }
+
+    /// Map an x-coordinate to a point size for the given slider, clamped to its
+    /// range — for *tracking* a drag even once the cursor has left the track
+    /// box (past an end or above/below it).
+    pub(crate) fn display_slider_drag_pt(&self, kind: SliderKind, x: f32) -> Option<f32> {
+        let ds = self.display_settings.as_ref()?;
+        let track = match kind {
+            SliderKind::Content => ds.content_track,
+            SliderKind::Tab => ds.tab_track,
+            SliderKind::TabHeight => ds.tabh_track,
+        };
+        let (min, max) = slider_range(kind);
+        Some(slider_x_to_pt(x, track, min, max))
+    }
+}
+
+/// Point-in-rect test for a `(x, y, w, h)` hit box.
+fn in_box(r: HitBox, x: f32, y: f32) -> bool {
+    x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
 
 
@@ -1094,4 +1186,44 @@ impl Renderer {
         ]
     }
 
+}
+
+#[cfg(test)]
+mod slider_tests {
+    use super::*;
+
+    // A representative track: origin 100, width 300.
+    const TRACK: HitBox = (100.0, 0.0, 300.0, 24.0);
+
+    #[test]
+    fn endpoints_map_to_track_ends() {
+        for kind in [SliderKind::Content, SliderKind::Tab, SliderKind::TabHeight] {
+            let (min, max) = slider_range(kind);
+            assert_eq!(slider_pt_to_x(min, TRACK, min, max), 100.0);
+            assert_eq!(slider_pt_to_x(max, TRACK, min, max), 400.0);
+            assert_eq!(slider_x_to_pt(100.0, TRACK, min, max), min);
+            assert_eq!(slider_x_to_pt(400.0, TRACK, min, max), max);
+        }
+    }
+
+    #[test]
+    fn out_of_range_clamps_to_track_and_range() {
+        let (min, max) = slider_range(SliderKind::Content);
+        // A size below/above the range pins the thumb to an end...
+        assert_eq!(slider_pt_to_x(4.0, TRACK, min, max), 100.0);
+        assert_eq!(slider_pt_to_x(500.0, TRACK, min, max), 400.0);
+        // ...and dragging past an end clamps the reported size to the range.
+        assert_eq!(slider_x_to_pt(0.0, TRACK, min, max), min);
+        assert_eq!(slider_x_to_pt(9999.0, TRACK, min, max), max);
+    }
+
+    #[test]
+    fn midpoint_round_trips_to_an_integer_point() {
+        let (min, max) = slider_range(SliderKind::Tab);
+        let mid_x = 100.0 + 300.0 * 0.5;
+        let pt = slider_x_to_pt(mid_x, TRACK, min, max);
+        assert_eq!(pt, ((min + max) / 2.0).round());
+        // And that point maps back within one step of where we clicked.
+        assert!((slider_pt_to_x(pt, TRACK, min, max) - mid_x).abs() <= 300.0 / (max - min));
+    }
 }

@@ -173,6 +173,17 @@ const BADGE_WAITING: [f32; 4] = [1.0, 0.90, 0.15, 1.0];
 const BADGE_QUEUED: [f32; 4] = [0.25, 0.80, 1.0, 1.0];
 const BADGE_AUTO: [f32; 4] = [0.40, 0.60, 1.0, 0.70];
 
+/// Which slider in the display-settings card is being dragged. Content = the
+/// terminal grid font; Tab = the tab-bar label font; TabHeight = the tab-bar
+/// strip height. All three are deliberately independent axes (Model A —
+/// content and chrome are separate; see the display-settings card).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SliderKind {
+    Content,
+    Tab,
+    TabHeight,
+}
+
 // Modal dialog (in-window). Centered card with Cancel/Confirm buttons.
 const MODAL_BG_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const MODAL_CARD_BG: [f32; 4] = [0.10, 0.10, 0.13, 1.0];
@@ -385,15 +396,25 @@ pub struct Renderer {
     /// Live-tunable via config so the bar can be dialed in.
     tab_min_width: f32,
     tab_max_width: f32,
-    /// Chrome font size for tab labels + close glyph + block labels.
-    /// Startup-applied (the title buffers are pre-shaped at this size).
+    /// Chrome font size for tab labels + close glyph + block labels, in
+    /// physical px = `base_tab_font_size × scale_factor`.
     tab_font_size: f32,
+    /// The pre-HiDPI (logical / 1x) tab-bar font size — config default or the
+    /// display-settings Tab slider. Mirrors `base_font_size` for chrome: the
+    /// Tab axis is independent of the content zoom, and its value is
+    /// monitor-independent (physical `tab_font_size` re-derives on a scale
+    /// change), and persisted so it survives a restart.
+    base_tab_font_size: f32,
     /// Line height derived from `tab_font_size` (font * ratio). Cached
     /// so the render loop doesn't recompute.
     tab_line_h: f32,
-    /// Height of the per-pane tab-bar strip in pixels. Threads through
-    /// the grid math and the chrome layout.
+    /// Height of the per-pane tab-bar strip, physical px = `base_tab_bar_height
+    /// × scale_factor`. Threads through the grid math and the chrome layout.
     tab_bar_height: f32,
+    /// The pre-HiDPI (logical / 1x) tab-bar height — config default or the
+    /// display-settings Tab-height slider. Same monitor-independent, persisted
+    /// treatment as the two font base sizes.
+    base_tab_bar_height: f32,
     font_size: f32,
     /// The pre-HiDPI (logical / 1x) content font size — config default or a
     /// zoom. Zoom + persistence use this; `font_size` = `base_font_size ×
@@ -437,6 +458,10 @@ pub struct Renderer {
     clipboard: Option<Clipboard>,
     /// When Some, a split divider is being dragged to resize.
     divider_drag: Option<DividerDrag>,
+    /// Which display-settings slider thumb is being dragged, if any. Lives
+    /// here, not on the overlay struct, so a mid-drag overlay refresh (which
+    /// rebuilds `display_settings`) can't silently drop the drag.
+    slider_drag: Option<SliderKind>,
     /// When Some, a corner handle is being dragged to split a pane.
     split_gesture: Option<SplitGesture>,
     /// Last cursor icon set on the window — set only on change.
@@ -707,9 +732,11 @@ impl Renderer {
         let highlight_offset_y = config.highlight_offset_y * scale_factor;
         let tab_min_width = config.tab_min_width * scale_factor;
         let tab_max_width = config.tab_max_width * scale_factor;
-        let tab_font_size = (config.tab_font_size * scale_factor).round().max(1.0);
+        let base_tab_font_size = config.tab_font_size;
+        let tab_font_size = (base_tab_font_size * scale_factor).round().max(1.0);
         let tab_line_h = (tab_font_size * TAB_LINE_RATIO).round();
-        let tab_bar_height = (config.tab_bar_height * scale_factor).round();
+        let base_tab_bar_height = config.tab_bar_height;
+        let tab_bar_height = (base_tab_bar_height * scale_factor).round();
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
@@ -857,8 +884,10 @@ impl Renderer {
             tab_min_width,
             tab_max_width,
             tab_font_size,
+            base_tab_font_size,
             tab_line_h,
             tab_bar_height,
+            base_tab_bar_height,
             font_size,
             base_font_size,
             scale_factor,
@@ -876,6 +905,7 @@ impl Renderer {
             mouse_pos: (0.0, 0.0),
             clipboard,
             divider_drag: None,
+            slider_drag: None,
             split_gesture: None,
             cursor_icon: CursorIcon::Default,
             bell_flash_until: None,
