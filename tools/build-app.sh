@@ -12,9 +12,10 @@
 #                                           as the CLI (terminite tabs,
 #                                           terminite shell-init, …)
 #
-# To get the CLI on PATH after install:
-#   ln -sfn /Applications/Terminite.app/Contents/MacOS/terminite \
-#           /usr/local/bin/terminite
+# The CLI is wired up automatically: this script installs the bundle, puts
+# its own binary dir on PATH (~/.zshrc), and removes the stale
+# ~/.cargo/bin/terminite a past `cargo install` leaves behind — that copy
+# sits earlier on PATH and silently shadows the app with an old build.
 #
 # Skipped on purpose (would be a separate bundle):
 #   - codesign / notarization — requires an Apple Developer account
@@ -100,13 +101,57 @@ echo "→ ad-hoc signing the bundle"
 # notarized (needs a paid Developer ID), so the receiving Mac must clear
 # quarantine once: xattr -dr com.apple.quarantine /Applications/Terminite.app
 codesign --force --deep --sign - "$APP"
+echo "✓ built $APP"
+
+# ── install into the Applications folder ────────────────────────────
+# /Applications if writable (admin users usually can), else ~/Applications.
+DEST="/Applications"
+if ! { mkdir -p "$DEST" 2>/dev/null && [ -w "$DEST" ]; }; then
+    DEST="$HOME/Applications"
+    mkdir -p "$DEST"
+fi
+INSTALLED="$DEST/$NAME.app"
+BIN_DIR="$INSTALLED/Contents/MacOS"
+echo "→ installing to $INSTALLED"
+rm -rf "$INSTALLED"
+cp -R "$APP" "$DEST/"
+# Let Spotlight / Launchpad find it.
+LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[ -x "$LSREG" ] && "$LSREG" -f "$INSTALLED" 2>/dev/null || true
+
+# ── CLI on PATH — one source of truth (the bundle) ──────────────────
+# The binary is also the CLI (terminite tabs / blocks / --version / …).
+# Instead of a sudo symlink or a `cargo install` copy — both drift and can
+# shadow the app — put the bundle's own bin dir on PATH and clear the stale
+# duplicate. That ~/.cargo/bin copy sits earlier on PATH and silently runs
+# an OLD build; it's regenerable, so removing it is safe.
+if [ -e "$HOME/.cargo/bin/$EXEC" ]; then
+    rm -f "$HOME/.cargo/bin/$EXEC"
+    echo "→ removed stale $HOME/.cargo/bin/$EXEC (was shadowing the app)"
+fi
+
+# Ensure the bundle bin dir is on PATH (idempotent). zsh is the macOS
+# default; bash users: add the same line to ~/.bash_profile.
+ZRC="$HOME/.zshrc"
+if [ -f "$ZRC" ] && grep -qF "$BIN_DIR" "$ZRC"; then
+    echo "→ PATH entry already present in $ZRC"
+else
+    printf '\n# terminite CLI — bundle binary (GUI app lives in %s)\nexport PATH="$PATH:%s"\n' \
+        "$DEST" "$BIN_DIR" >> "$ZRC"
+    echo "→ added terminite to PATH in $ZRC"
+fi
+
+# Warn about any *other* terminite in common PATH dirs that could shadow it.
+for d in /usr/local/bin /opt/homebrew/bin "$HOME/.local/bin" /usr/bin; do
+    if [ -e "$d/$EXEC" ] && [ "$d/$EXEC" != "$BIN_DIR/$EXEC" ]; then
+        echo "⚠ another '$EXEC' at $d/$EXEC may shadow the app on PATH — remove it."
+    fi
+done
 
 echo ""
-echo "✓ built $APP"
+echo "✓ installed $INSTALLED"
+"$BIN_DIR/$EXEC" --version 2>/dev/null | sed 's/^/    /' || true
 echo ""
-echo "  drag it to /Applications (or ~/Applications)."
-echo "  launch from Spotlight / Launchpad / Dock."
-echo ""
-echo "  to get the CLI on PATH:"
-echo "    ln -sfn /Applications/$NAME.app/Contents/MacOS/$EXEC /usr/local/bin/$EXEC"
+echo "  GUI: launch from Spotlight / Launchpad / Dock."
+echo "  CLI: open a new shell, then \`$EXEC --version\`."
 echo ""
