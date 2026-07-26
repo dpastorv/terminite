@@ -22,6 +22,13 @@ impl Renderer {
         self.surface.configure(&self.device, &self.surface_config);
         self.relayout();
         self.sync_active_grid();
+        // Repaint immediately at the new size. Without this, the surface is
+        // reconfigured but the last *painted* frame stays the old size until
+        // some unrelated redraw fires — and the compositor stretches that
+        // stale frame to fill the resized window, a visible "stretched" flash.
+        // macOS emits Resized on its own (Spaces, Stage Manager, display/
+        // backing changes), so the flash appears at random with no user action.
+        self.window.request_redraw();
     }
 
     /// The whole window — the rect the pane tree fills. Each pane carves its
