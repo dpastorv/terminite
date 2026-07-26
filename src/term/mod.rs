@@ -356,6 +356,12 @@ impl LiveTerm {
         tty_options
             .env
             .insert("TERMINITE_PANE".to_string(), tab_id.0.to_string());
+        // No explicit working directory (the first tab, or a tab whose cwd
+        // couldn't be resolved) → start in $HOME rather than inheriting the
+        // parent process's cwd, which is "/" when the .app is launched from
+        // Finder / Launchpad / Dock. New tabs pass the active tab's real cwd,
+        // so they still open where you already are.
+        let cwd = cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from));
         if let Some(cwd) = cwd {
             tty_options.working_directory = Some(cwd);
         }
