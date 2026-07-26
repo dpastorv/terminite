@@ -37,6 +37,16 @@ impl Renderer {
     }
 
     pub fn render(&mut self) {
+        // Don't present while the window is fully occluded. Background redraws
+        // (PTY output, delivery ticks) would otherwise acquire and present a
+        // surface to a hidden window — wasted work, and on macOS that briefly
+        // surfaces the window on top of whatever's in front (a ~1-frame flash
+        // that reads like a screenshot blink). We repaint on becoming visible
+        // again (occlusion_changed). PTY data is still consumed off the event
+        // loop, so nothing is lost — only the draw is deferred.
+        if self.occluded {
+            return;
+        }
         check_rss_kill_switch(self.rss_kill_bytes);
         self.refresh_auto_titles();
         let frame_start = Instant::now();

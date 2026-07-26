@@ -533,6 +533,11 @@ impl ApplicationHandler<UserEvent> for Terminite {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Occluded(occluded) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.occlusion_changed(occluded);
+                }
+            }
             WindowEvent::Focused(focused) => {
                 if let Some(r) = self.renderer.as_mut() {
                     r.focus_changed(focused);

@@ -469,6 +469,11 @@ pub struct Renderer {
 
     /// Visual bell deadline; `Some(t)` means draw a flash overlay until `t`.
     bell_flash_until: Option<Instant>,
+    /// Whether the window is fully occluded (hidden behind others / minimized).
+    /// While true we skip presenting frames — drawing to a covered window is
+    /// wasted work and, on macOS, presenting to an occluded surface briefly
+    /// surfaces the window on top of whatever's in front (a ~1-frame flash).
+    occluded: bool,
     /// Whether the window has keyboard focus — gates cursor blink.
     focused: bool,
     /// Renderer start time; cursor-blink phase is computed from elapsed.
@@ -909,6 +914,7 @@ impl Renderer {
             split_gesture: None,
             cursor_icon: CursorIcon::Default,
             bell_flash_until: None,
+            occluded: false,
             focused: true,
             start_time: Instant::now(),
             last_title_refresh: Instant::now(),
@@ -1051,6 +1057,16 @@ impl Renderer {
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// Window occlusion changed (fully hidden ↔ visible). While occluded we
+    /// stop presenting frames (see the `occluded` field); on becoming visible
+    /// again we repaint immediately so the window isn't showing a stale frame.
+    pub fn occlusion_changed(&mut self, occluded: bool) {
+        self.occluded = occluded;
+        if !occluded {
+            self.window.request_redraw();
+        }
     }
 
     pub fn focus_changed(&mut self, focused: bool) {
