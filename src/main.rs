@@ -915,6 +915,18 @@ fn main() -> std::process::ExitCode {
     // run as a CLI client against the socket of a separately-running
     // terminite window. No subcommand → launch the window.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Version check first — reports the exact build (crate version + git hash +
+    // build date), so `.../terminite --version` answers "am I on the right
+    // build?" without timestamp forensics.
+    if matches!(args.first().map(String::as_str), Some("--version" | "-V" | "version")) {
+        println!(
+            "terminite {} ({}, {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("GIT_HASH"),
+            env!("BUILD_DATE"),
+        );
+        return std::process::ExitCode::SUCCESS;
+    }
     if let Some(code) = proto_client::dispatch(&args) {
         return code;
     }
@@ -924,8 +936,10 @@ fn main() -> std::process::ExitCode {
     logging::init();
     install_panic_hook();
     logging::info(&format!(
-        "terminite starting (version {})",
-        env!("CARGO_PKG_VERSION")
+        "terminite starting (version {}, {}, built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_HASH"),
+        env!("BUILD_DATE"),
     ));
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
