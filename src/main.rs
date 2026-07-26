@@ -418,8 +418,14 @@ impl ApplicationHandler<UserEvent> for Terminite {
             .and_then(|s| s.window)
             .map(|w| (w.width, w.height))
             .unwrap_or((config.window_width, config.window_height));
+        // Create the window HIDDEN. macOS shows a window the instant it's
+        // created, before we've positioned it or drawn a single frame — so a
+        // visible-at-creation window flashes at the wrong position and shows
+        // straight through to the desktop + Dock for a frame or two. We
+        // position it, paint the first frame, then reveal it (see end of fn).
         let mut attributes = Window::default_attributes()
             .with_title("terminite")
+            .with_visible(false)
             .with_inner_size(LogicalSize::new(init_w, init_h));
         if let Some(icon) = load_app_icon() {
             attributes = attributes.with_window_icon(Some(icon));
@@ -461,6 +467,12 @@ impl ApplicationHandler<UserEvent> for Terminite {
                 renderer.set_tab_bar_height(tbh);
             }
         }
+        // Paint the first frame into the (still hidden) surface, THEN reveal
+        // the window — so it appears already positioned and drawn, with no
+        // unpainted-flash / position-jump at launch.
+        renderer.render();
+        renderer.window.set_visible(true);
+        renderer.window.request_redraw();
         self.renderer = Some(renderer);
     }
 
