@@ -1136,6 +1136,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Outdated
             | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                 self.surface.configure(&self.device, &self.surface_config);
+                set_window_layer_opaque(&self.window);
                 self.schedule_surface_retry();
                 return;
             }
@@ -1145,6 +1146,7 @@ impl Renderer {
                     .create_surface(self.window.clone())
                     .expect("terminite: failed to recreate the surface");
                 self.surface.configure(&self.device, &self.surface_config);
+                set_window_layer_opaque(&self.window);
                 self.schedule_surface_retry();
                 return;
             }

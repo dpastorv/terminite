@@ -98,6 +98,41 @@ fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
 }
 
+/// Force the window's Metal layer opaque (macOS only). wgpu presents drawables
+/// out of sync with the window server; when the compositor draws a frame before
+/// terminite's next drawable is ready, a non-opaque layer shows the desktop
+/// *through* the window for ~1 frame (the intermittent "screen blink"). Marking
+/// the layer opaque doesn't remove the blink, but makes it flash the layer's own
+/// dark backing instead of the desktop — far less jarring. Re-applied after
+/// every `surface.configure`, since a surface (re)creation makes a fresh layer.
+#[cfg(target_os = "macos")]
+pub(super) fn set_window_layer_opaque(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on AppKit `ns_view` is a live NSView for the window's lifetime.
+    // We only read its layer and set the well-known, side-effect-free `opaque`
+    // property — no ownership transfer, no retain/release.
+    unsafe {
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        if view.is_null() {
+            return;
+        }
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setOpaque: true];
+    }
+}
+
+/// No-op off macOS (only macOS has the CAMetalLayer present-sync blink).
+#[cfg(not(target_os = "macos"))]
+pub(super) fn set_window_layer_opaque(_window: &Window) {}
+
 /// Scale each edge of a `Padding` by the display scale factor (HiDPI).
 fn scale_padding(p: Padding, scale: f32) -> Padding {
     Padding {
@@ -705,6 +740,7 @@ impl Renderer {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &surface_config);
+        set_window_layer_opaque(&window);
 
         let mut font_system = FontSystem::new();
         // Embed terminite's own fixed-pitch fonts so a configured family always

@@ -20,6 +20,7 @@ impl Renderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
+        set_window_layer_opaque(&self.window);
         self.relayout();
         self.sync_active_grid();
         // Repaint immediately at the new size. Without this, the surface is
