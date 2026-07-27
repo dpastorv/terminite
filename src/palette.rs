@@ -1,11 +1,11 @@
 //! Color palette and ANSI color resolution.
 //!
-//! Maps `vte::ansi::Color` (Named / Indexed / Spec) into glyphon's `Color`
+//! Maps `vte::ansi::Color` (Named / Indexed / Spec) into cosmic-text's `Color`
 //! through a One Dark–family 16-color palette, the standard xterm 6×6×6 cube,
 //! and the 24-step grayscale ramp.
 
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
-use glyphon::Color;
+use cosmic_text::Color;
 
 pub const BACKGROUND_RGB: (u8, u8, u8) = (10, 10, 15);
 pub const DEFAULT_FG: (u8, u8, u8) = (220, 220, 220);
@@ -97,7 +97,7 @@ pub fn dim_color(c: Color) -> Color {
     Color::rgba(c.r() / 2, c.g() / 2, c.b() / 2, c.a())
 }
 
-/// Convert a glyphon Color to GPU-ready floats in [0, 1].
+/// Convert a cosmic-text Color to blitter-ready floats in [0, 1].
 pub fn color_to_floats(c: Color) -> [f32; 4] {
     [
         c.r() as f32 / 255.0,

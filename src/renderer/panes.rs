@@ -17,18 +17,19 @@ impl Renderer {
             self.scale_factor = new_scale;
             self.apply_font_metrics();
         }
-        self.surface_config.width = width;
-        self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
-        set_window_layer_opaque(&self.window);
+        self.surface_size.width = width;
+        self.surface_size.height = height;
+        // Nothing to reconfigure: `present_cpu` resizes the softbuffer surface
+        // to the window each frame, and there's no Metal layer to force opaque
+        // (that was a wgpu present-sync mitigation, deleted with the GPU path).
         self.relayout();
         self.sync_active_grid();
-        // Repaint immediately at the new size. Without this, the surface is
-        // reconfigured but the last *painted* frame stays the old size until
-        // some unrelated redraw fires — and the compositor stretches that
-        // stale frame to fill the resized window, a visible "stretched" flash.
-        // macOS emits Resized on its own (Spaces, Stage Manager, display/
-        // backing changes), so the flash appears at random with no user action.
+        // Repaint immediately at the new size. Without this the last *painted*
+        // frame stays the old size until some unrelated redraw fires, and the
+        // compositor stretches that stale frame to fill the resized window — a
+        // visible "stretched" flash. macOS emits Resized on its own (Spaces,
+        // Stage Manager, display/backing changes), so it would appear at random
+        // with no user action.
         self.window.request_redraw();
     }
 
@@ -38,8 +39,8 @@ impl Renderer {
         PaneRect {
             x: 0.0,
             y: 0.0,
-            w: self.surface_config.width as f32,
-            h: self.surface_config.height as f32,
+            w: self.surface_size.width as f32,
+            h: self.surface_size.height as f32,
         }
     }
 
@@ -213,7 +214,7 @@ impl Renderer {
             || self.highlight_offset_y != new_highlight_offset_y
             || self.tab_min_width != new_tab_min_width
             || self.tab_max_width != new_tab_max_width;
-        let new_bg = rgb_to_clear(self.config.background);
+        let new_bg = self.config.background;
         let new_tint = rgba_to_floats(self.config.focus_tint);
         let new_cursor = rgba_to_floats(self.config.cursor_color);
         let new_selection = rgba_to_floats(self.config.selection_color);

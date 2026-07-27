@@ -47,10 +47,7 @@ impl Renderer {
         }
         let Some(image) = images::decode_image(cmd.format, cmd.width, cmd.height, &cmd.payload)
         else { return };
-        let keep_pixels = self.sb_surface.is_some();
-        let tex = self
-            .texture_renderer
-            .upload(&self.device, &self.queue, &image, keep_pixels);
+        let tex = TextureImage::new(&image);
 
         let mut tabs: Vec<&mut Tab> = Vec::new();
         self.root.as_mut().expect("pane tree present").all_tabs_mut(&mut tabs);

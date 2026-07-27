@@ -1,8 +1,12 @@
 # Softbuffer / CPU-render port — handoff
 
 Branch: `spike/softbuffer` (off `main` @ `89c3117`). `main` is the shipping
-wgpu build and is untouched. Resume with: `git checkout spike/softbuffer`, read
-this file, then say **"resume step 3."**
+wgpu build and is untouched — it's also the A/B reference for eyeballing the CPU
+build. Resume with: `git checkout spike/softbuffer`, read this file, then say
+**"resume step 6."**
+
+Steps 1–5 are done. What's left is the flash verdict and the per-frame
+framebuffer allocation — both under "Step 6" at the bottom.
 
 ## Why we're doing this
 
@@ -36,7 +40,8 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 1 — softbuffer bg present behind `TERMINITE_CPU=1` | ✅ coexistence confirmed (softbuffer owns the window despite wgpu) | `5873ab3` |
 | Step 2 — CPU-rasterize rect layers (bg, cursor, selection, dividers, tab strips, modal/menu bg) | ✅ chrome skeleton renders positionally correct | `00bef89` |
 | Step 3 — CPU text (layer display list + cosmic-text raster) | ✅ **visual confirmed** — Daniel: "looks the same as the other one", Cmd+G card included. ⏳ flash verdict still pending a longer soak. | `96e588f` |
-| Step 4 — images (bilinear blit, single-copy residency) | ✅ code + footprint/leak audit; ⏳ needs an eyeball on a Preview / Kitty pane | (this commit) |
+| Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
+| Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree | (this commit) |
 
 Run the WIP: `TERMINITE_CPU=1 cargo run` → full chrome + **readable text**
 (content grid, tab labels, overlays); images are still step 4. Plain
@@ -242,19 +247,97 @@ refactor naturally captures them.
 Payoffs at step 3: first **readable** CPU frame (the real look/feel eyeball) and
 the **real flash verdict** (text + activity finally exercise async present).
 
-## Remaining steps
+## STEP 5 — cut wgpu ✅
 
-- **Step 5 — cut wgpu:** remove wgpu + glyphon deps, delete the GPU present path,
-  make CPU the only path (drop the flag). The footprint/compile-time win lands
-  here — see the audit above for why CPU mode is *heavier* until this lands.
-  Mechanical parts: `TextureImage::gpu` goes away; the three glyphon renderers,
-  the atlas, `viewport`, `device`/`queue`/`surface` go away; glyphon's `TextArea`
-  / `TextBounds` get local definitions (a field-for-field copy — `Color` is
-  already cosmic-text's type, re-exported); `blit_text_area` stops needing
-  glyphon at all. The display list means `render()` itself barely changes.
-- **Step 6 — prove & merge:** run CPU-terminite vs the wgpu build. Bar (Daniel's
-  words): **"similar, not pixel-perfect, is fine."** Must look right, feel as
-  smooth, and — the whole point — **never flash**. Then merge to `main`.
+CPU is the only path; `TERMINITE_CPU` is gone. `cargo tree` confirms **wgpu,
+glyphon and naga are out of the dependency tree**.
+
+| | before | after |
+|---|---|---|
+| unique crates | 199 | **173** (−26) |
+| debug binary | 21 MB | **14 MB** (−33%) |
+| tests | 104 | 101 (−3, the surface-retry tests went with the code) |
+
+Deleted: `RectRenderer` + its WGSL, `TextureRenderer` + its WGSL, the three
+glyphon `TextRenderer`s, `TextAtlas`, `Viewport`, `Cache`, the
+instance/adapter/device/queue/surface, `SurfaceConfiguration`, the wgpu
+uncaptured-error (VRAM OOM) handler, `rgb_to_clear`, and `bytemuck` + `pollster`
+as dependencies (`Renderer::new` is no longer `async` — nothing to await).
+
+Also deleted, and worth noting: the **entire surface-failure retry machinery** —
+`surface_retry_delay`, `schedule_surface_retry`, the backoff deadline, the
+timeout/outdated/lost/suboptimal match. Those existed because acquiring a GPU
+drawable can fail (the 2026-06-03 alt-tab freeze). A CPU frame is a memory write
+and a blit; there is no acquisition to fail. Same for
+`set_window_layer_opaque` — that was a *flash mitigation* for wgpu's
+CAMetalLayer, so it went with the thing it was mitigating. `objc2` stays, but
+only for `disable_press_and_hold` in `main.rs` (unrelated Foundation call).
+
+glyphon's `TextArea` / `TextBounds` are now local definitions in
+`renderer/mod.rs` — field-for-field, minus `custom_glyphs`, which terminite never
+used. `Color`, `Buffer`, `FontSystem`, `Attrs`, `Metrics`, `Shaping`, `Style`,
+`Weight`, `SwashCache` were always cosmic-text's types (glyphon re-exported
+them), so those imports just changed crate. `surface_config` → a local
+`SurfaceSize { width, height }`, updated by `resize`.
+
+### Why RSS did *not* drop — the real answer
+
+Measured, idle, one shell pane: **172 MB, flat over 30s.** Versus 174–177 MB with
+wgpu still resident, and 105 MB for the pure wgpu path. So cutting wgpu freed
+almost nothing, and the CPU path costs ~67 MB more than the GPU one. The earlier
+guess in this doc — "it's softbuffer stacked on top of wgpu, step 5 fixes it" —
+**was wrong**. Here's the actual mechanism, from softbuffer 0.4.8's
+`src/backends/cg.rs`:
+
+```rust
+fn buffer_mut(&mut self) -> Result<BufferImpl<'_, D, W>, SoftBufferError> {
+    Ok(BufferImpl { buffer: util::PixelBuffer(vec![0; self.width * self.height]), imp: self })
+}
+```
+
+- `buffer_mut()` allocates a **brand-new zeroed buffer every frame** — ~20 MB at
+  full-screen Retina.
+- `present()` then **gives that allocation away**: `Box::into_raw` hands it to a
+  `CGDataProvider`, which frees it from a release callback whenever Core Graphics
+  is finished with it.
+
+So each frame mints a fresh multi-MB mapping, faults it in as `fill()` +
+`blit_*` touch every page, and surrenders it to CG for an indeterminate time.
+`vec![0; n]` at that size is `alloc_zeroed` → fresh zero pages, so the "zeroing"
+is virtually free, but faulting 20 MB of pages in per frame is not. Steady-state
+churn with several buffers in flight is what the 172 MB is; it's flat because
+it's churn, not a leak.
+
+This is a softbuffer API limitation, not something terminite can fix from the
+outside — the allocation is internal to `buffer_mut()`. Options for step 6 below.
+Note the spike still measured 275 fps / 3.6 ms per frame *with* this behaviour,
+so it's an energy and footprint question, not a "does it work" question.
+
+## Remaining steps
+- **Step 6 — prove & merge:** run CPU-terminite vs the wgpu build on `main`. Bar
+  (Daniel's words): **"similar, not pixel-perfect, is fine."** Must look right,
+  feel as smooth, and — the whole point — **never flash**. Then merge to `main`.
+
+  Two open items to settle first:
+
+  1. **The flash verdict.** Not seen yet as of step 4, but not yet confirmed
+     either. Now finally testable without a confound: until step 5, wgpu's
+     CAMetalLayer was still attached to the window even in CPU mode.
+  2. **The per-frame framebuffer allocation** (see above). Worth fixing before
+     merge if the energy number matters — it's a 20 MB map + page-fault per
+     frame. Three ways out, cheapest first:
+     - Upstream it: softbuffer could reuse a buffer instead of `vec![0; …]` per
+       call. File the issue; the CG backend's `present()` giving the allocation
+       to `CGDataProvider` is what forces a fresh one, so this needs a real
+       design change there (keep a pool, or copy into the provider).
+     - Hand-roll the macOS present path: our own `CALayer` + `CGImage` over a
+       persistent double buffer. `objc2` is already a dependency. Costs us
+       softbuffer's cross-platform story on macOS specifically, which is the one
+       platform we ship today.
+     - Accept it and measure. The spike hit 275 fps with this behaviour; if
+       Activity Monitor's Energy Impact is fine, this is a footnote, not a bug.
+       **Measure before choosing** — don't optimize on the strength of a
+       code read.
 
 ## Gotchas / notes
 

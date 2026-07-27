@@ -18,7 +18,7 @@ use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor};
 
 pub use alacritty_terminal::vte::ansi::CursorShape as CursorShapeKind;
-use glyphon::Color;
+use cosmic_text::Color;
 use winit::event_loop::EventLoopProxy;
 
 use crate::palette::{dim_color, resolve_color, BACKGROUND_RGB};

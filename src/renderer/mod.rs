@@ -1,15 +1,17 @@
-//! The Renderer: assembles backgrounds, decorations, text, the cursor, and
-//! selection highlights into a single frame. Two `RectRenderer` instances
-//! sandwich the text — one draws *below* (backgrounds + selection + cursor),
-//! one draws *above* (decorations).
+//! The Renderer: assembles backgrounds, decorations, text, images, the cursor,
+//! and selection highlights into a single frame, then rasterizes it on the CPU
+//! and blits it to the window through softbuffer.
+//!
+//! `render()` builds one ordered display list of layers — rects and text
+//! interleave in z-order, so nothing can be presented until the whole frame is
+//! described. See `render::CpuLayer`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
-use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+use cosmic_text::{
+    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
 };
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::EventLoopProxy;
@@ -20,9 +22,9 @@ use crate::blocks::BlockStore;
 use crate::config::{BellStyle, Config, Padding};
 use crate::images::{self, Action};
 use crate::palette::color_to_floats;
-use crate::rect::{RectInstance, RectRenderer};
+use crate::rect::RectInstance;
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
-use crate::texture::{TextureImage, TextureInstance, TextureRenderer, MAX_INSTANCES};
+use crate::texture::{TextureImage, TextureInstance, MAX_INSTANCES};
 use crate::{TabId, UserEvent};
 
 // The Renderer impl is split across these submodules (same type, multiple
@@ -71,20 +73,47 @@ pub(super) struct FloorSubmit {
     pub msg_ids: Vec<u64>,
 }
 
+/// A clip rectangle in physical pixels, right/bottom exclusive. Was glyphon's;
+/// kept field-for-field so the frame-assembly code reads unchanged.
+#[derive(Copy, Clone)]
+pub(super) struct TextBounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// One run of text to draw: a shaped `Buffer`, where to put it, and how to clip
+/// it. Was glyphon's `TextArea`; kept field-for-field (minus `custom_glyphs`,
+/// which terminite never used) so the frame-assembly code reads unchanged.
+///
+/// `bounds` need not correspond to `left`/`top` — the content grid places a
+/// per-cell buffer at its exact column while clipping every one of them to the
+/// same pane box.
+pub(super) struct TextArea<'a> {
+    pub buffer: &'a Buffer,
+    pub left: f32,
+    pub top: f32,
+    /// Always 1.0 in terminite — metrics are already in physical pixels. Honoured
+    /// by the rasterizer so the field keeps its meaning.
+    pub scale: f32,
+    pub bounds: TextBounds,
+    /// Applied to any glyph the buffer didn't colour itself (rich text wins).
+    pub default_color: Color,
+}
+
 const UNDERLINE_THICKNESS: f32 = 1.5;
 /// Max distinct glyph buffers cached for the per-cell render path before a
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 4096;
 
-/// CPU-render port: byte ceiling on `swash_cache`'s rasterized-glyph images
-/// before a wholesale clear.
+/// Byte ceiling on `swash_cache`'s rasterized-glyph images before a wholesale
+/// clear.
 ///
-/// This matters far more on the CPU path than it did under wgpu. There,
-/// `SwashCache` was a staging step feeding glyphon's atlas, which has its own
-/// `trim()`; here it *is* the glyph cache. `SwashCache` exposes no eviction of
-/// its own, and its keys include font + size + sub-pixel x bucket, so font-size
-/// churn (dragging the Cmd+G sliders) mints fresh entries indefinitely — it
-/// would grow without bound for the life of the process.
+/// `SwashCache` *is* terminite's glyph cache and exposes no eviction of its own,
+/// so without a ceiling it grows for the life of the process: its keys include
+/// font + size + sub-pixel x bucket, and font-size churn (dragging the Cmd+G
+/// sliders) mints fresh entries indefinitely.
 ///
 /// Bounded by bytes, not entry count, because entry sizes differ by ~100×: an
 /// ASCII coverage mask is a few hundred bytes, a colour emoji bitmap tens of KB.
@@ -102,62 +131,12 @@ const SWASH_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// generous; it only has to make the ceiling reachable.
 const SWASH_ENTRY_OVERHEAD: usize = 96;
 
-/// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
-/// re-encodes on store; convert sRGB → linear here so the authored colour lands
-/// true (otherwise a near-black bg double-encodes to grey). Matches the rect
-/// shader's `srgb_to_linear`.
-fn rgb_to_clear((r, g, b): (u8, u8, u8)) -> wgpu::Color {
-    fn lin(c: u8) -> f64 {
-        let s = c as f64 / 255.0;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    wgpu::Color { r: lin(r), g: lin(g), b: lin(b), a: 1.0 }
-}
-
-/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. RGB stays sRGB-encoded
-/// (the rect shader linearizes it); alpha is raw.
+/// Config RGBA (sRGB + alpha) → a rect colour `[f32; 4]`. Stays sRGB-encoded:
+/// softbuffer's buffer is sRGB and `blit_rect` composites straight into it, so
+/// nothing linearizes on the way (the deleted rect shader used to).
 fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
 }
-
-/// Force the window's Metal layer opaque (macOS only). wgpu presents drawables
-/// out of sync with the window server; when the compositor draws a frame before
-/// terminite's next drawable is ready, a non-opaque layer shows the desktop
-/// *through* the window for ~1 frame (the intermittent "screen blink"). Marking
-/// the layer opaque doesn't remove the blink, but makes it flash the layer's own
-/// dark backing instead of the desktop — far less jarring. Re-applied after
-/// every `surface.configure`, since a surface (re)creation makes a fresh layer.
-#[cfg(target_os = "macos")]
-pub(super) fn set_window_layer_opaque(window: &Window) {
-    use objc2::msg_send;
-    use objc2::runtime::AnyObject;
-    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-
-    let Ok(handle) = window.window_handle() else { return };
-    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
-    // SAFETY: on AppKit `ns_view` is a live NSView for the window's lifetime.
-    // We only read its layer and set the well-known, side-effect-free `opaque`
-    // property — no ownership transfer, no retain/release.
-    unsafe {
-        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
-        if view.is_null() {
-            return;
-        }
-        let layer: *mut AnyObject = msg_send![view, layer];
-        if layer.is_null() {
-            return;
-        }
-        let _: () = msg_send![layer, setOpaque: true];
-    }
-}
-
-/// No-op off macOS (only macOS has the CAMetalLayer present-sync blink).
-#[cfg(not(target_os = "macos"))]
-pub(super) fn set_window_layer_opaque(_window: &Window) {}
 
 /// Scale each edge of a `Padding` by the display scale factor (HiDPI).
 fn scale_padding(p: Padding, scale: f32) -> Padding {
@@ -380,12 +359,22 @@ struct SplitGesture {
     start: (f32, f32),
 }
 
+/// Physical size of the window's pixel surface, in device pixels — the
+/// coordinate space every rect, glyph and image position is expressed in.
+/// Tracked here (updated by `resize`) now that there's no wgpu
+/// `SurfaceConfiguration` to read it off.
+#[derive(Copy, Clone)]
+pub(super) struct SurfaceSize {
+    pub width: u32,
+    pub height: u32,
+}
+
 pub struct Renderer {
-    instance: wgpu::Instance,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    /// The window's CPU pixel surface. `render` rasterizes a frame into its
+    /// buffer and blits it — synchronously, which is the point: there's no
+    /// CAMetalLayer and no async present to race the compositor.
+    sb_surface: softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    surface_size: SurfaceSize,
 
     font_system: FontSystem,
     /// Single-glyph shaped buffers for the per-cell render path, keyed by
@@ -394,32 +383,13 @@ pub struct Renderer {
     /// box-drawing perfectly while Advanced shaping keeps fallback. Bounded —
     /// cleared wholesale on overflow (a blunt but allocation-safe cap).
     glyph_cache: std::collections::HashMap<(String, bool, bool, u32), Buffer>,
+    /// Rasterized glyph bitmaps. This is terminite's glyph cache — see
+    /// `SWASH_CACHE_MAX_BYTES` for why it needs an external ceiling.
     swash_cache: SwashCache,
-    /// CPU-render port: bytes of rasterized glyph image held in
-    /// `swash_cache.image_cache`, accumulated as `blit_text_area` inserts. Only
-    /// the CPU path maintains it (the wgpu path never reads those images back);
-    /// checked against `SWASH_CACHE_MAX_BYTES` once per frame.
+    /// Bytes of glyph bitmap held in `swash_cache.image_cache`, accumulated as
+    /// `blit_text_area` inserts and checked against `SWASH_CACHE_MAX_BYTES` once
+    /// per frame.
     swash_cache_bytes: usize,
-    viewport: Viewport,
-    atlas: TextAtlas,
-    text_renderer: TextRenderer,
-
-    rects_below: RectRenderer,
-    rects_above: RectRenderer,
-    /// Tab bar rendered with a separate scissor zone above the text area.
-    rects_tab_bar: RectRenderer,
-    /// Modal overlay/card rendered on top of everything else.
-    rects_modal: RectRenderer,
-    /// Second text pipeline for tab bar labels — same atlas, separate prepare/
-    /// render cycle so it can use a different scissor than the content text.
-    tab_text_renderer: TextRenderer,
-    /// Third text pipeline used exclusively for the in-window modal so its
-    /// text can be drawn ON TOP of the modal background. (We can't share
-    /// tab_text_renderer here — a second prepare would clobber the tab
-    /// labels' vertex buffer before they render.)
-    modal_text_renderer: TextRenderer,
-    /// Textured-quad pipeline for displayed images (Kitty graphics).
-    texture_renderer: TextureRenderer,
     /// Shared buffer for the `×` close glyph; reused via multiple TextAreas
     /// (one per tab) at different positions.
     close_buffer: Buffer,
@@ -438,8 +408,10 @@ pub struct Renderer {
     /// config's live values may differ after a focus-reload.
     cell_advance: f32,
     line_height: f32,
-    /// Window background (the wgpu clear) — from config, hot-reloadable.
-    bg_color: wgpu::Color,
+    /// Window background (sRGB), the value each frame's buffer is cleared to.
+    /// From config, hot-reloadable — held here rather than read straight off
+    /// `config` so `apply_colors` can tell an actual change from a no-op reload.
+    bg_color: (u8, u8, u8),
     /// Faint tint over the focused pane's content — from config, hot-reloadable.
     focus_tint: [f32; 4],
     /// Cursor + selection colours — from config, hot-reloadable.
@@ -572,21 +544,6 @@ pub struct Renderer {
     next_blink_deadline: Option<Instant>,
     next_autoscroll_deadline: Option<Instant>,
 
-    /// Backoff deadline for re-attempting a frame after the surface failed
-    /// to deliver a texture (timeout / outdated / lost). Common during a
-    /// display-mode switch — alt-tabbing out of a fullscreen game on a
-    /// high-refresh external display renegotiates resolution+refresh, and
-    /// the surface is perpetually invalid until it settles. The failure
-    /// path used to call `request_redraw()` immediately, spinning render +
-    /// surface-reconfigure at full CPU while the OS compositor was already
-    /// fighting the bad mode — a livelock that could amplify a recoverable
-    /// glitch into a system-wide stall (the 2026-06-03 alt-tab freeze).
-    /// Routing the retry through this deadline + `WaitUntil` caps the
-    /// cadence; `surface_retry_count` drives an exponential backoff and
-    /// resets the instant a frame succeeds, so recovery stays immediate.
-    next_surface_retry_deadline: Option<Instant>,
-    surface_retry_count: u32,
-
     /// Peak-RSS kill-switch threshold in bytes; `0` disables. Checked once
     /// per frame in `render()`.
     rss_kill_bytes: u64,
@@ -714,70 +671,26 @@ pub struct Renderer {
     frame_count: u64,
 
     pub window: Arc<Window>,
-
-    /// CPU-render port (spike/softbuffer): when `TERMINITE_CPU=1`, `render()`
-    /// presents a CPU pixel buffer through this instead of the wgpu path. wgpu
-    /// stays fully constructed for now; we cut it out once the CPU path draws
-    /// everything. `None` = normal wgpu rendering.
-    sb_surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<Window>, proxy: EventLoopProxy<UserEvent>) -> Self {
+    pub fn new(window: Arc<Window>, proxy: EventLoopProxy<UserEvent>) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("terminite: failed to create the surface");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("terminite: no suitable GPU adapter");
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("terminite device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                ..Default::default()
-            })
-            .await
-            .expect("terminite: failed to acquire the GPU device");
-
-        // Degrade, don't die. wgpu's default uncaptured-error handler is a hard
-        // panic, so a GPU out-of-memory — frequently *external* pressure (another
-        // GPU-heavy app saturating VRAM, e.g. a game) — would take the whole
-        // terminal down with it (the 2026-06-03 wgpu OOM crash). Catch it and log
-        // instead: the failing frame's GPU work drops and rendering recovers once
-        // memory frees. Surface timeout/loss is already handled in the render
-        // path; this covers device-level allocation failures.
-        device.on_uncaptured_error(std::sync::Arc::new(|error: wgpu::Error| match error {
-            wgpu::Error::OutOfMemory { .. } => crate::logging::error(
-                "wgpu: out of GPU memory — dropping this frame instead of panicking \
-                 (likely external GPU pressure)",
-            ),
-            other => crate::logging::error(&format!("wgpu uncaptured error: {other}")),
-        }));
-
-        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width,
-            height,
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &surface_config);
-        set_window_layer_opaque(&window);
+        // The window's CPU pixel surface. No adapter, no device, no GPU queue —
+        // and so no whole class of failures the wgpu path had to survive: no
+        // adapter-unavailable, no device-lost, no surface-outdated retry
+        // backoff, no VRAM OOM handler. A frame is a memory write and a blit.
+        let sb_context = softbuffer::Context::new(window.clone())
+            .expect("terminite: failed to create the softbuffer context");
+        let sb_surface = softbuffer::Surface::new(&sb_context, window.clone())
+            .expect("terminite: failed to create the softbuffer surface");
+        // `Surface` is self-contained in softbuffer 0.4 — it keeps no borrow of
+        // the context, so the local can drop here.
+        drop(sb_context);
+        let surface_size = SurfaceSize { width, height };
 
         let mut font_system = FontSystem::new();
         // Embed terminite's own fixed-pitch fonts so a configured family always
@@ -798,7 +711,7 @@ impl Renderer {
         let font_family = config.font_family.clone();
         let font_weight = config.font_weight as u16;
         let line_height = (font_size * LINE_H_RATIO * config.line_height).round();
-        let bg_color = rgb_to_clear(config.background);
+        let bg_color = config.background;
         let focus_tint = rgba_to_floats(config.focus_tint);
         let cursor_color = rgba_to_floats(config.cursor_color);
         let selection_color = rgba_to_floats(config.selection_color);
@@ -818,21 +731,6 @@ impl Renderer {
         let cell_advance = measure_cell_advance(&mut font_system, font_size, &font_family);
 
         let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
-        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-
-        let rects_below = RectRenderer::new(&device, format, "below");
-        let rects_above = RectRenderer::new(&device, format, "above");
-        let rects_tab_bar = RectRenderer::new(&device, format, "tab_bar");
-        let rects_modal = RectRenderer::new(&device, format, "modal");
-        let tab_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let modal_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let texture_renderer = TextureRenderer::new(&device, format);
 
         // winit's PhysicalSize is already in physical pixels — earlier code
         // multiplied by scale_factor a second time, so the grid math thought
@@ -925,42 +823,13 @@ impl Renderer {
             add_label(&mut font_system, &m.id, &m.name);
         }
 
-        // CPU-render port: under TERMINITE_CPU=1, stand up a softbuffer surface
-        // on the same window. wgpu is still fully built above; render() routes
-        // present to whichever is active. This also tells us empirically
-        // whether softbuffer can own a window wgpu already touched.
-        let sb_surface = if std::env::var_os("TERMINITE_CPU").is_some() {
-            let ctx = softbuffer::Context::new(window.clone())
-                .expect("terminite: softbuffer context");
-            let surf = softbuffer::Surface::new(&ctx, window.clone())
-                .expect("terminite: softbuffer surface");
-            drop(ctx); // Surface is self-contained in softbuffer 0.4.
-            crate::logging::info("render: CPU (softbuffer) backend active");
-            Some(surf)
-        } else {
-            None
-        };
-
         let mut renderer = Self {
-            instance,
-            surface,
-            surface_config,
-            device,
-            queue,
+            sb_surface,
+            surface_size,
             font_system,
             glyph_cache: std::collections::HashMap::new(),
             swash_cache,
             swash_cache_bytes: 0,
-            viewport,
-            atlas,
-            text_renderer,
-            rects_below,
-            rects_above,
-            rects_tab_bar,
-            rects_modal,
-            tab_text_renderer,
-            modal_text_renderer,
-            texture_renderer,
             close_buffer,
             kind_label_buffers,
             modules,
@@ -1015,8 +884,6 @@ impl Renderer {
             palette: None,
             next_blink_deadline: None,
             next_autoscroll_deadline: None,
-            next_surface_retry_deadline: None,
-            surface_retry_count: 0,
             rss_kill_bytes: rss_kill_threshold_bytes(),
             config,
             proxy,
@@ -1042,7 +909,6 @@ impl Renderer {
             last_frame_end: None,
             frame_count: 0,
             window,
-            sb_surface,
         };
         // Size the first pane's buffers/grid to the laid-out pane rect
         // (the constructor built them at full surface size).
@@ -1139,7 +1005,6 @@ impl Renderer {
             self.bell_flash_until,
             self.next_blink_deadline,
             self.next_autoscroll_deadline,
-            self.next_surface_retry_deadline,
             earliest_anim,
             earliest_stall,
             pty_tick,
