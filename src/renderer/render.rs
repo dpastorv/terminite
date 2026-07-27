@@ -36,49 +36,6 @@ impl Renderer {
         self.next_surface_retry_deadline = Some(Instant::now() + delay);
     }
 
-    /// CPU-render port (spike/softbuffer). Presents a frame through softbuffer
-    /// instead of wgpu. Step 2: background fill + all rect layers (cell
-    /// backgrounds, cursor, selection, dividers, tab-bar strips, modal/menu
-    /// backgrounds) in wgpu's draw order. Text + images land in later steps.
-    fn render_cpu(
-        &mut self,
-        below: &[RectInstance],
-        above: &[RectInstance],
-        tab_bar: &[RectInstance],
-        overlay: &[RectInstance],
-    ) {
-        let size = self.window.inner_size();
-        let (w, h) = (size.width.max(1), size.height.max(1));
-        let (br, bgc, bb) = self.config.background;
-        let bg = ((br as u32) << 16) | ((bgc as u32) << 8) | bb as u32;
-        let Some(sb) = self.sb_surface.as_mut() else { return };
-        let (Some(nw), Some(nh)) =
-            (std::num::NonZeroU32::new(w), std::num::NonZeroU32::new(h))
-        else {
-            return;
-        };
-        if sb.resize(nw, nh).is_err() {
-            return;
-        }
-        let mut buf = match sb.buffer_mut() {
-            Ok(b) => b,
-            Err(e) => {
-                crate::logging::warn(&format!("render_cpu: buffer_mut failed: {e}"));
-                return;
-            }
-        };
-        buf.fill(bg);
-        let (stride, height) = (w as usize, h as usize);
-        // wgpu order: below → above → tab bar → modal/overlay. (Text interleaves
-        // in the GPU path; here it's a later step.)
-        for layer in [below, above, tab_bar, overlay] {
-            for r in layer {
-                blit_rect(&mut buf, stride, height, r);
-            }
-        }
-        let _ = buf.present();
-    }
-
     pub fn render(&mut self) {
         // Don't present while the window is fully occluded. Background redraws
         // (PTY output, delivery ticks) would otherwise acquire and present a
@@ -288,31 +245,33 @@ impl Renderer {
         // The modal and the context menu share the rects_modal /
         // modal_text_renderer pipelines — they're mutually exclusive in
         // practice and the modal wins if both are somehow set.
-        let overlay_rects = if self.modal.is_some() {
+        let mut overlay_rects = if self.modal.is_some() {
             self.build_modal_rects()
         } else if self.palette.is_some() {
             self.build_palette_rects()
         } else {
             self.build_menu_rects()
         };
-        // CPU-render port: below/above/tab_bar are built and overlay_rects is
-        // computed; hand them to the softbuffer rasterizer and skip the wgpu
-        // present. (A few late rects — phase-2 tab highlights, the Cmd+G card —
-        // are added further down; folded in when render() is fully ported.)
-        if self.sb_surface.is_some() {
-            self.render_cpu(&below, &above, &tab_bar, &overlay_rects);
-            return;
-        }
-        self.rects_below.prepare(&self.queue, &below, resolution);
-        self.rects_above.prepare(&self.queue, &above, resolution);
-        // `tab_bar` gets more entries in phase 2 (block-label highlights),
-        // so its `prepare` is deferred to after that pass — uploading
-        // here would freeze it before the highlights land.
-        self.rects_modal
-            .prepare(&self.queue, &overlay_rects, resolution);
+        // Every overlay's text areas land in this one Vec instead of going
+        // straight to `modal_text_renderer.prepare`. The CPU path can't present
+        // incrementally — it needs all eight layers in hand to rasterize them
+        // into one buffer in z-order — so collection has to finish before either
+        // backend consumes anything.
+        //
+        // Each block below ASSIGNS to `overlay_areas` rather than appending.
+        // That's not tidiness: glyphon's `prepare` *replaces* a renderer's
+        // contents, so under wgpu only the last block to run was ever drawn.
+        // Assigning reproduces that exactly, keeping this refactor
+        // behaviour-neutral for the GPU path. Same for `overlay_rects`, which
+        // the display-settings card replaces wholesale.
+        //
+        // Declared before `overlay_areas` so it outlives the `TextArea` that
+        // borrows it — locals drop in reverse declaration order.
+        let mut reset_buf: Option<Buffer> = None;
+        let mut overlay_areas: Vec<TextArea> = Vec::new();
 
-        // Modal text preparation — independent renderer so its draw can come
-        // after the modal background rects.
+        // Modal text — drawn by an independent renderer so it lands after the
+        // modal background rects.
         if let Some(modal) = self.modal.as_ref() {
             let surface_w = self.surface_config.width as f32;
             let surface_h = self.surface_config.height as f32;
@@ -333,7 +292,7 @@ impl Renderer {
             };
             let cr = modal.cancel_rect;
             let fr = modal.confirm_rect;
-            let areas = [
+            overlay_areas = vec![
                 TextArea {
                     buffer: &modal.title_buf,
                     left: card_x + inset,
@@ -381,17 +340,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 },
             ];
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: modal text prepare failed");
         }
 
         // File claims / Room Who overlay text — same renderer pipeline.
@@ -409,7 +357,7 @@ impl Renderer {
                     right: (cx + card_w) as i32,
                     bottom: (cy + MODAL_CARD_H) as i32,
                 };
-                let areas = [
+                overlay_areas = vec![
                     TextArea {
                         buffer: &overlay.title_buf,
                         left: cx + inset,
@@ -429,22 +377,12 @@ impl Renderer {
                         custom_glyphs: &[],
                     },
                 ];
-                // NOTE: do NOT re-prepare rects_modal here. This block used to
-                // prepare it with an empty slice, which wiped the menu/palette/
-                // modal background prepared above whenever this overlay was up
-                // at the same time. The claims card's own background is drawn
-                // via the `above` layer, so it needs nothing from rects_modal.
-                self.modal_text_renderer
-                    .prepare(
-                        &self.device,
-                        &self.queue,
-                        &mut self.font_system,
-                        &mut self.atlas,
-                        &self.viewport,
-                        areas,
-                        &mut self.swash_cache,
-                    )
-                    .expect("terminite: file-claims text prepare failed");
+                // NOTE: do NOT touch `overlay_rects` here. This block used to
+                // prepare rects_modal with an empty slice, which wiped the
+                // menu/palette/modal background prepared above whenever this
+                // overlay was up at the same time. The claims card's own
+                // background is drawn via the `above` layer, so it needs nothing
+                // from the modal rect layer.
             }
         }
 
@@ -456,10 +394,11 @@ impl Renderer {
             let card_h = DISPLAY_SETTINGS_H;
             let cx = (surface_w - card_w) * 0.5;
             let cy = (surface_h - card_h) * 0.5;
-            // Card rects go through the modal rect layer (prepared below at the
-            // rects_modal.prepare call), NOT `above` — `above` was already
-            // uploaded to the GPU earlier this frame, so pushes here would never
-            // draw. The modal layer is drawn on top of everything.
+            // Card rects go through the modal rect layer, NOT `above` — the
+            // modal layer is drawn on top of everything, and `above` is a
+            // lower layer that this card must cover. They replace
+            // `overlay_rects` outright, matching the wgpu path (which
+            // re-prepared rects_modal from scratch here).
             let mut card_rects: Vec<RectInstance> = Vec::new();
             // Card background + border.
             card_rects.push(RectInstance {
@@ -511,18 +450,16 @@ impl Renderer {
             let display_top = ds.tabh_track.1 + ds.tabh_track.3 + 16.0;
             // Reset label centered in its button by MEASURING the shaped text
             // (a fixed width guess left it visibly off-centre).
-            let reset_buf = make_modal_buffer(&mut self.font_system, "Reset");
-            let reset_w = reset_buf
-                .layout_runs()
-                .map(|r| r.line_w)
-                .fold(0.0_f32, f32::max);
+            let rb = reset_buf.insert(make_modal_buffer(&mut self.font_system, "Reset"));
+            let reset_w = rb.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
             let card_bounds = TextBounds {
                 left: cx as i32,
                 top: cy as i32,
                 right: (cx + card_w) as i32,
                 bottom: (cy + card_h) as i32,
             };
-            let areas = [
+            overlay_rects = card_rects;
+            overlay_areas = vec![
                 TextArea {
                     buffer: &ds.title_buf,
                     left: cx + inset,
@@ -569,7 +506,7 @@ impl Renderer {
                     custom_glyphs: &[],
                 },
                 TextArea {
-                    buffer: &reset_buf,
+                    buffer: rb,
                     left: ds.btn_reset.0 + (ds.btn_reset.2 - reset_w) * 0.5,
                     top: ds.btn_reset.1 + (ds.btn_reset.3 - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
@@ -583,19 +520,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 },
             ];
-            self.rects_modal
-                .prepare(&self.queue, &card_rects, resolution);
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: display-settings text prepare failed");
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
@@ -603,7 +527,7 @@ impl Renderer {
             let label_color = Color::rgb(225, 225, 235);
             let disabled_color = Color::rgb(110, 110, 125);
             let text_inset = 18.0;
-            let areas: Vec<TextArea> = menu
+            overlay_areas = menu
                 .items
                 .iter()
                 .enumerate()
@@ -629,17 +553,6 @@ impl Renderer {
                     }
                 })
                 .collect();
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: menu text prepare failed");
         } else if let (Some(pal), Some((x, y, first, visible))) =
             (self.palette.as_ref(), self.palette_layout())
         {
@@ -654,8 +567,13 @@ impl Renderer {
                 right: (x + PALETTE_WIDTH) as i32,
                 bottom: (row_y + PALETTE_ROW_H) as i32,
             };
-            let mut areas: Vec<TextArea> = Vec::with_capacity(visible + 1);
-            areas.push(TextArea {
+            // Clear, not append: this branch stands in for a `prepare` call,
+            // which replaced the renderer's contents. Without the clear, a
+            // palette open at the same time as the display-settings card would
+            // draw both sets of labels on top of each other.
+            overlay_areas.clear();
+            overlay_areas.reserve(visible + 1);
+            overlay_areas.push(TextArea {
                 buffer: &pal.prompt_buf,
                 left: x + text_inset,
                 top: y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
@@ -667,7 +585,7 @@ impl Renderer {
             for row in 0..visible {
                 let item_idx = pal.filtered[first + row];
                 let row_y = y + PALETTE_ROW_H * (1 + row) as f32;
-                areas.push(TextArea {
+                overlay_areas.push(TextArea {
                     buffer: &pal.items[item_idx].label_buf,
                     left: x + text_inset,
                     top: row_y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
@@ -681,17 +599,6 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: palette text prepare failed");
         }
 
         // Per-pane image placements: collected during phase 2 (root is
@@ -753,8 +660,14 @@ impl Renderer {
         // buffers are already refreshed, so we can take the immutable
         // borrows the TextAreas need. Content goes through `text_renderer`,
         // tab labels + find bar through `tab_text_renderer`.
+        //
+        // `root` and both Vecs are declared outside the block so they outlive
+        // it: whichever backend runs consumes them after this point, and the
+        // TextAreas borrow buffers reached through `root`.
+        let root = self.root.as_ref().expect("pane tree present");
+        let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
+        let mut tab_areas: Vec<TextArea> = Vec::new();
         {
-            let root = self.root.as_ref().expect("pane tree present");
             let pad = self.pad;
             let line_height = self.line_height;
             let active_color = Color::rgb(230, 230, 240);
@@ -762,8 +675,6 @@ impl Renderer {
             let close_color = Color::rgb(160, 160, 170);
             // Subdued; a block label is chrome, not content.
             let block_label_color = Color::rgb(110, 110, 130);
-            let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
-            let mut tab_areas: Vec<TextArea> = Vec::new();
             for d in &draws {
                 let pane = root.find(d.pid).expect("drawn pane present");
                 let pane_rect = layout
@@ -1135,42 +1046,99 @@ impl Renderer {
                     custom_glyphs: &[],
                 });
             }
-            self.text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    content_areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: text prepare failed");
-            self.tab_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    tab_areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: tab bar text prepare failed");
         }
 
-        // Upload the tab-bar rects now that phase 2 has pushed any
-        // block-label highlights into the same Vec — render order still
-        // puts these behind `tab_text_renderer`, so the rect sits behind
-        // the label glyphs.
-        self.rects_tab_bar
-            .prepare(&self.queue, &tab_bar, resolution);
+        // Overlays (modal / menu / palette / display-settings card) sit on top
+        // of everything and share one rect layer + one text layer. Empty when
+        // none is up, in which case both layers are no-ops.
+        let overlay_up = self.modal.is_some()
+            || self.context_menu.is_some()
+            || self.palette.is_some()
+            || self.display_settings.is_some();
 
-        // Stage the image instance buffer; render happens between content
-        // (text + decorations) and the tab bar, so images sit above the
-        // cell grid but below per-pane chrome.
+        // ── CPU-render port (spike/softbuffer) ───────────────────────────────
+        // Every layer of the frame is now collected, in the order the wgpu
+        // render pass below draws them. That ordering is the whole point of the
+        // collect-then-consume restructure: text lands *between* rect layers, so
+        // a CPU backend can't present rects and add glyphs afterwards.
+        if let Some(sb) = self.sb_surface.as_mut() {
+            let size = self.window.inner_size();
+            let layers = [
+                CpuLayer::Rects(&below),
+                CpuLayer::Text(&content_areas),
+                CpuLayer::Rects(&above),
+                // Images (texture_instances) go here — step 4.
+                CpuLayer::Rects(&tab_bar),
+                CpuLayer::Text(&tab_areas),
+                CpuLayer::Rects(if overlay_up { &overlay_rects } else { &[] }),
+                CpuLayer::Text(if overlay_up { &overlay_areas } else { &[] }),
+            ];
+            present_cpu(
+                sb,
+                &mut self.font_system,
+                &mut self.swash_cache,
+                (size.width.max(1), size.height.max(1)),
+                self.config.background,
+                &layers,
+            );
+            // Same frame-time bookkeeping the wgpu path does, so the `stats`
+            // verb reports real CPU frame costs (the step-6 perf verdict).
+            let dt = frame_start.elapsed().as_secs_f32() * 1000.0;
+            if self.frame_samples.len() == FRAME_TIMER_CAP {
+                self.frame_samples.pop_front();
+            }
+            self.frame_samples.push_back(dt);
+            self.last_frame_end = Some(Instant::now());
+            self.frame_count = self.frame_count.saturating_add(1);
+            return;
+        }
+
+        // ── wgpu upload ──────────────────────────────────────────────────────
+        // All eight layers go to the GPU here rather than incrementally as they
+        // were built. `tab_bar` in particular *must* be uploaded after phase 2,
+        // which pushes block-label highlights into the same Vec.
+        self.rects_below.prepare(&self.queue, &below, resolution);
+        self.rects_above.prepare(&self.queue, &above, resolution);
+        self.rects_tab_bar.prepare(&self.queue, &tab_bar, resolution);
+        self.rects_modal
+            .prepare(&self.queue, &overlay_rects, resolution);
+        // Image instances; drawn between content (text + decorations) and the
+        // tab bar, so images sit above the cell grid but below per-pane chrome.
         self.texture_renderer
             .prepare(&self.queue, &texture_instances, resolution);
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                content_areas,
+                &mut self.swash_cache,
+            )
+            .expect("terminite: text prepare failed");
+        self.tab_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                tab_areas,
+                &mut self.swash_cache,
+            )
+            .expect("terminite: tab bar text prepare failed");
+        self.modal_text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                overlay_areas,
+                &mut self.swash_cache,
+            )
+            .expect("terminite: overlay text prepare failed");
 
         // Surface failures (timeout / outdated / lost) are routed through a
         // backoff deadline instead of an immediate `request_redraw()`. The
@@ -1266,11 +1234,7 @@ impl Renderer {
             // Modal, context menu, palette, and the display-settings card sit
             // on top of *everything* — they share the rects_modal /
             // modal_text_renderer pipelines (mutually exclusive in practice).
-            if self.modal.is_some()
-                || self.context_menu.is_some()
-                || self.palette.is_some()
-                || self.display_settings.is_some()
-            {
+            if overlay_up {
                 self.rects_modal.render(&mut pass);
                 self.modal_text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
@@ -1619,6 +1583,22 @@ pub(super) fn make_glyph_buffer(
     buf
 }
 
+/// CPU-render port: straight-alpha blend one sRGB source over a 0RGB pixel.
+/// `a`/`sr`/`sg`/`sb` are 0..=255. Shared by the rect and glyph blitters so
+/// both composite identically.
+#[inline]
+fn blend_px(dst: &mut u32, sr: u32, sg: u32, sb: u32, a: u32) {
+    if a >= 255 {
+        *dst = (sr << 16) | (sg << 8) | sb;
+        return;
+    }
+    let d = *dst;
+    let bl = |s: u32, dv: u32| (s * a + dv * (255 - a)) / 255;
+    *dst = (bl(sr, (d >> 16) & 0xff) << 16)
+        | (bl(sg, (d >> 8) & 0xff) << 8)
+        | bl(sb, d & 0xff);
+}
+
 /// CPU-render port: alpha-blend one `RectInstance` into a 0RGB pixel buffer.
 /// `rect` is `[x, y, w, h]` in physical px; `color` is sRGB rgba in 0..1 (the
 /// same values the rect shader consumes, minus the shader's linearization —
@@ -1638,18 +1618,140 @@ fn blit_rect(buf: &mut [u32], stride: usize, height: usize, r: &RectInstance) {
     for y in y0..y1 {
         let row = y * stride;
         for x in x0..x1 {
-            let idx = row + x;
-            if ai >= 255 {
-                buf[idx] = (sr << 16) | (sg << 8) | sb;
-            } else {
-                let d = buf[idx];
-                let bl = |s: u32, dst: u32| (s * ai + dst * (255 - ai)) / 255;
-                buf[idx] = (bl(sr, (d >> 16) & 0xff) << 16)
-                    | (bl(sg, (d >> 8) & 0xff) << 8)
-                    | bl(sb, d & 0xff);
+            blend_px(&mut buf[row + x], sr, sg, sb, ai);
+        }
+    }
+}
+
+/// CPU-render port: rasterize one `TextArea` into a 0RGB pixel buffer.
+///
+/// This deliberately does NOT use `Buffer::draw`. That convenience wrapper
+/// hardcodes its glyph origin to `(0, run.line_y)`, so callers can only offset
+/// it by whole pixels afterwards — which loses the sub-pixel x bucket in the
+/// glyph cache key and drifts up to a pixel from where the GPU path puts the
+/// same glyph. Instead we walk `layout_runs()` ourselves and reproduce glyphon's
+/// placement exactly (`glyphon::text_render`):
+///
+///   x = physical(left, top).x + image.placement.left
+///   y = round(line_y × scale) + physical(left, top).y − image.placement.top
+///
+/// `SwashCache::with_pixels` supplies the two `placement` terms, and rasterizes
+/// each glyph once per cache key — the CPU analogue of glyphon's atlas. Glyphs
+/// are clipped per-pixel to `area.bounds` (glyphon clips the quad instead; same
+/// result) and to the buffer.
+fn blit_text_area(
+    buf: &mut [u32],
+    stride: usize,
+    height: usize,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    area: &TextArea,
+) {
+    // Clip box = the area's bounds intersected with the buffer. `bounds` is
+    // right/bottom-exclusive here, matching how the pane rects were built.
+    let cl = area.bounds.left.max(0) as usize;
+    let ct = area.bounds.top.max(0) as usize;
+    let cr = (area.bounds.right.max(0) as usize).min(stride);
+    let cb = (area.bounds.bottom.max(0) as usize).min(height);
+    if cr <= cl || cb <= ct {
+        return;
+    }
+    // Same run culling glyphon does, so a long body (a 1 MB Editor buffer, a
+    // full scrollback) only touches the runs that can land in `bounds`.
+    let is_run_visible = |run: &cosmic_text::LayoutRun| {
+        let start = (area.top + run.line_top * area.scale) as i32;
+        let end = start + (run.line_height * area.scale) as i32;
+        start <= area.bounds.bottom && area.bounds.top <= end
+    };
+    let runs = area
+        .buffer
+        .layout_runs()
+        .skip_while(|run| !is_run_visible(run))
+        .take_while(is_run_visible);
+    for run in runs {
+        let line_y = (run.line_y * area.scale).round() as i32;
+        for glyph in run.glyphs.iter() {
+            let pg = glyph.physical((area.left, area.top), area.scale);
+            let color = glyph.color_opt.unwrap_or(area.default_color);
+            let (gx, gy) = (pg.x, pg.y + line_y);
+            swash_cache.with_pixels(font_system, pg.cache_key, color, |ox, oy, px| {
+                let a = px.a() as u32;
+                if a == 0 {
+                    return;
+                }
+                let x = gx + ox;
+                let y = gy + oy;
+                if x < cl as i32 || x >= cr as i32 || y < ct as i32 || y >= cb as i32 {
+                    return;
+                }
+                let idx = y as usize * stride + x as usize;
+                blend_px(
+                    &mut buf[idx],
+                    px.r() as u32,
+                    px.g() as u32,
+                    px.b() as u32,
+                    a,
+                );
+            });
+        }
+    }
+}
+
+/// One z-ordered layer of a CPU frame. `render()` hands `present_cpu` a slice of
+/// these in wgpu's draw order — this is the "display list" the port needs, at
+/// layer granularity rather than per command, because rects and text interleave
+/// at a fixed set of layers, not arbitrarily. Step 4 adds an `Image` variant.
+enum CpuLayer<'a> {
+    Rects(&'a [RectInstance]),
+    Text(&'a [TextArea<'a>]),
+}
+
+/// CPU-render port: rasterize a frame's layers into the softbuffer surface and
+/// present it. Synchronous — the blit completes before `present` returns, which
+/// is the whole reason we're moving off wgpu's async CAMetalLayer present.
+///
+/// A free function, not a `Renderer` method: the `TextArea`s borrow `self.root`,
+/// `self.glyph_cache` and the overlay state, so the raster can't also take
+/// `&mut self` for the font system. Callers pass the disjoint fields.
+fn present_cpu(
+    sb: &mut softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    (w, h): (u32, u32),
+    bg: (u8, u8, u8),
+    layers: &[CpuLayer],
+) {
+    let (Some(nw), Some(nh)) = (std::num::NonZeroU32::new(w), std::num::NonZeroU32::new(h))
+    else {
+        return;
+    };
+    if sb.resize(nw, nh).is_err() {
+        return;
+    }
+    let mut buf = match sb.buffer_mut() {
+        Ok(b) => b,
+        Err(e) => {
+            crate::logging::warn(&format!("present_cpu: buffer_mut failed: {e}"));
+            return;
+        }
+    };
+    buf.fill(((bg.0 as u32) << 16) | ((bg.1 as u32) << 8) | bg.2 as u32);
+    let (stride, height) = (w as usize, h as usize);
+    for layer in layers {
+        match layer {
+            CpuLayer::Rects(rects) => {
+                for r in *rects {
+                    blit_rect(&mut buf, stride, height, r);
+                }
+            }
+            CpuLayer::Text(areas) => {
+                for a in *areas {
+                    blit_text_area(&mut buf, stride, height, font_system, swash_cache, a);
+                }
             }
         }
     }
+    let _ = buf.present();
 }
 
 /// Build a `Buffer` for modal-card text at a larger font size.

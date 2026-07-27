@@ -35,9 +35,11 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Spike (perf + flash proof) | ✅ | `c04bbe9` |
 | Step 1 — softbuffer bg present behind `TERMINITE_CPU=1` | ✅ coexistence confirmed (softbuffer owns the window despite wgpu) | `5873ab3` |
 | Step 2 — CPU-rasterize rect layers (bg, cursor, selection, dividers, tab strips, modal/menu bg) | ✅ chrome skeleton renders positionally correct | `00bef89` |
+| Step 3 — CPU text (layer display list + cosmic-text raster) | ⏳ code landed, **awaiting Daniel's visual + flash verdict** | (this commit) |
 
-Run the WIP: `TERMINITE_CPU=1 cargo run` → dark bg + tab strips + cursor +
-colors, **no text yet** (that's step 3). Plain `cargo run` = normal wgpu.
+Run the WIP: `TERMINITE_CPU=1 cargo run` → full chrome + **readable text**
+(content grid, tab labels, overlays); images are still step 4. Plain
+`cargo run` = normal wgpu.
 
 ## How it's wired so far
 
@@ -59,7 +61,84 @@ colors, **no text yet** (that's step 3). Plain `cargo run` = normal wgpu.
   both pinned to the versions glyphon already pulls (cosmic-text 0.18.2) so no
   duplicate copies.
 
-## STEP 3 — text (the crux, do this next)
+## STEP 3 — text — HOW IT ACTUALLY LANDED
+
+The plan below called for a per-command `enum DrawCmd { Rect | Text | Image }`.
+That turned out to be more machinery than the problem needs: rects and text
+don't interleave arbitrarily, they interleave at **exactly 8 fixed layers**, and
+`render()` already collected each one into its own `Vec`. So the display list is
+a list of *layers*:
+
+```rust
+enum CpuLayer<'a> { Rects(&'a [RectInstance]), Text(&'a [TextArea<'a>]) }
+```
+
+Same z-order guarantee, no per-frame per-command Vec churn. Step 4 adds an
+`Image` variant at the marked slot.
+
+What changed in `render()`:
+- The five scattered `modal_text_renderer.prepare(...)` calls became collection
+  into one `overlay_areas` Vec. Each block **assigns** (or `clear()`s first)
+  rather than appending — glyphon's `prepare` *replaces* a renderer's contents,
+  so under wgpu only the last block to run was ever drawn. Assigning reproduces
+  that exactly, which is what keeps the refactor behaviour-neutral for the GPU
+  path. Same for `overlay_rects`, which the Cmd+G card replaces wholesale.
+- All `prepare` calls moved to *after* the CPU branch point, so both backends
+  consume the same fully-built layer set. This also folded in the two late rect
+  groups step 2 skipped (phase-2 block-label highlights, the Cmd+G card).
+- `root`, `content_areas`, `tab_areas` hoisted out of the phase-2 block so they
+  outlive it.
+- `render_cpu` (method) → `present_cpu` + `blit_text_area` + `blend_px`
+  (module-level free functions). It has to be a free function: the `TextArea`s
+  borrow `self.root` / `self.glyph_cache` / the overlay state, so the raster
+  can't also take `&mut self` for the font system. Callers pass disjoint fields.
+
+`blit_text_area` deliberately does **not** use `Buffer::draw` (what the spike
+used). `draw` hardcodes its glyph origin to `(0, run.line_y)`, so a caller can
+only offset it by whole pixels afterwards — that loses the sub-pixel x bucket in
+the glyph cache key and drifts up to a pixel from where the GPU path puts the
+same glyph. Instead it walks `layout_runs()` and reproduces glyphon's placement
+math exactly (see `glyphon::text_render`):
+
+```
+x = physical(left, top).x + image.placement.left
+y = round(line_y × scale) + physical(left, top).y − image.placement.top
+```
+
+`SwashCache::with_pixels` supplies the two `placement` terms and rasterizes each
+glyph once per cache key — the CPU analogue of glyphon's atlas. glyphon's
+`is_run_visible` run culling is replicated too, so a 1 MB Editor body or a full
+scrollback only touches runs that can land in `bounds`.
+
+Verified: `cargo build` clean, `cargo test` 99/99, `cargo clippy --all-targets`
+warning set **byte-identical** to `e240a7f` (no new lints), both binaries run
+without panicking. cosmic-text promoted dev-dep → real dep; `cargo tree` confirms
+one copy (0.18.2) shared with glyphon.
+
+### Known gaps / follow-ups (not step-3 blockers)
+
+- **Pre-existing wgpu bug, mirrored deliberately:** the claims / Room Who overlay
+  (`claims_overlay`, set by proto) draws its card background via the `above`
+  layer, but its *text* goes through the modal text layer — and that layer's
+  render gate is `modal || context_menu || palette || display_settings`, which
+  doesn't include `claims_overlay`. So when only that overlay is up, the card
+  renders as an **empty box** with no text. The CPU path reproduces this so the
+  two backends compare apples-to-apples. One-line fix (add
+  `|| self.claims_overlay.is_some()` to `overlay_up`) — Daniel's call whether to
+  take it here or on `main` separately.
+- **`SwashCache` has no eviction.** Under wgpu it was a staging step feeding
+  glyphon's atlas (which has `trim()`); on the CPU path it *is* the glyph cache.
+  Entries key on glyph + size + sub-pixel x bin, so it grows with font-size
+  churn (Cmd+G sliders). Masks are small (~a few hundred bytes), so low MB — but
+  worth a bounded cache at step 5/6 alongside the existing RSS kill switch.
+- **Colour glyphs (emoji)** blend straight-alpha. If swash hands back
+  premultiplied RGBA the edges will read slightly dark. Untested — the spike
+  didn't cover emoji.
+- Text composites in **sRGB** (softbuffer's format), whereas the wgpu rect shader
+  linearizes. Expect text to read very slightly bolder or thinner than the GPU
+  build. Within the "similar, not pixel-perfect" bar.
+
+## STEP 3 — original plan (kept for reference)
 
 **The problem:** text and rects interleave in z-order. wgpu draw order is:
 `rects_below → content text → rects_above → images → tab-bar rects → tab text
