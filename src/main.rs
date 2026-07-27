@@ -1,6 +1,17 @@
 //! terminite — a terminal emulator for the human-AI pair.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// While there's been activity (PTY output, keys, clicks) within this window,
+/// terminite renders every frame at vsync so the macOS compositor always has a
+/// fresh drawable — closing the one-frame "desktop shows through" present gap
+/// that only surfaces during active work. Once quiet, it goes fully idle.
+const ACTIVITY_WINDOW: Duration = Duration::from_millis(250);
+/// Loop-rate floor while active. A hard cap so the event loop can never
+/// busy-spin (vsync present already paces the actual draw rate below this);
+/// picked well above any display's refresh so it never throttles real frames.
+const ACTIVE_FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -324,6 +335,10 @@ fn key_to_bytes(
 struct Terminite {
     renderer: Option<Renderer>,
     modifiers: ModifiersState,
+    /// Last time something changed the screen (PTY output, keystroke, click).
+    /// Drives activity-scoped rendering: render at vsync during a burst, idle
+    /// when quiet. `None` until the first activity.
+    last_activity: Option<Instant>,
     proxy: EventLoopProxy<UserEvent>,
     /// Module-protocol server. Dropping it removes the socket file.
     /// `None` if the bind failed at startup — terminite still runs,
@@ -353,9 +368,28 @@ impl ApplicationHandler<UserEvent> for Terminite {
             r.try_pty_deliveries();
             r.flush_pty_submits();
         }
-        // Drive the renderer's pending deadlines via the native scheduler
+        // Activity-scoped rendering: during a burst of activity, redraw every
+        // frame so the compositor always has a fresh drawable (this closes the
+        // macOS "desktop shows through for a frame" present gap, which only
+        // happens while the screen is actively changing). The WaitUntil floor
+        // caps the loop rate so it can never busy-spin even if a frame skips
+        // presenting (e.g. while occluded); vsync paces the real draw rate.
+        let active = self
+            .last_activity
+            .map(|t| t.elapsed() < ACTIVITY_WINDOW)
+            .unwrap_or(false);
+        if active {
+            if let Some(r) = self.renderer.as_ref() {
+                r.window.request_redraw();
+            }
+            event_loop
+                .set_control_flow(ControlFlow::WaitUntil(Instant::now() + ACTIVE_FRAME_INTERVAL));
+            return;
+        }
+        // Idle: drive the renderer's pending deadlines via the native scheduler
         // instead of detached threads — the latter pinned the machine on
-        // bell storms (2026-05-20 watchdog panic).
+        // bell storms (2026-05-20 watchdog panic). Fully idle (Wait) otherwise,
+        // so terminite's resting footprint stays at zero.
         let flow = self
             .renderer
             .as_ref()
@@ -479,6 +513,9 @@ impl ApplicationHandler<UserEvent> for Terminite {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Wakeup => {
+                // PTY output (incl. non-synchronized bytes) — the dominant
+                // "screen is actively changing" signal; keep rendering at vsync.
+                self.last_activity = Some(Instant::now());
                 if let Some(renderer) = self.renderer.as_ref() {
                     renderer.window.request_redraw();
                 }
@@ -543,6 +580,18 @@ impl ApplicationHandler<UserEvent> for Terminite {
         _id: WindowId,
         event: WindowEvent,
     ) {
+        // Input that changes the screen counts as activity → keep rendering at
+        // vsync for a beat (see about_to_wait). Plain cursor motion is excluded
+        // so idle mouse movement doesn't hold the loop awake.
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. }
+                | WindowEvent::MouseInput { .. }
+                | WindowEvent::MouseWheel { .. }
+                | WindowEvent::Resized(_)
+        ) {
+            self.last_activity = Some(Instant::now());
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Occluded(occluded) => {
@@ -999,6 +1048,7 @@ fn main() -> std::process::ExitCode {
     let mut terminite = Terminite {
         renderer: None,
         modifiers: ModifiersState::default(),
+        last_activity: None,
         proxy,
         proto_server,
     };
