@@ -138,6 +138,58 @@ fn rgba_to_floats((r, g, b, a): (u8, u8, u8, u8)) -> [f32; 4] {
     [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0]
 }
 
+/// Match the window's colour space to the one softbuffer builds its `CGImage`
+/// in — `CGColorSpaceCreateDeviceRGB`, i.e. sRGB (macOS only).
+///
+/// Without this, on a wide-gamut panel (a Liquid Retina XDR is Display P3) the
+/// window's backing store is P3 while the presented image is device RGB, so
+/// every `present` makes Core Graphics colour-convert the **entire framebuffer
+/// on the CPU** through vImage. Profiling the live app found ~57% of frame time
+/// in `CGColorTransformConvertUsingCMSConverter`; the softbuffer spike at
+/// 3024×1672 measured the difference directly:
+///
+/// ```text
+///   device RGB image → P3 window   105 fps   9.56 ms/frame
+///   window forced to sRGB          586 fps   1.71 ms/frame
+/// ```
+///
+/// Matching the two makes the draw a straight copy. sRGB→P3 still happens, but
+/// in the window server on the GPU, which is where every other app's does.
+///
+/// terminite authors sRGB throughout (config colours, `blit_*`, cosmic-text), so
+/// declaring the window sRGB is also the honest description of its contents.
+#[cfg(target_os = "macos")]
+pub(super) fn match_window_colorspace(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on AppKit `ns_view` is a live NSView for the window's lifetime. We
+    // read its window and set the well-known `colorSpace` property to a shared,
+    // autoreleased NSColorSpace — no ownership transfer, no retain/release.
+    unsafe {
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        if view.is_null() {
+            return;
+        }
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let cs: *mut AnyObject = msg_send![objc2::class!(NSColorSpace), sRGBColorSpace];
+        if cs.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setColorSpace: cs];
+    }
+}
+
+/// No-op off macOS — the CPU-side CMS conversion is a Core Graphics behaviour.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn match_window_colorspace(_window: &Window) {}
+
 /// Scale each edge of a `Padding` by the display scale factor (HiDPI).
 fn scale_padding(p: Padding, scale: f32) -> Padding {
     Padding {
@@ -683,6 +735,10 @@ impl Renderer {
         // and so no whole class of failures the wgpu path had to survive: no
         // adapter-unavailable, no device-lost, no surface-outdated retry
         // backoff, no VRAM OOM handler. A frame is a memory write and a blit.
+        // Before the surface: declare the window sRGB so `present` is a straight
+        // copy instead of a per-frame CPU colour conversion. See the fn's docs —
+        // this is worth ~5x on frame time on a wide-gamut display.
+        match_window_colorspace(&window);
         let sb_context = softbuffer::Context::new(window.clone())
             .expect("terminite: failed to create the softbuffer context");
         let sb_surface = softbuffer::Surface::new(&sb_context, window.clone())

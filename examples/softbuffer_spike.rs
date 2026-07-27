@@ -29,6 +29,54 @@ const BG: (u8, u8, u8) = (0x1e, 0x1e, 0x22);
 const FG: (u8, u8, u8) = (0xd4, 0xd4, 0xdc);
 const SCROLL_PX_PER_FRAME: f32 = 3.0;
 
+/// Match the window's colour space to the one softbuffer builds its `CGImage`
+/// in (`CGColorSpaceCreateDeviceRGB`, i.e. sRGB).
+///
+/// Without this, on a wide-gamut panel (Liquid Retina XDR = Display P3) the
+/// window's backing store is P3 while the image is device RGB, so
+/// `CGContextDrawImage` runs a full-framebuffer CMS conversion through vImage
+/// **on the CPU, every frame** — profiling terminite showed ~57% of frame time
+/// in `CGColorTransformConvertUsingCMSConverter`. Matching the two makes the
+/// draw a straight copy and leaves sRGB→P3 to the window server, which does it
+/// on the GPU for every other app anyway.
+///
+/// Set `SPIKE_SRGB=1` to enable, so the same binary can A/B it.
+#[cfg(target_os = "macos")]
+fn match_window_colorspace(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    if std::env::var_os("SPIKE_SRGB").is_none() {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: `ns_view` is a live NSView for the window's lifetime. We read its
+    // window and set the well-known `colorSpace` property to a shared, autoreleased
+    // NSColorSpace — no ownership transfer.
+    unsafe {
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        if view.is_null() {
+            return;
+        }
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let cls = objc2::class!(NSColorSpace);
+        let cs: *mut AnyObject = msg_send![cls, sRGBColorSpace];
+        if cs.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setColorSpace: cs];
+        println!("SPIKE_SRGB=1 — window colour space forced to sRGB");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn match_window_colorspace(_window: &Window) {}
+
 /// Build a big block of representative terminal text — varied ASCII plus a
 /// little Unicode so glyph fallback is exercised, enough lines that scrolling
 /// keeps revealing fresh content (forcing real per-line layout each frame).
@@ -182,8 +230,13 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("softbuffer spike — CPU render");
+        // Size to the real terminite case (full-screen Retina) so the
+        // per-frame, per-pixel costs are measured at the size that matters.
+        let attrs = Window::default_attributes()
+            .with_title("softbuffer spike — CPU render")
+            .with_maximized(true);
         let window = Rc::new(event_loop.create_window(attrs).unwrap());
+        match_window_colorspace(&window);
         let context = softbuffer::Context::new(window.clone()).unwrap();
         let surface = softbuffer::Surface::new(&context, window.clone()).unwrap();
 
@@ -213,6 +266,11 @@ impl ApplicationHandler for App {
         self.text_buffer = Some(buffer);
         self.window = Some(window);
         event_loop.set_control_flow(ControlFlow::Poll);
+        // Kick the first frame. Every later frame is self-sustaining (render()
+        // ends with request_redraw), but the initial one has to come from
+        // somewhere — and a window launched unfocused/occluded never gets an
+        // unprompted RedrawRequested, so the loop would never start.
+        self.window.as_ref().unwrap().request_redraw();
         println!("softbuffer spike running — scrolling a full screen every frame. Esc to quit.");
     }
 
