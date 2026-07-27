@@ -44,7 +44,28 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree | (this commit) |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
-removed in step 5. For an A/B against the GPU build, check out `main`.
+removed in step 5.
+
+## Installed for live testing (2026-07-27)
+
+Daniel is dogfooding the CPU build as his actual terminal; the flash verdict
+comes from real use.
+
+| | build | size |
+|---|---|---|
+| `/Applications/Terminite.app` | CPU (`1b648b6`) | 7.9 MB |
+| `/Applications/Terminite-wgpu.app` | shipping wgpu (`89c3117` = `main`) | 11 MB |
+
+The wgpu copy is both the **A/B reference** and the **escape hatch**. Revert with:
+
+```sh
+rm -rf /Applications/Terminite.app && cp -R /Applications/Terminite-wgpu.app /Applications/Terminite.app
+```
+
+Rebuild + reinstall after a change: `./tools/build-app.sh` (bundle, icon, ad-hoc
+sign, install, PATH — all idempotent). Replacing the bundle does **not** affect
+an already-running instance; it keeps the old binary mapped until it exits, so a
+full quit + relaunch is required to actually test a new build.
 
 ## How it's wired
 
