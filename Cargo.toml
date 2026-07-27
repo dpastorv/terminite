@@ -51,6 +51,13 @@ tungstenite = "0.29.0"
 # to match our syntect `default-fancy`, so no Oniguruma C dependency.
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
 
+# Spike only (examples/softbuffer_spike.rs) — evaluate CPU rendering as a
+# leaner, flash-free alternative to the wgpu path. cosmic-text pinned to the
+# same version glyphon already pulls, so no second copy enters the tree.
+[dev-dependencies]
+softbuffer = "0.4"
+cosmic-text = "0.18"
+
 # macOS only: reach the CAMetalLayer wgpu attaches to the window so we can force
 # it opaque. Without that, a missing-drawable frame (a wgpu/CAMetalLayer
 # present-sync quirk) briefly shows the desktop *through* the window; opaque
