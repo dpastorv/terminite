@@ -43,29 +43,32 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree | (this commit) |
 
-Run the WIP: `TERMINITE_CPU=1 cargo run` → full chrome + **readable text**
-(content grid, tab labels, overlays); images are still step 4. Plain
-`cargo run` = normal wgpu.
+Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
+removed in step 5. For an A/B against the GPU build, check out `main`.
 
-## How it's wired so far
+## How it's wired
 
-- **Flag:** `TERMINITE_CPU=1` env var. `src/renderer/mod.rs` `Renderer::new` — if
-  set, builds `sb_surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>`
-  (wgpu still fully constructed; we cut it out in step 5).
-- **`src/renderer/render.rs`:**
-  - `render()` — after `overlay_rects` is built (search `let overlay_rects`),
-    branches: `if self.sb_surface.is_some() { self.render_cpu(...); return; }`
-    before the wgpu `rects_below.prepare`.
-  - `render_cpu(&mut self, below, above, tab_bar, overlay)` — resizes the
-    softbuffer surface, fills bg, blits rect layers in wgpu draw order, presents.
-  - `blit_rect(buf, stride, height, &RectInstance)` — module-level; alpha-blends
-    sRGB rgba(0..1) into a **0RGB u32** buffer (softbuffer's macOS format). No
-    linearization (softbuffer wants sRGB straight; the wgpu shader linearizes,
-    we don't).
-- **Deps (`Cargo.toml`, branch only):** `softbuffer = "0.4"` (real dep);
-  `cosmic-text = "0.18"` (dev-dep for the spike; promote to real dep in step 3);
-  both pinned to the versions glyphon already pulls (cosmic-text 0.18.2) so no
-  duplicate copies.
+- **Deps:** `softbuffer = "0.4"` (owns the window's pixel buffer, blits
+  synchronously) + `cosmic-text = "0.18"` (shapes and rasterizes glyphs). No
+  wgpu, no glyphon.
+- **`src/renderer/render.rs`** — `render()` builds ONE ordered display list and
+  hands it to `present_cpu`:
+  - `CpuLayer::{Rects, Text, Images}` — the frame's 8 layers in z-order. Rects
+    and text interleave, so nothing can present until the frame is fully
+    described. That constraint is why `render()` collects everything before
+    consuming any of it.
+  - `present_cpu(sb, font_system, swash_cache, cache_bytes, size, bg, layers)` —
+    a free function, not a method: the `TextArea`s borrow `self.root` /
+    `self.glyph_cache` / the overlay state, so the raster can't also take
+    `&mut self` for the font system. Callers pass disjoint fields.
+  - `blit_rect` / `blit_text_area` / `blit_image` → all composite through
+    `blend_px` into a **0RGB u32** buffer (softbuffer's macOS format), straight
+    alpha, sRGB throughout — no linearization anywhere.
+- **`src/renderer/mod.rs`** — local `TextArea` / `TextBounds` (were glyphon's),
+  `SurfaceSize`, and the two cache ceilings (`SWASH_CACHE_MAX_BYTES`,
+  `GLYPH_CACHE_CAP`).
+- **`src/rect.rs` / `src/texture.rs`** — reduced to the data types
+  (`RectInstance`, `TextureInstance`, `TextureImage`); both GPU pipelines deleted.
 
 ## STEP 3 — text — HOW IT ACTUALLY LANDED
 
@@ -79,8 +82,8 @@ a list of *layers*:
 enum CpuLayer<'a> { Rects(&'a [RectInstance]), Text(&'a [TextArea<'a>]) }
 ```
 
-Same z-order guarantee, no per-frame per-command Vec churn. Step 4 adds an
-`Image` variant at the marked slot.
+Same z-order guarantee, no per-frame per-command Vec churn. Step 4 added the
+`Image` variant.
 
 What changed in `render()`:
 - The five scattered `modal_text_renderer.prepare(...)` calls became collection
@@ -111,10 +114,12 @@ x = physical(left, top).x + image.placement.left
 y = round(line_y × scale) + physical(left, top).y − image.placement.top
 ```
 
-`SwashCache::with_pixels` supplies the two `placement` terms and rasterizes each
-glyph once per cache key — the CPU analogue of glyphon's atlas. glyphon's
-`is_run_visible` run culling is replicated too, so a 1 MB Editor body or a full
-scrollback only touches runs that can land in `bounds`.
+`swash_cache` supplies the two `placement` terms and rasterizes each glyph once
+per cache key — the CPU analogue of glyphon's atlas. glyphon's `is_run_visible`
+run culling is replicated too, so a 1 MB Editor body or a full scrollback only
+touches runs that can land in `bounds`. (Step 4 replaced the original
+`SwashCache::with_pixels` call with a hand-rolled walk, so cache growth can be
+accounted for — `with_pixels` hides hit-vs-miss.)
 
 Verified: `cargo build` clean, `cargo test` 99/99, `cargo clippy --all-targets`
 warning set **byte-identical** to `e240a7f` (no new lints), both binaries run
@@ -131,9 +136,9 @@ one copy (0.18.2) shared with glyphon.
   build. Within the "similar, not pixel-perfect" bar.
 - **Per-frame `TextArea` churn.** A shell pane materializes one `TextArea` per
   visible cell each frame (~12k at full-screen Retina, ~700 KB allocated and
-  freed). That's inherited from the wgpu path — glyphon's `prepare` needed it —
-  but the CPU path could rasterize straight from `cell_glyphs` and skip the Vec
-  entirely. Worth doing once glyphon is gone (step 5/6); it's allocator traffic,
+  freed). Inherited from the wgpu path — glyphon's `prepare` needed the Vec — but
+  nothing needs it now: the rasterizer could walk `cell_glyphs` directly. Small
+  next to the framebuffer allocation below, but free to fix. Allocator traffic,
   not a leak.
 
 ## STEP 4 — images ✅
