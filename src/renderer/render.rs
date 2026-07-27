@@ -36,15 +36,21 @@ impl Renderer {
         self.next_surface_retry_deadline = Some(Instant::now() + delay);
     }
 
-    /// CPU-render port (spike/softbuffer). Step 1: present the configured
-    /// background colour through softbuffer. Later steps add rects, text, and
-    /// images so this becomes the full frame. `bg` is sRGB u8 packed 0RGB —
-    /// softbuffer's native pixel format on macOS.
-    fn render_cpu(&mut self) {
+    /// CPU-render port (spike/softbuffer). Presents a frame through softbuffer
+    /// instead of wgpu. Step 2: background fill + all rect layers (cell
+    /// backgrounds, cursor, selection, dividers, tab-bar strips, modal/menu
+    /// backgrounds) in wgpu's draw order. Text + images land in later steps.
+    fn render_cpu(
+        &mut self,
+        below: &[RectInstance],
+        above: &[RectInstance],
+        tab_bar: &[RectInstance],
+        overlay: &[RectInstance],
+    ) {
         let size = self.window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
-        let (r, g, b) = self.config.background;
-        let bg = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        let (br, bgc, bb) = self.config.background;
+        let bg = ((br as u32) << 16) | ((bgc as u32) << 8) | bb as u32;
         let Some(sb) = self.sb_surface.as_mut() else { return };
         let (Some(nw), Some(nh)) =
             (std::num::NonZeroU32::new(w), std::num::NonZeroU32::new(h))
@@ -54,13 +60,23 @@ impl Renderer {
         if sb.resize(nw, nh).is_err() {
             return;
         }
-        match sb.buffer_mut() {
-            Ok(mut buf) => {
-                buf.fill(bg);
-                let _ = buf.present();
+        let mut buf = match sb.buffer_mut() {
+            Ok(b) => b,
+            Err(e) => {
+                crate::logging::warn(&format!("render_cpu: buffer_mut failed: {e}"));
+                return;
             }
-            Err(e) => crate::logging::warn(&format!("render_cpu: buffer_mut failed: {e}")),
+        };
+        buf.fill(bg);
+        let (stride, height) = (w as usize, h as usize);
+        // wgpu order: below → above → tab bar → modal/overlay. (Text interleaves
+        // in the GPU path; here it's a later step.)
+        for layer in [below, above, tab_bar, overlay] {
+            for r in layer {
+                blit_rect(&mut buf, stride, height, r);
+            }
         }
+        let _ = buf.present();
     }
 
     pub fn render(&mut self) {
@@ -72,15 +88,6 @@ impl Renderer {
         // again (occlusion_changed). PTY data is still consumed off the event
         // loop, so nothing is lost — only the draw is deferred.
         if self.occluded {
-            return;
-        }
-        // CPU-render port (spike/softbuffer, TERMINITE_CPU=1): present through
-        // softbuffer instead of wgpu. Step 1 fills the configured background so
-        // we can confirm softbuffer owns the window cleanly (right colour, no
-        // flash) before porting rects/text/images. Returns early — the wgpu
-        // path below is skipped while the CPU backend is active.
-        if self.sb_surface.is_some() {
-            self.render_cpu();
             return;
         }
         check_rss_kill_switch(self.rss_kill_bytes);
@@ -288,6 +295,14 @@ impl Renderer {
         } else {
             self.build_menu_rects()
         };
+        // CPU-render port: below/above/tab_bar are built and overlay_rects is
+        // computed; hand them to the softbuffer rasterizer and skip the wgpu
+        // present. (A few late rects — phase-2 tab highlights, the Cmd+G card —
+        // are added further down; folded in when render() is fully ported.)
+        if self.sb_surface.is_some() {
+            self.render_cpu(&below, &above, &tab_bar, &overlay_rects);
+            return;
+        }
         self.rects_below.prepare(&self.queue, &below, resolution);
         self.rects_above.prepare(&self.queue, &above, resolution);
         // `tab_bar` gets more entries in phase 2 (block-label highlights),
@@ -1602,6 +1617,39 @@ pub(super) fn make_glyph_buffer(
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
     buf
+}
+
+/// CPU-render port: alpha-blend one `RectInstance` into a 0RGB pixel buffer.
+/// `rect` is `[x, y, w, h]` in physical px; `color` is sRGB rgba in 0..1 (the
+/// same values the rect shader consumes, minus the shader's linearization —
+/// softbuffer wants sRGB straight). Clamped to the buffer bounds.
+fn blit_rect(buf: &mut [u32], stride: usize, height: usize, r: &RectInstance) {
+    let a = r.color[3];
+    if a <= 0.0 {
+        return;
+    }
+    let x0 = r.rect[0].max(0.0) as usize;
+    let y0 = r.rect[1].max(0.0) as usize;
+    let x1 = ((r.rect[0] + r.rect[2]).max(0.0) as usize).min(stride);
+    let y1 = ((r.rect[1] + r.rect[3]).max(0.0) as usize).min(height);
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u32;
+    let (sr, sg, sb) = (to_u8(r.color[0]), to_u8(r.color[1]), to_u8(r.color[2]));
+    let ai = to_u8(a);
+    for y in y0..y1 {
+        let row = y * stride;
+        for x in x0..x1 {
+            let idx = row + x;
+            if ai >= 255 {
+                buf[idx] = (sr << 16) | (sg << 8) | sb;
+            } else {
+                let d = buf[idx];
+                let bl = |s: u32, dst: u32| (s * ai + dst * (255 - ai)) / 255;
+                buf[idx] = (bl(sr, (d >> 16) & 0xff) << 16)
+                    | (bl(sg, (d >> 8) & 0xff) << 8)
+                    | bl(sb, d & 0xff);
+            }
+        }
+    }
 }
 
 /// Build a `Buffer` for modal-card text at a larger font size.
