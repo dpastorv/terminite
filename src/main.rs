@@ -927,6 +927,27 @@ impl ApplicationHandler<UserEvent> for Terminite {
     }
 }
 
+/// Disable macOS press-and-hold app-wide so held keys repeat (see call site).
+/// Registers the default for this process only — no persisted plist write.
+#[cfg(target_os = "macos")]
+fn disable_press_and_hold() {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+    // SAFETY: standard Foundation calls with immutable, autoreleased objects;
+    // no ownership transfer. NSUserDefaults is usable before the app loop.
+    unsafe {
+        let key: *mut AnyObject = msg_send![
+            class!(NSString),
+            stringWithUTF8String: c"ApplePressAndHoldEnabled".as_ptr()
+        ];
+        let no: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
+        let dict: *mut AnyObject =
+            msg_send![class!(NSDictionary), dictionaryWithObject: no, forKey: key];
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let _: () = msg_send![defaults, registerDefaults: dict];
+    }
+}
+
 fn main() -> std::process::ExitCode {
     // Subcommand dispatch first: `terminite tabs / blocks / block / watch`
     // run as a CLI client against the socket of a separately-running
@@ -952,6 +973,13 @@ fn main() -> std::process::ExitCode {
     // any failure during init has somewhere to land.
     logging::init();
     install_panic_hook();
+    // Held keys must REPEAT (hold-to-repeat), like every native terminal.
+    // macOS gives text-input apps press-and-hold (the accent popup) by
+    // default, which suppresses key repeat — breaking anything that relies on
+    // the repeat stream, e.g. Claude Code's hold-spacebar push-to-talk. Same
+    // fix Alacritty/kitty/WezTerm apply. Must run before the loop reads keys.
+    #[cfg(target_os = "macos")]
+    disable_press_and_hold();
     logging::info(&format!(
         "terminite starting (version {}, {}, built {})",
         env!("CARGO_PKG_VERSION"),
