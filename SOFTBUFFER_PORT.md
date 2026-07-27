@@ -5,8 +5,12 @@ wgpu build and is untouched — it's also the A/B reference for eyeballing the C
 build. Resume with: `git checkout spike/softbuffer`, read this file, then say
 **"resume step 6."**
 
-Steps 1–5 are done. What's left is the flash verdict and the per-frame
-framebuffer allocation — both under "Step 6" at the bottom.
+Steps 1–5 are done, plus a 2.2× frame-time fix (`0eabb16`). What's left is
+Daniel's verdict on the flash, the feel, and the colours — see "Step 6" at the
+bottom. Nothing merges to `main` until he calls it.
+
+Headline numbers, all measured: footprint **414 → 88 MB**, frame time
+**18.8 → 8.67 ms**, release binary **11 → 7.9 MB**, deps **199 → 173 crates**.
 
 ## Why we're doing this
 
@@ -41,7 +45,8 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 2 — CPU-rasterize rect layers (bg, cursor, selection, dividers, tab strips, modal/menu bg) | ✅ chrome skeleton renders positionally correct | `00bef89` |
 | Step 3 — CPU text (layer display list + cosmic-text raster) | ✅ **visual confirmed** — Daniel: "looks the same as the other one", Cmd+G card included. ⏳ flash verdict still pending a longer soak. | `96e588f` |
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
-| Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree | (this commit) |
+| Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
+| sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
@@ -53,7 +58,7 @@ comes from real use.
 
 | | build | size |
 |---|---|---|
-| `/Applications/Terminite.app` | CPU (`1b648b6`) | 7.9 MB |
+| `/Applications/Terminite.app` | CPU (`0eabb16`) | 7.9 MB |
 | `/Applications/Terminite-wgpu.app` | shipping wgpu (`89c3117` = `main`) | 11 MB |
 
 The wgpu copy is both the **A/B reference** and the **escape hatch**. Revert with:
@@ -180,24 +185,29 @@ returns `Option` accordingly. Step 5 drops the GPU half.
 
 ## Footprint / leak audit (Daniel asked, 2026-07-27)
 
-Measured, `./target/debug/terminite`, one shell pane idle (cursor blink drives
-~2 frames/sec):
+> **Superseded — read this first.** The original version of this section
+> compared the two backends by **`ps` RSS** and concluded "CPU mode is ~72 MB
+> heavier, not leaner." **That was wrong, and the metric was the reason.** On
+> macOS, `ps` RSS does not charge a process for its GPU/driver allocations, but
+> *does* count mapped font and binary pages. For this comparison it inverts the
+> ranking outright. Use `footprint -p <pid>` (phys_footprint). Same finding
+> arrived at independently while benchmarking terminite against Apple Terminal.
 
-| | RSS | drift |
-|---|---|---|
-| wgpu | 105 MB | 0 MB over 15s |
-| CPU (`TERMINITE_CPU=1`) | 174–177 MB | 0 MB over **60s** (~120 frames), trending slightly *down* |
+Measured with `footprint`, both as fresh socket-less instances, one shell, 20s up:
 
-**CPU mode is currently ~72 MB heavier, not leaner** — and that's the expected
-shape of the transition, not a regression to chase. `TERMINITE_CPU=1` stands up
-softbuffer *alongside* a fully-constructed wgpu (device, queue, surface, three
-glyphon renderers, the atlas), because the `Renderer` fields aren't optional
-yet. The delta is softbuffer's Retina pixel buffer plus the glyph cache, stacked
-on top of a wgpu stack that's still resident. **Step 5 is where the footprint
-win lands**, by deleting the wgpu side — that's what makes the number move.
+| | phys_footprint | peak | (`ps` RSS) |
+|---|---|---|---|
+| wgpu `89c3117` | **414 MB** | 422 MB | 108 MB |
+| CPU `0eabb16` | **88 MB** | 107 MB | 156 MB |
 
-Flat RSS across 60s is the useful signal here: the per-frame path allocates
-nothing that it doesn't release.
+**The CPU build is 4.7× smaller — 326 MB less.** RSS said the opposite (108 vs
+156) because wgpu's Metal driver and GPU-side allocations don't land in RSS,
+while terminite's ~33 MB of mapped files do. For scale, Apple Terminal with one
+shell measures 288 MB phys_footprint (peak 392 MB), so the CPU build is ~3×
+leaner than the system terminal too.
+
+Leak check: RSS held flat across 60s (~120 frames) and phys_footprint peak sits
+close to steady state, so the per-frame path releases what it takes.
 
 What's bounded, and by what:
 - **`swash_cache.image_cache`** — `SWASH_CACHE_MAX_BYTES` (16 MB), blunt clear +
@@ -306,64 +316,74 @@ used. `Color`, `Buffer`, `FontSystem`, `Attrs`, `Metrics`, `Shaping`, `Style`,
 them), so those imports just changed crate. `surface_config` → a local
 `SurfaceSize { width, height }`, updated by `resize`.
 
-### Why RSS did *not* drop — the real answer
+### Footprint: 414 MB → 88 MB
 
-Measured, idle, one shell pane: **172 MB, flat over 30s.** Versus 174–177 MB with
-wgpu still resident, and 105 MB for the pure wgpu path. So cutting wgpu freed
-almost nothing, and the CPU path costs ~67 MB more than the GPU one. The earlier
-guess in this doc — "it's softbuffer stacked on top of wgpu, step 5 fixes it" —
-**was wrong**. Here's the actual mechanism, from softbuffer 0.4.8's
-`src/backends/cg.rs`:
+Measured with `footprint -p` (**not** `ps` RSS — see the audit section above for
+why RSS inverts this comparison), both as fresh socket-less instances, one
+shell, 20s up:
+
+| | phys_footprint | peak |
+|---|---|---|
+| wgpu `89c3117` | 414 MB | 422 MB |
+| CPU `0eabb16` | **88 MB** | 107 MB |
+
+**4.7× smaller, 326 MB less.** Most of what went away is the Metal driver and
+its GPU-side allocations, which `ps` never charged to the process — which is
+exactly why an RSS-based reading of this same pair said the CPU build was
+*heavier*. It isn't, and it never was.
+
+### The per-frame framebuffer allocation (still true, still minor)
+
+softbuffer 0.4.8's macOS backend allocates a fresh buffer every frame
+(`src/backends/cg.rs`):
 
 ```rust
-fn buffer_mut(&mut self) -> Result<BufferImpl<'_, D, W>, SoftBufferError> {
-    Ok(BufferImpl { buffer: util::PixelBuffer(vec![0; self.width * self.height]), imp: self })
+fn buffer_mut(&mut self) -> ... {
+    Ok(BufferImpl { buffer: PixelBuffer(vec![0; self.width * self.height]), .. })
 }
 ```
 
-- `buffer_mut()` allocates a **brand-new zeroed buffer every frame** — ~20 MB at
-  full-screen Retina.
-- `present()` then **gives that allocation away**: `Box::into_raw` hands it to a
-  `CGDataProvider`, which frees it from a release callback whenever Core Graphics
-  is finished with it.
+`present()` then gives that allocation away — `Box::into_raw` into a
+`CGDataProvider` that frees it from a release callback. So each frame maps
+~20 MB at Retina, faults it in as the blitters touch it, and surrenders it to
+Core Graphics.
 
-So each frame mints a fresh multi-MB mapping, faults it in as `fill()` +
-`blit_*` touch every page, and surrenders it to CG for an indeterminate time.
-`vec![0; n]` at that size is `alloc_zeroed` → fresh zero pages, so the "zeroing"
-is virtually free, but faulting 20 MB of pages in per frame is not. Steady-state
-churn with several buffers in flight is what the 172 MB is; it's flat because
-it's churn, not a leak.
-
-This is a softbuffer API limitation, not something terminite can fix from the
-outside — the allocation is internal to `buffer_mut()`. Options for step 6 below.
-Note the spike still measured 275 fps / 3.6 ms per frame *with* this behaviour,
-so it's an energy and footprint question, not a "does it work" question.
+This is real, but it is **not** what was costing us. Two rounds of guessing from
+source reads (this, and per-cell `TextArea` churn before it) both pointed at the
+wrong thing; profiling found the actual cost in one pass — a per-frame CPU
+colour-space conversion, fixed in `0eabb16` for a 2.2× frame-time win. Leaving
+this documented as a known property, not an action item. **Profile first.**
 
 ## Remaining steps
-- **Step 6 — prove & merge:** run CPU-terminite vs the wgpu build on `main`. Bar
-  (Daniel's words): **"similar, not pixel-perfect, is fine."** Must look right,
-  feel as smooth, and — the whole point — **never flash**. Then merge to `main`.
 
-  Two open items to settle first:
+- **Step 6 — prove & merge:** run the CPU build against the wgpu build on
+  `main`. Bar (Daniel's words): **"similar, not pixel-perfect, is fine."** Must
+  look right, feel as smooth, and — the whole point — **never flash**. Then merge
+  to `main`.
 
-  1. **The flash verdict.** Not seen yet as of step 4, but not yet confirmed
-     either. Now finally testable without a confound: until step 5, wgpu's
-     CAMetalLayer was still attached to the window even in CPU mode.
-  2. **The per-frame framebuffer allocation** (see above). Worth fixing before
-     merge if the energy number matters — it's a 20 MB map + page-fault per
-     frame. Three ways out, cheapest first:
-     - Upstream it: softbuffer could reuse a buffer instead of `vec![0; …]` per
-       call. File the issue; the CG backend's `present()` giving the allocation
-       to `CGDataProvider` is what forces a fresh one, so this needs a real
-       design change there (keep a pool, or copy into the provider).
-     - Hand-roll the macOS present path: our own `CALayer` + `CGImage` over a
-       persistent double buffer. `objc2` is already a dependency. Costs us
-       softbuffer's cross-platform story on macOS specifically, which is the one
-       platform we ship today.
-     - Accept it and measure. The spike hit 275 fps with this behaviour; if
-       Activity Monitor's Energy Impact is fine, this is a footnote, not a bug.
-       **Measure before choosing** — don't optimize on the strength of a
-       code read.
+  **Settled since the port started:**
+  - Footprint: **414 MB → 88 MB** phys_footprint (4.7× smaller; ~3× leaner than
+    Apple Terminal's 288 MB too). Binary 21 → 14 MB debug, 11 → 7.9 MB release.
+    Deps 199 → 173 crates.
+  - Frame time: **18.8 ms → 8.67 ms** avg live (4 panes, agent spinners), p99
+    27.1 → 12.2 ms, CPU ~25% → ~10–17% of a core. The win came from declaring
+    the window sRGB (`0eabb16`).
+  - Visual parity at steps 3 and 4, confirmed by Daniel.
+
+  **Still open — all need Daniel's eyes, none are code questions:**
+  1. **The flash verdict.** The whole reason for the port; not seen through
+     step 4, never confirmed. Only cleanly testable since step 5 removed the
+     last CAMetalLayer from the window.
+  2. **Feel** — scroll, splits, tab switching, against the wgpu build.
+  3. **Colour** — the sRGB window change in `0eabb16` is new since Daniel last
+     looked. Should read *more* accurate, not less; one line to revert if not.
+
+- **Known, deliberately not acted on:** softbuffer's per-frame framebuffer
+  allocation (documented above) and the per-cell `TextArea` churn (~13.8k
+  `TextArea`s per frame across 4 panes, inherited from glyphon's `prepare`; the
+  rasterizer could walk `cell_glyphs` directly). Both real, both minor at
+  8.67 ms/frame. **Profile before touching either** — source-reading picked the
+  wrong culprit twice on this port.
 
 ## Gotchas / notes
 
