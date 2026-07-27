@@ -89,6 +89,11 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>NSPrincipalClass</key>                   <string>NSApplication</string>
     <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
     <key>LSApplicationCategoryType</key>          <string>public.app-category.developer-tools</string>
+    <!-- A CLI running inside terminite (e.g. Claude Code voice dictation) that
+         records audio has its mic request attributed to terminite by macOS.
+         Without this usage string the request is denied and terminite never
+         appears in System Settings > Privacy > Microphone. -->
+    <key>NSMicrophoneUsageDescription</key>       <string>A program running in terminite (such as Claude Code voice dictation) is requesting microphone access.</string>
 </dict>
 </plist>
 PLIST
