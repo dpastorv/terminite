@@ -47,6 +47,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
 | sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
+| **The flash** | ✅ **not reproduced.** Daniel, after 17 min / 4153 frames of continuous redraw: "i have not seen the flash so far… i should have seen it by now" | — |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
@@ -370,13 +371,19 @@ this documented as a known property, not an action item. **Profile first.**
     the window sRGB (`0eabb16`).
   - Visual parity at steps 3 and 4, confirmed by Daniel.
 
-  **Still open — all need Daniel's eyes, none are code questions:**
-  1. **The flash verdict.** The whole reason for the port; not seen through
-     step 4, never confirmed. Only cleanly testable since step 5 removed the
-     last CAMetalLayer from the window.
-  2. **Feel** — scroll, splits, tab switching, against the wgpu build.
-  3. **Colour** — the sRGB window change in `0eabb16` is new since Daniel last
-     looked. Should read *more* accurate, not less; one line to revert if not.
+  - **The flash: not reproduced.** Daniel's call after 17 minutes and 4,153
+    frames on the CPU build: *"i have not seen the flash so far… i should have
+    seen it by now."* Worth more than a quiet window: `fd98a73` recorded that the
+    flash **only occurs while the screen is actively changing**, and that session
+    ran two agent panes with animated spinners throughout — the trigger was
+    saturated, not absent. This is the reason the port exists, and it holds.
+
+  **Still open — Daniel's eyes, not code questions:**
+  1. **Feel** — scroll, splits, tab switching, against the wgpu build.
+  2. **Colour** — the sRGB window change in `0eabb16` landed after his last
+     look. Should read *more* accurate, not less; one line to revert if not.
+
+  Then: merge to `main`.
 
 - **Known, deliberately not acted on:** softbuffer's per-frame framebuffer
   allocation (documented above) and the per-cell `TextArea` churn (~13.8k

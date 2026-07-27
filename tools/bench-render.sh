@@ -28,6 +28,10 @@
 # Footprint is reported before/after (phys_footprint, the metric that counts
 # on macOS — `ps` RSS counts shared pages and ranks these apps backwards).
 
+# Timing uses bash's TIMEFORMAT; under zsh that silently yields empty times,
+# so re-exec if someone invoked this as `zsh tools/bench-render.sh`.
+[ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
+
 set -u
 
 # ---------------------------------------------------------------- guards ---
@@ -146,8 +150,27 @@ trap 'rm -rf "$WORK_DIR"; printf "\033[?1049l\033[0m" > /dev/tty 2>/dev/null' EX
 
 echo "bench-render: generating payloads in $WORK_DIR ..."
 
+# Work counts, so the report can quote each workload in its own unit — MB/s is
+# meaningless for cursor addressing (ops) and full-frame repaint (frames).
+N_ASCII=$((120000 / DIV))
+N_WIDE=$((40000 / DIV))
+N_SGR=$((8000 / DIV))
+N_CURSOR=$((250000 / DIV))
+N_REPAINT=$((800 / DIV))
+
+work_count() {
+    case "$1" in
+        ascii)   echo "$N_ASCII lines"  ;;
+        wide)    echo "$N_WIDE lines"   ;;
+        sgr)     echo "$N_SGR lines"    ;;
+        cursor)  echo "$N_CURSOR ops"   ;;
+        repaint) echo "$N_REPAINT frames" ;;
+        *)       echo "0 -"             ;;
+    esac
+}
+
 # 1. Plain ASCII scrolling — the baseline path: glyph cache hits, scroll, blit.
-awk -v cols="$COLS" -v n=$((120000 / DIV)) 'BEGIN {
+awk -v cols="$COLS" -v n="$N_ASCII" 'BEGIN {
     alpha = "abcdefghijklmnopqrstuvwxyz0123456789 "
     body = ""
     for (i = 0; i < cols - 8; i++) body = body substr(alpha, (i % 37) + 1, 1)
@@ -155,7 +178,7 @@ awk -v cols="$COLS" -v n=$((120000 / DIV)) 'BEGIN {
 }' > "$WORK_DIR/ascii"
 
 # 2. Wide + combining — CJK cells, emoji, a ZWJ sequence and a combining mark.
-awk -v cols="$COLS" -v n=$((40000 / DIV)) 'BEGIN {
+awk -v cols="$COLS" -v n="$N_WIDE" 'BEGIN {
     chunk = "日本語テキスト 🚀 e\xcc\x81 👩\xe2\x80\x8d💻 "
     body = ""
     # awk counts bytes, not cells: CJK is 3 bytes/2 cells, emoji 4 bytes/2
@@ -166,7 +189,7 @@ awk -v cols="$COLS" -v n=$((40000 / DIV)) 'BEGIN {
 
 # 3. SGR churn — a distinct 24-bit colour per cell defeats any run-merging and
 #    forces per-cell attribute handling all the way to the blit.
-awk -v cols="$COLS" -v n=$((8000 / DIV)) 'BEGIN {
+awk -v cols="$COLS" -v n="$N_SGR" 'BEGIN {
     alpha = "abcdefghijklmnopqrstuvwxyz"
     for (k = 0; k < n; k++) {
         line = ""
@@ -181,7 +204,7 @@ awk -v cols="$COLS" -v n=$((8000 / DIV)) 'BEGIN {
 # 4. Cursor addressing — scattered single-cell writes, no scrolling. This is
 #    the damage-tracking stress: a renderer that repaints whole frames pays
 #    far more here than one that tracks dirty cells.
-awk -v rows="$ROWS" -v cols="$COLS" -v n=$((250000 / DIV)) 'BEGIN {
+awk -v rows="$ROWS" -v cols="$COLS" -v n="$N_CURSOR" 'BEGIN {
     srand(20260727)
     alpha = "abcdefghijklmnopqrstuvwxyz"
     for (i = 0; i < n; i++) {
@@ -193,7 +216,7 @@ awk -v rows="$ROWS" -v cols="$COLS" -v n=$((250000 / DIV)) 'BEGIN {
 
 # 5. Full-frame repaint on the alt screen — no scrollback, no history growth,
 #    just N complete frames. Closest thing to a "fps" number here.
-awk -v rows="$ROWS" -v cols="$COLS" -v n=$((800 / DIV)) 'BEGIN {
+awk -v rows="$ROWS" -v cols="$COLS" -v n="$N_REPAINT" 'BEGIN {
     alpha = "abcdefghijklmnopqrstuvwxyz0123456789"
     printf "\033[?1049h"
     for (f = 0; f < n; f++) {
@@ -217,12 +240,13 @@ RESULTS=""
 for w in $WORKLOADS; do
     f="$WORK_DIR/$w"
     bytes=$(wc -c < "$f" | tr -d ' ')
+    read -r count unit <<< "$(work_count "$w")"
 
     app0=$(cputime "$APP_PID"); ws0=$(cputime "$WS_PID")
     elapsed=$( { TIMEFORMAT=%R; time { cat "$f" > /dev/tty; sync_tty; } } 2>&1 )
     app1=$(cputime "$APP_PID"); ws1=$(cputime "$WS_PID")
 
-    RESULTS="$RESULTS$w $bytes $elapsed $app0 $app1 $ws0 $ws1
+    RESULTS="$RESULTS$w $bytes $count $unit $elapsed $app0 $app1 $ws0 $ws1
 "
 done
 
@@ -242,20 +266,27 @@ report() {
     printf 'footprint  : %s MB before -> %s MB after   (peak %s)\n' \
         "$FP_BEFORE" "$FP_AFTER" "${FP_PEAK:-?}"
     printf '\n'
-    printf '%-9s %9s %8s %9s %9s %9s %11s\n' \
-        workload MB wall_s MB/s app_cpu_s ws_cpu_s cpu_s_per_MB
-    printf '%-9s %9s %8s %9s %9s %9s %11s\n' \
-        --------- --------- -------- --------- --------- --------- -----------
-    printf '%s' "$RESULTS" | while read -r w bytes elapsed a0 a1 w0 w1; do
+    printf '%-9s %7s %8s %9s %16s %9s %9s %11s\n' \
+        workload MB wall_s MB/s native_rate app_cpu_s ws_cpu_s cpu_s_per_MB
+    printf '%-9s %7s %8s %9s %16s %9s %9s %11s\n' \
+        --------- ------- -------- --------- ---------------- --------- --------- -----------
+    printf '%s' "$RESULTS" | while read -r w bytes count unit elapsed a0 a1 w0 w1; do
         [ -z "$w" ] && continue
-        awk -v w="$w" -v b="$bytes" -v e="$elapsed" -v a0="$a0" -v a1="$a1" \
-            -v w0="$w0" -v w1="$w1" 'BEGIN {
+        awk -v w="$w" -v b="$bytes" -v n="$count" -v u="$unit" -v e="$elapsed" \
+            -v a0="$a0" -v a1="$a1" -v w0="$w0" -v w1="$w1" 'BEGIN {
             mb = b / 1048576; acpu = a1 - a0; wcpu = w1 - w0
-            printf "%-9s %9.2f %8.2f %9.2f %9.2f %9.2f %11.3f\n",
-                w, mb, e, (e > 0 ? mb / e : 0), acpu, wcpu, (mb > 0 ? acpu / mb : 0)
+            # rate and its unit go in one padded field, so a long unit name
+            # cannot shove the CPU columns out of alignment
+            rate = sprintf("%.0f %s/s", (e > 0 ? n / e : 0), u)
+            printf "%-9s %7.2f %8.2f %9.2f %16s %9.2f %9.2f %11.3f\n",
+                w, mb, e, (e > 0 ? mb / e : 0), rate, acpu, wcpu,
+                (mb > 0 ? acpu / mb : 0)
         }'
     done
     printf '\n'
+    printf 'native_rate is the honest throughput per workload — lines/s for the\n'
+    printf 'scrolling tests, cursor ops/s, and frames/s for the full-screen\n'
+    printf 'repaint (that last one is the closest thing here to an fps number).\n'
     printf 'Lower cpu_s_per_MB is better; it is the number that cannot be faked\n'
     printf 'by answering DSR before the pixels land. Scrollback from this run is\n'
     printf 'still resident — clear it before reading footprint for anything else.\n'
