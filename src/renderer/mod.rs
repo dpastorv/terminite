@@ -683,6 +683,12 @@ pub struct Renderer {
     frame_count: u64,
 
     pub window: Arc<Window>,
+
+    /// CPU-render port (spike/softbuffer): when `TERMINITE_CPU=1`, `render()`
+    /// presents a CPU pixel buffer through this instead of the wgpu path. wgpu
+    /// stays fully constructed for now; we cut it out once the CPU path draws
+    /// everything. `None` = normal wgpu rendering.
+    sb_surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
 }
 
 impl Renderer {
@@ -888,6 +894,22 @@ impl Renderer {
             add_label(&mut font_system, &m.id, &m.name);
         }
 
+        // CPU-render port: under TERMINITE_CPU=1, stand up a softbuffer surface
+        // on the same window. wgpu is still fully built above; render() routes
+        // present to whichever is active. This also tells us empirically
+        // whether softbuffer can own a window wgpu already touched.
+        let sb_surface = if std::env::var_os("TERMINITE_CPU").is_some() {
+            let ctx = softbuffer::Context::new(window.clone())
+                .expect("terminite: softbuffer context");
+            let surf = softbuffer::Surface::new(&ctx, window.clone())
+                .expect("terminite: softbuffer surface");
+            drop(ctx); // Surface is self-contained in softbuffer 0.4.
+            crate::logging::info("render: CPU (softbuffer) backend active");
+            Some(surf)
+        } else {
+            None
+        };
+
         let mut renderer = Self {
             instance,
             surface,
@@ -988,6 +1010,7 @@ impl Renderer {
             last_frame_end: None,
             frame_count: 0,
             window,
+            sb_surface,
         };
         // Size the first pane's buffers/grid to the laid-out pane rect
         // (the constructor built them at full surface size).

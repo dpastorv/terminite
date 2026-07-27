@@ -36,6 +36,33 @@ impl Renderer {
         self.next_surface_retry_deadline = Some(Instant::now() + delay);
     }
 
+    /// CPU-render port (spike/softbuffer). Step 1: present the configured
+    /// background colour through softbuffer. Later steps add rects, text, and
+    /// images so this becomes the full frame. `bg` is sRGB u8 packed 0RGB —
+    /// softbuffer's native pixel format on macOS.
+    fn render_cpu(&mut self) {
+        let size = self.window.inner_size();
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        let (r, g, b) = self.config.background;
+        let bg = ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+        let Some(sb) = self.sb_surface.as_mut() else { return };
+        let (Some(nw), Some(nh)) =
+            (std::num::NonZeroU32::new(w), std::num::NonZeroU32::new(h))
+        else {
+            return;
+        };
+        if sb.resize(nw, nh).is_err() {
+            return;
+        }
+        match sb.buffer_mut() {
+            Ok(mut buf) => {
+                buf.fill(bg);
+                let _ = buf.present();
+            }
+            Err(e) => crate::logging::warn(&format!("render_cpu: buffer_mut failed: {e}")),
+        }
+    }
+
     pub fn render(&mut self) {
         // Don't present while the window is fully occluded. Background redraws
         // (PTY output, delivery ticks) would otherwise acquire and present a
@@ -45,6 +72,15 @@ impl Renderer {
         // again (occlusion_changed). PTY data is still consumed off the event
         // loop, so nothing is lost — only the draw is deferred.
         if self.occluded {
+            return;
+        }
+        // CPU-render port (spike/softbuffer, TERMINITE_CPU=1): present through
+        // softbuffer instead of wgpu. Step 1 fills the configured background so
+        // we can confirm softbuffer owns the window cleanly (right colour, no
+        // flash) before porting rects/text/images. Returns early — the wgpu
+        // path below is skipped while the CPU backend is active.
+        if self.sb_surface.is_some() {
+            self.render_cpu();
             return;
         }
         check_rss_kill_switch(self.rss_kill_bytes);

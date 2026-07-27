@@ -46,6 +46,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "29.0.3"
 winit = "0.30.13"
+# CPU-render port (spike/softbuffer branch): softbuffer presents a CPU pixel
+# buffer, gated behind TERMINITE_CPU=1 while we port render() off wgpu. Not on
+# main. cosmic-text (below, dev for now) does the glyph raster in later steps.
+softbuffer = "0.4"
 tungstenite = "0.29.0"
 # Extended syntect grammar set (Rust, TypeScript, TOML, …) — fancy-regex engine
 # to match our syntect `default-fancy`, so no Oniguruma C dependency.
@@ -55,7 +59,6 @@ two-face = { version = "0.5.1", default-features = false, features = ["syntect-f
 # leaner, flash-free alternative to the wgpu path. cosmic-text pinned to the
 # same version glyphon already pulls, so no second copy enters the tree.
 [dev-dependencies]
-softbuffer = "0.4"
 cosmic-text = "0.18"
 
 # macOS only: reach the CAMetalLayer wgpu attaches to the window so we can force
