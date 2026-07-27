@@ -644,11 +644,13 @@ impl Renderer {
                 // Upload all frames *before* taking a mut borrow on
                 // the pane tree — the texture path needs &device/&queue
                 // off self while the tree lookup wants &mut self.root.
+                // CPU backend blits from the decoded bytes, so it needs them kept.
+                let keep_pixels = self.sb_surface.is_some();
                 let (still, animation) = match decoded {
                     crate::images::DecodedImage::Static(img) => {
                         let tex = self
                             .texture_renderer
-                            .upload(&self.device, &self.queue, &img);
+                            .upload(&self.device, &self.queue, &img, keep_pixels);
                         (Some(tex), None)
                     }
                     crate::images::DecodedImage::Animated { frames, total_ms } => {
@@ -662,7 +664,7 @@ impl Renderer {
                             max_h = max_h.max(img.height);
                             let tex = self
                                 .texture_renderer
-                                .upload(&self.device, &self.queue, &img);
+                                .upload(&self.device, &self.queue, &img, keep_pixels);
                             textures.push(tex);
                             acc = acc.saturating_add(delay);
                             cumulative.push(acc);

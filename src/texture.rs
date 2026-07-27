@@ -68,12 +68,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// One uploaded image — owns the GPU texture, its view, and a bind group
-/// that pairs the view with the shared sampler. Dropping it releases all
-/// three; wgpu reference-counts behind the scenes.
-pub struct TextureImage {
-    pub width: u32,
-    pub height: u32,
+/// The GPU residency of an image: its texture, view, and a bind group pairing
+/// the view with the shared sampler. Dropping it releases all three; wgpu
+/// reference-counts behind the scenes.
+struct GpuImage {
     #[allow(dead_code)]
     texture: wgpu::Texture,
     #[allow(dead_code)]
@@ -81,16 +79,40 @@ pub struct TextureImage {
     bind_group: wgpu::BindGroup,
 }
 
+/// One decoded image, resident wherever the active backend needs it.
+///
+/// Exactly one of the two representations is populated, never both — an image
+/// costs `width × height × 4` bytes once, whichever backend is drawing it:
+/// - wgpu path: `gpu` is `Some`, pixels live in VRAM.
+/// - CPU path (`TERMINITE_CPU=1`): `rgba` is `Some`; softbuffer blits straight
+///   from these bytes and can't read back a GPU texture anyway, so the upload
+///   is skipped entirely rather than paying for a second copy.
+///
+/// Step 5 drops `gpu` and leaves `rgba` as the only representation.
+pub struct TextureImage {
+    pub width: u32,
+    pub height: u32,
+    gpu: Option<GpuImage>,
+    rgba: Option<Vec<u8>>,
+}
+
 impl TextureImage {
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.bind_group
+    /// `None` for a CPU-path image, which was never uploaded.
+    pub fn bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.gpu.as_ref().map(|g| &g.bind_group)
+    }
+
+    /// Decoded RGBA8, `width * height * 4` bytes — `Some` only on the CPU path.
+    pub fn pixels(&self) -> Option<&[u8]> {
+        self.rgba.as_deref()
     }
 }
 
 /// Maximum images drawn per frame. The instance buffer is sized to this
 /// up front; extra images in the same frame would be silently dropped.
 /// Generous: a session with > 64 simultaneous on-screen images is unreal.
-const MAX_INSTANCES: usize = 64;
+/// `pub` so the CPU path can apply the same cap and stay in parity.
+pub const MAX_INSTANCES: usize = 64;
 
 pub struct TextureRenderer {
     pipeline: wgpu::RenderPipeline,
@@ -240,9 +262,28 @@ impl TextureRenderer {
         }
     }
 
-    /// Upload a decoded image to the GPU and return a handle that owns its
-    /// texture + bind group. Drop the handle to release the GPU memory.
-    pub fn upload(&self, device: &wgpu::Device, queue: &wgpu::Queue, image: &ImageData) -> TextureImage {
+    /// Make a decoded image resident for the active backend and return a handle
+    /// that owns it. Drop the handle to release the memory.
+    ///
+    /// `for_cpu` (pass `sb_surface.is_some()`) keeps the decoded RGBA for
+    /// softbuffer to blit from and **skips the GPU upload altogether** — no
+    /// texture is allocated, so an image costs one copy on either path rather
+    /// than two while both backends coexist.
+    pub fn upload(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: &ImageData,
+        for_cpu: bool,
+    ) -> TextureImage {
+        if for_cpu {
+            return TextureImage {
+                width: image.width,
+                height: image.height,
+                gpu: None,
+                rgba: Some(image.rgba.clone()),
+            };
+        }
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("terminite image texture"),
             size: wgpu::Extent3d {
@@ -296,9 +337,8 @@ impl TextureRenderer {
         TextureImage {
             width: image.width,
             height: image.height,
-            texture,
-            view,
-            bind_group,
+            gpu: Some(GpuImage { texture, view, bind_group }),
+            rgba: None,
         }
     }
 

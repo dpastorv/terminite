@@ -22,7 +22,7 @@ use crate::images::{self, Action};
 use crate::palette::color_to_floats;
 use crate::rect::{RectInstance, RectRenderer};
 use crate::term::{CursorShapeKind, DecorationKind, LiveTerm, ModeFlags, Snapshot, SpanStyle, TermScroll};
-use crate::texture::{TextureImage, TextureInstance, TextureRenderer};
+use crate::texture::{TextureImage, TextureInstance, TextureRenderer, MAX_INSTANCES};
 use crate::{TabId, UserEvent};
 
 // The Renderer impl is split across these submodules (same type, multiple
@@ -75,6 +75,32 @@ const UNDERLINE_THICKNESS: f32 = 1.5;
 /// Max distinct glyph buffers cached for the per-cell render path before a
 /// wholesale clear — bounds memory (system-impact discipline).
 const GLYPH_CACHE_CAP: usize = 4096;
+
+/// CPU-render port: byte ceiling on `swash_cache`'s rasterized-glyph images
+/// before a wholesale clear.
+///
+/// This matters far more on the CPU path than it did under wgpu. There,
+/// `SwashCache` was a staging step feeding glyphon's atlas, which has its own
+/// `trim()`; here it *is* the glyph cache. `SwashCache` exposes no eviction of
+/// its own, and its keys include font + size + sub-pixel x bucket, so font-size
+/// churn (dragging the Cmd+G sliders) mints fresh entries indefinitely — it
+/// would grow without bound for the life of the process.
+///
+/// Bounded by bytes, not entry count, because entry sizes differ by ~100×: an
+/// ASCII coverage mask is a few hundred bytes, a colour emoji bitmap tens of KB.
+/// A count cap that's comfortable for text would be tens of MB of emoji. 16 MB
+/// holds on the order of 80k text glyphs — far past any real working set — and
+/// the clear costs one frame of re-rasterization, the same blunt policy
+/// `GLYPH_CACHE_CAP` already uses.
+const SWASH_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Bookkeeping charged per `swash_cache` entry on top of its bitmap: the
+/// `CacheKey`, the `Option<SwashImage>` it maps to, and the map's slot. Ensures
+/// entries that rasterize to *nothing* (a space, a glyph swash declines) still
+/// count against `SWASH_CACHE_MAX_BYTES` — otherwise a churn of empty entries
+/// would grow the map forever with the byte counter stuck at zero. Deliberately
+/// generous; it only has to make the ceiling reachable.
+const SWASH_ENTRY_OVERHEAD: usize = 96;
 
 /// Config RGB (sRGB) → wgpu clear colour. The surface is sRGB, so the GPU
 /// re-encodes on store; convert sRGB → linear here so the authored colour lands
@@ -369,6 +395,11 @@ pub struct Renderer {
     /// cleared wholesale on overflow (a blunt but allocation-safe cap).
     glyph_cache: std::collections::HashMap<(String, bool, bool, u32), Buffer>,
     swash_cache: SwashCache,
+    /// CPU-render port: bytes of rasterized glyph image held in
+    /// `swash_cache.image_cache`, accumulated as `blit_text_area` inserts. Only
+    /// the CPU path maintains it (the wgpu path never reads those images back);
+    /// checked against `SWASH_CACHE_MAX_BYTES` once per frame.
+    swash_cache_bytes: usize,
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
@@ -919,6 +950,7 @@ impl Renderer {
             font_system,
             glyph_cache: std::collections::HashMap::new(),
             swash_cache,
+            swash_cache_bytes: 0,
             viewport,
             atlas,
             text_renderer,

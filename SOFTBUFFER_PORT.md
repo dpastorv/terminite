@@ -36,6 +36,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 1 — softbuffer bg present behind `TERMINITE_CPU=1` | ✅ coexistence confirmed (softbuffer owns the window despite wgpu) | `5873ab3` |
 | Step 2 — CPU-rasterize rect layers (bg, cursor, selection, dividers, tab strips, modal/menu bg) | ✅ chrome skeleton renders positionally correct | `00bef89` |
 | Step 3 — CPU text (layer display list + cosmic-text raster) | ✅ **visual confirmed** — Daniel: "looks the same as the other one", Cmd+G card included. ⏳ flash verdict still pending a longer soak. | `96e588f` |
+| Step 4 — images (bilinear blit, single-copy residency) | ✅ code + footprint/leak audit; ⏳ needs an eyeball on a Preview / Kitty pane | (this commit) |
 
 Run the WIP: `TERMINITE_CPU=1 cargo run` → full chrome + **readable text**
 (content grid, tab labels, overlays); images are still step 4. Plain
@@ -115,28 +116,86 @@ warning set **byte-identical** to `e240a7f` (no new lints), both binaries run
 without panicking. cosmic-text promoted dev-dep → real dep; `cargo tree` confirms
 one copy (0.18.2) shared with glyphon.
 
-### Known gaps / follow-ups (not step-3 blockers)
+### Known gaps / follow-ups
 
-- **Pre-existing wgpu bug, mirrored deliberately:** the claims / Room Who overlay
-  (`claims_overlay`, set by proto) draws its card background via the `above`
-  layer, but its *text* goes through the modal text layer — and that layer's
-  render gate is `modal || context_menu || palette || display_settings`, which
-  doesn't include `claims_overlay`. So when only that overlay is up, the card
-  renders as an **empty box** with no text. The CPU path reproduces this so the
-  two backends compare apples-to-apples. One-line fix (add
-  `|| self.claims_overlay.is_some()` to `overlay_up`) — Daniel's call whether to
-  take it here or on `main` separately.
-- **`SwashCache` has no eviction.** Under wgpu it was a staging step feeding
-  glyphon's atlas (which has `trim()`); on the CPU path it *is* the glyph cache.
-  Entries key on glyph + size + sub-pixel x bin, so it grows with font-size
-  churn (Cmd+G sliders). Masks are small (~a few hundred bytes), so low MB — but
-  worth a bounded cache at step 5/6 alongside the existing RSS kill switch.
 - **Colour glyphs (emoji)** blend straight-alpha. If swash hands back
   premultiplied RGBA the edges will read slightly dark. Untested — the spike
   didn't cover emoji.
 - Text composites in **sRGB** (softbuffer's format), whereas the wgpu rect shader
   linearizes. Expect text to read very slightly bolder or thinner than the GPU
   build. Within the "similar, not pixel-perfect" bar.
+- **Per-frame `TextArea` churn.** A shell pane materializes one `TextArea` per
+  visible cell each frame (~12k at full-screen Retina, ~700 KB allocated and
+  freed). That's inherited from the wgpu path — glyphon's `prepare` needed it —
+  but the CPU path could rasterize straight from `cell_glyphs` and skip the Vec
+  entirely. Worth doing once glyphon is gone (step 5/6); it's allocator traffic,
+  not a leak.
+
+## STEP 4 — images ✅
+
+Decoded images now blit into the CPU buffer (`blit_image`), slotted into the
+display list between `above` and `tab_bar` — where `texture_renderer.render`
+sits in the wgpu pass. Bilinear-sampled to match the texture pipeline's
+`FilterMode::Linear`: nearest-neighbour visibly aliases a downscaled photo, and
+downscaling is the common case since `render` fits images to the pane and never
+upscales. Same `MAX_INSTANCES` cap as the GPU instance buffer, so both backends
+drop the same extras.
+
+`TextureImage` grew a CPU representation, and the two are **mutually
+exclusive** — `upload(.., for_cpu)` either uploads to the GPU *or* keeps the
+decoded RGBA, never both. So an image still costs `w × h × 4` exactly once on
+either path, rather than doubling while the backends coexist. `bind_group()`
+returns `Option` accordingly. Step 5 drops the GPU half.
+
+## Footprint / leak audit (Daniel asked, 2026-07-27)
+
+Measured, `./target/debug/terminite`, one shell pane idle (cursor blink drives
+~2 frames/sec):
+
+| | RSS | drift |
+|---|---|---|
+| wgpu | 105 MB | 0 MB over 15s |
+| CPU (`TERMINITE_CPU=1`) | 174–177 MB | 0 MB over **60s** (~120 frames), trending slightly *down* |
+
+**CPU mode is currently ~72 MB heavier, not leaner** — and that's the expected
+shape of the transition, not a regression to chase. `TERMINITE_CPU=1` stands up
+softbuffer *alongside* a fully-constructed wgpu (device, queue, surface, three
+glyphon renderers, the atlas), because the `Renderer` fields aren't optional
+yet. The delta is softbuffer's Retina pixel buffer plus the glyph cache, stacked
+on top of a wgpu stack that's still resident. **Step 5 is where the footprint
+win lands**, by deleting the wgpu side — that's what makes the number move.
+
+Flat RSS across 60s is the useful signal here: the per-frame path allocates
+nothing that it doesn't release.
+
+What's bounded, and by what:
+- **`swash_cache.image_cache`** — `SWASH_CACHE_MAX_BYTES` (16 MB), blunt clear +
+  one frame of re-rasterization. This was a real unbounded-growth bug introduced
+  by step 3: `SwashCache` exposes **no eviction of its own**, and under wgpu that
+  didn't matter (it fed glyphon's atlas, which has `trim()`) — on the CPU path it
+  *is* the glyph cache. Keys include font + size + sub-pixel x bucket, so
+  dragging the Cmd+G sliders mints fresh entries indefinitely. Bounded by bytes
+  rather than entry count because entry sizes differ ~100× (ASCII mask ≈ a few
+  hundred bytes, colour emoji ≈ tens of KB). Every new key is also charged
+  `SWASH_ENTRY_OVERHEAD`, so keys that cache to *no* bitmap (a space, a glyph
+  swash declines) still count — otherwise a churn of empty entries would grow the
+  map forever with the counter stuck at zero.
+- **`glyph_cache`** — `GLYPH_CACHE_CAP`, pre-existing.
+- **Images** — one copy, on one side, per above. No eviction of the images
+  themselves, but that's bounded per tab and pre-existing.
+- **RSS kill switch** — `check_rss_kill_switch` still runs first thing in
+  `render()` on both paths.
+
+Crash safety: `blend_px` / `blit_rect` / `blit_image` are unit-tested against
+degenerate input — off-buffer, zero-size, NaN origin/extent, absurd 1e9 rects,
+and a source shorter than `w × h × 4` (truncated decode). All clip or refuse;
+none draw, none panic. Glyph and image writes are proven in-bounds by
+construction (the clip is resolved into source-relative row/column ranges before
+the inner loop). `overflow-checks` is off in this profile, so a wrapped
+coordinate wouldn't trap on the arithmetic — but Rust's slice bounds checks are
+always on, so the worst case is a clean panic, never memory corruption. Nothing
+here can take the kernel down; there's no unsafe code and no driver call on the
+CPU path.
 
 ## STEP 3 — original plan (kept for reference)
 
@@ -183,13 +242,16 @@ refactor naturally captures them.
 Payoffs at step 3: first **readable** CPU frame (the real look/feel eyeball) and
 the **real flash verdict** (text + activity finally exercise async present).
 
-## Remaining steps after 3
+## Remaining steps
 
-- **Step 4 — images:** blit decoded images (Preview module, Kitty graphics) into
-  the buffer. Currently `src/texture.rs` (wgpu `TextureRenderer`). CPU = copy
-  RGBA → 0RGB into the target rect.
 - **Step 5 — cut wgpu:** remove wgpu + glyphon deps, delete the GPU present path,
-  make CPU the only path (drop the flag). The footprint/compile-time win lands here.
+  make CPU the only path (drop the flag). The footprint/compile-time win lands
+  here — see the audit above for why CPU mode is *heavier* until this lands.
+  Mechanical parts: `TextureImage::gpu` goes away; the three glyphon renderers,
+  the atlas, `viewport`, `device`/`queue`/`surface` go away; glyphon's `TextArea`
+  / `TextBounds` get local definitions (a field-for-field copy — `Color` is
+  already cosmic-text's type, re-exported); `blit_text_area` stops needing
+  glyphon at all. The display list means `render()` itself barely changes.
 - **Step 6 — prove & merge:** run CPU-terminite vs the wgpu build. Bar (Daniel's
   words): **"similar, not pixel-perfect, is fine."** Must look right, feel as
   smooth, and — the whole point — **never flash**. Then merge to `main`.

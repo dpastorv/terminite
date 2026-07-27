@@ -606,6 +606,10 @@ impl Renderer {
         // prep, drawn in the render pass between content and the tab bar.
         let mut texture_instances: Vec<TextureInstance> = Vec::new();
         let mut texture_bgs: Vec<wgpu::BindGroup> = Vec::new();
+        // CPU-path counterpart to `texture_bgs`, index-parallel with
+        // `texture_instances`. Only one of the two is ever populated: an image is
+        // resident either on the GPU or on the CPU, never both.
+        let mut texture_imgs: Vec<&TextureImage> = Vec::new();
 
         // ── Per-cell glyph cache: every visible shell cell needs a shaped
         //    single-grapheme buffer (keyed by grapheme + style + size) before
@@ -915,7 +919,13 @@ impl Renderer {
                     texture_instances.push(TextureInstance {
                         rect: [x, y, sw, sh],
                     });
-                    texture_bgs.push(tex.bind_group().clone());
+                    // Exactly one of these gets an entry, per the backend the
+                    // image was uploaded for. Both stay index-parallel with
+                    // `texture_instances` because the two paths are exclusive.
+                    if let Some(bg) = tex.bind_group() {
+                        texture_bgs.push(bg.clone());
+                    }
+                    texture_imgs.push(tex);
                 }
                 // Block IDs (`Bn`) gutter labels — OFF by default. The block
                 // model is still tracked from OSC 133; we just don't draw the
@@ -1051,10 +1061,15 @@ impl Renderer {
         // Overlays (modal / menu / palette / display-settings card) sit on top
         // of everything and share one rect layer + one text layer. Empty when
         // none is up, in which case both layers are no-ops.
+        // `claims_overlay` belongs here too: its card background rides the
+        // `above` layer but its text goes through this text layer, so leaving it
+        // out of the gate rendered the card as an empty box. Pre-existing on the
+        // wgpu path; fixed for both backends.
         let overlay_up = self.modal.is_some()
             || self.context_menu.is_some()
             || self.palette.is_some()
-            || self.display_settings.is_some();
+            || self.display_settings.is_some()
+            || self.claims_overlay.is_some();
 
         // ── CPU-render port (spike/softbuffer) ───────────────────────────────
         // Every layer of the frame is now collected, in the order the wgpu
@@ -1062,12 +1077,22 @@ impl Renderer {
         // collect-then-consume restructure: text lands *between* rect layers, so
         // a CPU backend can't present rects and add glyphs afterwards.
         if let Some(sb) = self.sb_surface.as_mut() {
+            // `swash_cache` has no eviction of its own and here it *is* the glyph
+            // cache, so bound it before adding this frame's glyphs. Blunt clear +
+            // one frame of re-rasterization, same policy as `glyph_cache`.
+            if self.swash_cache_bytes > SWASH_CACHE_MAX_BYTES {
+                self.swash_cache.image_cache.clear();
+                self.swash_cache_bytes = 0;
+            }
             let size = self.window.inner_size();
             let layers = [
                 CpuLayer::Rects(&below),
                 CpuLayer::Text(&content_areas),
                 CpuLayer::Rects(&above),
-                // Images (texture_instances) go here — step 4.
+                CpuLayer::Images {
+                    rects: &texture_instances,
+                    imgs: &texture_imgs,
+                },
                 CpuLayer::Rects(&tab_bar),
                 CpuLayer::Text(&tab_areas),
                 CpuLayer::Rects(if overlay_up { &overlay_rects } else { &[] }),
@@ -1077,6 +1102,7 @@ impl Renderer {
                 sb,
                 &mut self.font_system,
                 &mut self.swash_cache,
+                &mut self.swash_cache_bytes,
                 (size.width.max(1), size.height.max(1)),
                 self.config.background,
                 &layers,
@@ -1635,16 +1661,23 @@ fn blit_rect(buf: &mut [u32], stride: usize, height: usize, r: &RectInstance) {
 ///   x = physical(left, top).x + image.placement.left
 ///   y = round(line_y × scale) + physical(left, top).y − image.placement.top
 ///
-/// `SwashCache::with_pixels` supplies the two `placement` terms, and rasterizes
-/// each glyph once per cache key — the CPU analogue of glyphon's atlas. Glyphs
-/// are clipped per-pixel to `area.bounds` (glyphon clips the quad instead; same
-/// result) and to the buffer.
+/// `swash_cache` supplies the two `placement` terms and rasterizes each glyph
+/// once per cache key — the CPU analogue of glyphon's atlas. Glyphs are clipped
+/// to `area.bounds` (glyphon clips the quad instead; same result) and to the
+/// buffer, with the clip resolved per row rather than per pixel.
+///
+/// `cache_bytes` accumulates the size of every image this call adds to
+/// `swash_cache`, so the caller can bound a cache that has no eviction of its
+/// own — see `SWASH_CACHE_MAX_BYTES`. That's also why this walks the cache by
+/// hand instead of calling `SwashCache::with_pixels`: `with_pixels` hides
+/// whether a glyph was a hit or a miss, leaving no way to account for growth.
 fn blit_text_area(
     buf: &mut [u32],
     stride: usize,
     height: usize,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
+    cache_bytes: &mut usize,
     area: &TextArea,
 ) {
     // Clip box = the area's bounds intersected with the buffer. `bounds` is
@@ -1673,26 +1706,147 @@ fn blit_text_area(
         for glyph in run.glyphs.iter() {
             let pg = glyph.physical((area.left, area.top), area.scale);
             let color = glyph.color_opt.unwrap_or(area.default_color);
-            let (gx, gy) = (pg.x, pg.y + line_y);
-            swash_cache.with_pixels(font_system, pg.cache_key, color, |ox, oy, px| {
-                let a = px.a() as u32;
-                if a == 0 {
-                    return;
+            // Account for a first-time rasterization before `get_image` caches it.
+            // Every new key is charged `SWASH_ENTRY_OVERHEAD` on top of its
+            // bitmap, because plenty of keys cache to no bitmap at all — a space,
+            // a glyph swash declines to render — and those still occupy a map
+            // slot. Charging bytes alone would let a churn of empty entries grow
+            // the map forever while the counter sat at zero, so the ceiling would
+            // never trip.
+            let is_new = !swash_cache.image_cache.contains_key(&pg.cache_key);
+            let cached = swash_cache.get_image(font_system, pg.cache_key);
+            if is_new {
+                let bitmap = cached.as_ref().map_or(0, |i| i.data.len());
+                *cache_bytes =
+                    cache_bytes.saturating_add(bitmap + SWASH_ENTRY_OVERHEAD);
+            }
+            let Some(img) = cached.as_ref() else { continue };
+            let p = img.placement;
+            if p.width == 0 || p.height == 0 {
+                continue;
+            }
+            // Glyph bitmap's top-left in buffer space.
+            let gx = pg.x + p.left;
+            let gy = pg.y + line_y - p.top;
+            // Resolve the clip once: which rows/cols of the bitmap survive.
+            let ox0 = (cl as i32 - gx).max(0);
+            let oy0 = (ct as i32 - gy).max(0);
+            let ox1 = (cr as i32 - gx).min(p.width as i32);
+            let oy1 = (cb as i32 - gy).min(p.height as i32);
+            if ox1 <= ox0 || oy1 <= oy0 {
+                continue;
+            }
+            let (cr8, cg8, cb8) = (color.r() as u32, color.g() as u32, color.b() as u32);
+            let is_color = matches!(img.content, cosmic_text::SwashContent::Color);
+            // SubpixelMask is unimplemented upstream; swash never emits it here.
+            if !is_color && !matches!(img.content, cosmic_text::SwashContent::Mask) {
+                continue;
+            }
+            let bpp = if is_color { 4 } else { 1 };
+            let row_bytes = p.width as usize * bpp;
+            if img.data.len() < row_bytes * p.height as usize {
+                continue; // truncated bitmap — refuse rather than index past it
+            }
+            for oy in oy0..oy1 {
+                let src_row = oy as usize * row_bytes;
+                let dst_row = (gy + oy) as usize * stride;
+                for ox in ox0..ox1 {
+                    let i = src_row + ox as usize * bpp;
+                    let (sr, sg, sb, a) = if is_color {
+                        (
+                            img.data[i] as u32,
+                            img.data[i + 1] as u32,
+                            img.data[i + 2] as u32,
+                            img.data[i + 3] as u32,
+                        )
+                    } else {
+                        // Mask: one coverage byte, painted in the run's colour.
+                        (cr8, cg8, cb8, img.data[i] as u32)
+                    };
+                    if a == 0 {
+                        continue;
+                    }
+                    blend_px(&mut buf[dst_row + (gx + ox) as usize], sr, sg, sb, a);
                 }
-                let x = gx + ox;
-                let y = gy + oy;
-                if x < cl as i32 || x >= cr as i32 || y < ct as i32 || y >= cb as i32 {
-                    return;
-                }
-                let idx = y as usize * stride + x as usize;
-                blend_px(
-                    &mut buf[idx],
-                    px.r() as u32,
-                    px.g() as u32,
-                    px.b() as u32,
-                    a,
-                );
-            });
+            }
+        }
+    }
+}
+
+/// CPU-render port: blit one decoded image into `dst`, scaled into `rect`.
+///
+/// Bilinear-sampled, matching the texture pipeline's `FilterMode::Linear` —
+/// nearest-neighbour visibly aliases a downscaled photo, and downscaling is the
+/// common case (`render` fits images to the pane and never upscales). Source
+/// alpha is straight, blended the same way as `wgpu::BlendState::ALPHA_BLENDING`.
+///
+/// Filtering happens in sRGB space, whereas the GPU samples an
+/// `Rgba8UnormSrgb` texture and therefore filters in linear space. On a
+/// high-contrast edge that shows up as a marginally different mid-tone; it's the
+/// same simplification `blit_rect` already makes, and well inside the
+/// "similar, not pixel-perfect" bar.
+fn blit_image(
+    dst: &mut [u32],
+    stride: usize,
+    height: usize,
+    rect: [f32; 4],
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+) {
+    let (dw, dh) = (rect[2], rect[3]);
+    if dw <= 0.0 || dh <= 0.0 || sw == 0 || sh == 0 {
+        return;
+    }
+    // A short row means a truncated decode; refuse rather than index past it.
+    if src.len() < sw as usize * sh as usize * 4 {
+        return;
+    }
+    let x0 = rect[0].max(0.0) as usize;
+    let y0 = rect[1].max(0.0) as usize;
+    let x1 = ((rect[0] + dw).max(0.0) as usize).min(stride);
+    let y1 = ((rect[1] + dh).max(0.0) as usize).min(height);
+    let sample = |sx: usize, sy: usize| -> (f32, f32, f32, f32) {
+        let i = (sy * sw as usize + sx) * 4;
+        (
+            src[i] as f32,
+            src[i + 1] as f32,
+            src[i + 2] as f32,
+            src[i + 3] as f32,
+        )
+    };
+    for y in y0..y1 {
+        // Destination pixel centre → source coordinate, same mapping the quad's
+        // 0..1 uv gives: u = (dx + 0.5) / dw, then su = u * sw - 0.5.
+        let fy = ((y as f32 + 0.5 - rect[1]) / dh * sh as f32 - 0.5).clamp(0.0, sh as f32 - 1.0);
+        let sy0 = fy as usize;
+        let sy1 = (sy0 + 1).min(sh as usize - 1);
+        let wy = fy - sy0 as f32;
+        let row = y * stride;
+        for x in x0..x1 {
+            let fx =
+                ((x as f32 + 0.5 - rect[0]) / dw * sw as f32 - 0.5).clamp(0.0, sw as f32 - 1.0);
+            let sx0 = fx as usize;
+            let sx1 = (sx0 + 1).min(sw as usize - 1);
+            let wx = fx - sx0 as f32;
+            // Bilinear across the four neighbours (ClampToEdge via the mins above).
+            let (a00, a10) = (sample(sx0, sy0), sample(sx1, sy0));
+            let (a01, a11) = (sample(sx0, sy1), sample(sx1, sy1));
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let mix = |c0: f32, c1: f32, c2: f32, c3: f32| {
+                lerp(lerp(c0, c1, wx), lerp(c2, c3, wx), wy)
+            };
+            let a = mix(a00.3, a10.3, a01.3, a11.3);
+            if a <= 0.0 {
+                continue;
+            }
+            blend_px(
+                &mut dst[row + x],
+                mix(a00.0, a10.0, a01.0, a11.0) as u32,
+                mix(a00.1, a10.1, a01.1, a11.1) as u32,
+                mix(a00.2, a10.2, a01.2, a11.2) as u32,
+                a as u32,
+            );
         }
     }
 }
@@ -1700,10 +1854,16 @@ fn blit_text_area(
 /// One z-ordered layer of a CPU frame. `render()` hands `present_cpu` a slice of
 /// these in wgpu's draw order — this is the "display list" the port needs, at
 /// layer granularity rather than per command, because rects and text interleave
-/// at a fixed set of layers, not arbitrarily. Step 4 adds an `Image` variant.
+/// at a fixed set of layers, not arbitrarily.
 enum CpuLayer<'a> {
     Rects(&'a [RectInstance]),
     Text(&'a [TextArea<'a>]),
+    /// Decoded images. `rects[i]` is where `imgs[i]` is drawn — the same
+    /// index-parallel pairing the wgpu path uses for its per-image bind groups.
+    Images {
+        rects: &'a [TextureInstance],
+        imgs: &'a [&'a TextureImage],
+    },
 }
 
 /// CPU-render port: rasterize a frame's layers into the softbuffer surface and
@@ -1717,6 +1877,7 @@ fn present_cpu(
     sb: &mut softbuffer::Surface<Arc<Window>, Arc<Window>>,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
+    cache_bytes: &mut usize,
     (w, h): (u32, u32),
     bg: (u8, u8, u8),
     layers: &[CpuLayer],
@@ -1746,7 +1907,25 @@ fn present_cpu(
             }
             CpuLayer::Text(areas) => {
                 for a in *areas {
-                    blit_text_area(&mut buf, stride, height, font_system, swash_cache, a);
+                    blit_text_area(
+                        &mut buf,
+                        stride,
+                        height,
+                        font_system,
+                        swash_cache,
+                        cache_bytes,
+                        a,
+                    );
+                }
+            }
+            CpuLayer::Images { rects, imgs } => {
+                // Same cap the instance buffer enforces on the GPU path, so an
+                // absurd image count drops the same extras on both backends.
+                for (inst, img) in rects.iter().zip(imgs.iter()).take(MAX_INSTANCES) {
+                    let Some(px) = img.pixels() else { continue };
+                    blit_image(
+                        &mut buf, stride, height, inst.rect, px, img.width, img.height,
+                    );
                 }
             }
         }
@@ -1837,8 +2016,94 @@ pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32,
 
 #[cfg(test)]
 mod tests {
-    use super::surface_retry_delay;
+    use super::{blend_px, blit_image, blit_rect, surface_retry_delay, RectInstance};
     use std::time::Duration;
+
+    // ── CPU-render port: the blitters ────────────────────────────────────
+    // These run on every frame the softbuffer backend draws, against geometry
+    // derived from window size, scroll offsets and PTY content. A panic here is
+    // a hard crash of the terminal, so the degenerate cases are pinned down
+    // rather than reasoned about.
+
+    #[test]
+    fn blend_px_composites_straight_alpha() {
+        // Opaque source replaces the destination outright.
+        let mut p = 0x00_00_00;
+        blend_px(&mut p, 0xff, 0x00, 0x00, 255);
+        assert_eq!(p, 0xff_00_00);
+        // Fully transparent source leaves it untouched.
+        let mut p = 0x12_34_56;
+        blend_px(&mut p, 0xff, 0xff, 0xff, 0);
+        assert_eq!(p, 0x12_34_56);
+        // Half-covered white over black lands mid-grey, per channel.
+        let mut p = 0x00_00_00;
+        blend_px(&mut p, 0xff, 0xff, 0xff, 128);
+        assert_eq!(p, 0x80_80_80);
+    }
+
+    #[test]
+    fn blit_rect_clips_instead_of_panicking() {
+        let mut buf = vec![0u32; 16];
+        let white = [1.0, 1.0, 1.0, 1.0];
+        // Off the top-left, off the bottom-right, zero-size, and NaN in either
+        // the origin or the extent. None may panic; none may draw.
+        for rect in [
+            [-100.0, -100.0, 10.0, 10.0],
+            [100.0, 100.0, 10.0, 10.0],
+            [1.0, 1.0, 0.0, 0.0],
+            [f32::NAN, f32::NAN, 4.0, 4.0],
+            [0.0, 0.0, f32::NAN, f32::NAN],
+        ] {
+            blit_rect(&mut buf, 4, 4, &RectInstance { rect, color: white });
+        }
+        assert!(buf.iter().all(|&p| p == 0), "a degenerate rect drew pixels");
+        // An absurdly large rect clamps to the buffer rather than overrunning it.
+        blit_rect(&mut buf, 4, 4, &RectInstance { rect: [0.0, 0.0, 1e9, 1e9], color: white });
+        assert!(buf.iter().all(|&p| p == 0xff_ff_ff));
+    }
+
+    #[test]
+    fn blit_image_refuses_degenerate_input() {
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 2 * 2 * 4]; // opaque white 2×2
+        // Zero source dimension; zero destination rect; a source shorter than
+        // width*height*4 (a truncated decode); wholly off-buffer placements.
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 0, 2);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 2, 0);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 0.0, 0.0], &src, 2, 2);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src[..4], 2, 2);
+        blit_image(&mut buf, 4, 4, [-10.0, -10.0, 2.0, 2.0], &src, 2, 2);
+        blit_image(&mut buf, 4, 4, [1e9, 1e9, 1e9, 1e9], &src, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0), "a degenerate image drew pixels");
+    }
+
+    #[test]
+    fn blit_image_fills_its_rect_and_honours_alpha() {
+        // Opaque source covers every pixel of the destination rect.
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 2 * 2 * 4];
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0xff_ff_ff));
+
+        // A fully transparent source leaves the destination alone, whatever its
+        // colour channels say — straight alpha, matching ALPHA_BLENDING.
+        let mut buf = vec![0x11_22_33u32; 16];
+        let clear: Vec<u8> = [0xff, 0xff, 0xff, 0x00].repeat(4);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &clear, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0x11_22_33));
+    }
+
+    #[test]
+    fn blit_image_writes_only_inside_its_rect() {
+        // A 2×2 destination in the corner of a 4×4 buffer must leave the other
+        // twelve pixels untouched — images are not clipped to a pane box, they
+        // rely on this staying inside the rect `render` computed.
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 4];
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 2.0, 2.0], &src, 1, 1);
+        let lit: Vec<usize> = (0..16).filter(|&i| buf[i] != 0).collect();
+        assert_eq!(lit, vec![0, 1, 4, 5]);
+    }
 
     #[test]
     fn surface_retry_backoff_is_exponential_then_capped() {
