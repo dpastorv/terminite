@@ -35,7 +35,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Spike (perf + flash proof) | ✅ | `c04bbe9` |
 | Step 1 — softbuffer bg present behind `TERMINITE_CPU=1` | ✅ coexistence confirmed (softbuffer owns the window despite wgpu) | `5873ab3` |
 | Step 2 — CPU-rasterize rect layers (bg, cursor, selection, dividers, tab strips, modal/menu bg) | ✅ chrome skeleton renders positionally correct | `00bef89` |
-| Step 3 — CPU text (layer display list + cosmic-text raster) | ⏳ code landed, **awaiting Daniel's visual + flash verdict** | (this commit) |
+| Step 3 — CPU text (layer display list + cosmic-text raster) | ✅ **visual confirmed** — Daniel: "looks the same as the other one", Cmd+G card included. ⏳ flash verdict still pending a longer soak. | `96e588f` |
 
 Run the WIP: `TERMINITE_CPU=1 cargo run` → full chrome + **readable text**
 (content grid, tab labels, overlays); images are still step 4. Plain
