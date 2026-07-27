@@ -1019,22 +1019,34 @@ impl Renderer {
             CpuLayer::Rects(if overlay_up { &overlay_rects } else { &[] }),
             CpuLayer::Text(if overlay_up { &overlay_areas } else { &[] }),
         ];
-        // Buffer sized from `surface_size`, the same value every rect and glyph
-        // position above was computed against — not from a fresh
-        // `inner_size()`, which can already have moved and would place this
-        // frame's content for one size inside a buffer of another. A resize we
-        // haven't processed yet costs one stretched frame, then `resize`'s
-        // `request_redraw` repaints; that's the behaviour the wgpu path had too.
+        // The buffer is sized from the LIVE window size, not `surface_size`.
+        //
+        // Step 5 briefly used `surface_size` so content placement and buffer
+        // size always agreed. That was the wrong trade: if a resize hasn't been
+        // processed yet, `surface_size` is stale and the presented image is
+        // *smaller than the window* — and the uncovered strip is not merely
+        // wrong, it is a hole. There's nothing behind our layer but the desktop.
+        // Sizing to the window means the background fill always covers it; the
+        // worst case is content positioned for the previous size for one frame,
+        // which is a cosmetic glitch rather than a see-through one.
+        let live = self.window.inner_size();
+        let (pw, ph) = (live.width.max(1), live.height.max(1));
+        if pw != self.surface_size.width || ph != self.surface_size.height {
+            // A Resized event we haven't handled yet. Cheap and rare, so log it:
+            // if a flash ever correlates with this line, that's the mechanism.
+            crate::logging::warn(&format!(
+                "render: window {pw}x{ph} != surface_size {}x{} — painting at \
+                 window size; layout is one frame stale",
+                self.surface_size.width, self.surface_size.height
+            ));
+        }
         self.window.pre_present_notify();
         present_cpu(
             &mut self.sb_surface,
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.swash_cache_bytes,
-            (
-                self.surface_size.width.max(1),
-                self.surface_size.height.max(1),
-            ),
+            (pw, ph),
             self.bg_color,
             &layers,
         );

@@ -190,6 +190,65 @@ pub(super) fn match_window_colorspace(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub(super) fn match_window_colorspace(_window: &Window) {}
 
+/// Force the window's layer **and every sublayer** opaque (macOS only).
+///
+/// Restores `c0057da`, which step 5 deleted on the mistaken grounds that it was
+/// a wgpu mitigation. It isn't: layer opacity is a property of the *window's*
+/// layer, which exists under any renderer. That commit was also explicit that
+/// this never stopped the one-frame blink — it only changes what the blink
+/// *shows*: "the blink still happens but flashes the layer's own dark backing
+/// rather than the desktop/Dock."
+///
+/// The sublayer part is new and matters here. softbuffer doesn't draw into the
+/// view's layer; `Surface::new` adds its own (`cg.rs`: `CALayer::new()` +
+/// `root_layer.addSublayer`), and a fresh `CALayer` defaults to
+/// `opaque = false`. So a see-through sublayer sat over a root layer we'd
+/// stopped forcing opaque — strictly worse than before the port.
+///
+/// **Call after the softbuffer surface exists**, or its sublayer isn't there yet.
+///
+/// Our pixels are fully opaque (0RGB, no alpha channel in play), so declaring
+/// the layers opaque is honest, and it lets the compositor skip blending.
+#[cfg(target_os = "macos")]
+pub(super) fn set_window_layers_opaque(window: &Window) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    // SAFETY: on AppKit `ns_view` is a live NSView for the window's lifetime. We
+    // read its layer and that layer's sublayers, and set the well-known,
+    // side-effect-free `opaque` property. No ownership transfer.
+    unsafe {
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        if view.is_null() {
+            return;
+        }
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if layer.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setOpaque: true];
+        // `sublayers` is an NSArray<CALayer> or nil.
+        let subs: *mut AnyObject = msg_send![layer, sublayers];
+        if subs.is_null() {
+            return;
+        }
+        let count: usize = msg_send![subs, count];
+        for i in 0..count {
+            let sub: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+            if !sub.is_null() {
+                let _: () = msg_send![sub, setOpaque: true];
+            }
+        }
+    }
+}
+
+/// No-op off macOS.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn set_window_layers_opaque(_window: &Window) {}
+
 /// Scale each edge of a `Padding` by the display scale factor (HiDPI).
 fn scale_padding(p: Padding, scale: f32) -> Padding {
     Padding {
@@ -746,6 +805,10 @@ impl Renderer {
         // `Surface` is self-contained in softbuffer 0.4 — it keeps no borrow of
         // the context, so the local can drop here.
         drop(sb_context);
+        // After the surface: softbuffer's sublayer has to exist before we can
+        // force it opaque. See the fn's docs — a see-through layer is what turns
+        // any dropped frame into a view of the desktop.
+        set_window_layers_opaque(&window);
         let surface_size = SurfaceSize { width, height };
 
         let mut font_system = FontSystem::new();

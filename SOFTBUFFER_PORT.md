@@ -47,7 +47,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
 | sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
-| **The flash** | ✅ **not reproduced.** Daniel, after 17 min / 4153 frames of continuous redraw: "i have not seen the flash so far… i should have seen it by now" | — |
+| **The flash** | ❌ **REPRODUCED ON THE CPU BUILD.** Daniel saw it, ~20 min in. Premise in doubt — see "Research verdict" | `a1b2` |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
@@ -371,12 +371,12 @@ this documented as a known property, not an action item. **Profile first.**
     the window sRGB (`0eabb16`).
   - Visual parity at steps 3 and 4, confirmed by Daniel.
 
-  - **The flash: not reproduced.** Daniel's call after 17 minutes and 4,153
-    frames on the CPU build: *"i have not seen the flash so far… i should have
-    seen it by now."* Worth more than a quiet window: `fd98a73` recorded that the
-    flash **only occurs while the screen is actively changing**, and that session
-    ran two agent panes with animated spinners throughout — the trigger was
-    saturated, not absent. This is the reason the port exists, and it holds.
+  - **The flash: REPRODUCED on the CPU build.** Daniel saw it ~20 minutes in,
+    after initially reporting it clean. He could not attribute it: *"i cant
+    confirm if it was something that you did or not."* **This invalidates the
+    port's founding premise** — there is no wgpu, no Metal and no CAMetalLayer in
+    this binary (verified: zero such symbols), so "the flash is wgpu async
+    present" cannot be the whole story. See the reopened Research verdict.
 
   **Still open — Daniel's eyes, not code questions:**
   1. **Feel** — scroll, splits, tab switching, against the wgpu build.
@@ -406,7 +406,40 @@ this documented as a known property, not an action item. **Profile first.**
   DEC 2026 via vendored alacritty/vte + event_loop.rs sync gating) and NOT layer
   opacity (`c0057da` set the CAMetalLayer opaque; didn't help). It's async present.
 
-## Research verdict (so nobody re-litigates)
+## Research verdict — REOPENED 2026-07-27
+
+**The flash reproduced on a build with no wgpu, no Metal and no CAMetalLayer.**
+Everything below was written when wgpu was the only suspect; treat it as history,
+not as settled. What still stands: `presentsWithTransaction` isn't reachable
+through wgpu, and it deadlocked Zed. What does *not* stand: that removing wgpu
+removes the flash.
+
+Two regressions of my own were found while investigating, both introduced in
+step 5 and both now fixed. Neither is confirmed as *the* cause:
+
+1. **Layer opacity was deleted.** `c0057da` set `opaque = true` on the window's
+   layer; step 5 removed it as "a wgpu mitigation," which was wrong — layer
+   opacity is a window property under any renderer. Worse, softbuffer's
+   `Surface::new` adds its *own* sublayer (`CALayer::new()`, which defaults to
+   `opaque = false`), so a see-through sublayer sat over a root layer we'd
+   stopped forcing opaque. Restored, now covering root **and** sublayers.
+   Note what `c0057da` said: opacity never stopped the blink, it only made the
+   blink show dark backing instead of the desktop. So if the flash recurs and is
+   now **dark rather than desktop**, that confirms the see-through mechanism and
+   the underlying dropped frame is still there.
+2. **Buffer sized from stale `surface_size`.** Step 5 presented at
+   `surface_size` rather than the live `inner_size()`. Before a Resized event is
+   processed those disagree, and a buffer smaller than the window leaves an
+   uncovered strip — a literal hole to the desktop. Now painted at the live
+   window size (background fill always covers), with a `logging::warn` when the
+   two disagree, so a correlation would be visible in the log.
+
+Prior investigation to build on, not repeat: `c0057da` recorded *"Confirmed not
+terminite logic — resize/surface/occlusion never fired at flash time"* under
+wgpu, and `fd98a73` found it *only happens while the screen is actively
+changing*.
+
+### Original verdict (pre-CPU-port, kept as history)
 
 - Flash root cause = wgpu async CAMetalLayer present. Fix = `presentsWithTransaction`
   + `waitUntilScheduled` (synchronous present). **wgpu doesn't expose it**, and the
