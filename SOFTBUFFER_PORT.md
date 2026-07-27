@@ -47,7 +47,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
 | sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
-| **The flash** | ❌ **REPRODUCED ON THE CPU BUILD.** Daniel saw it, ~20 min in. Premise in doubt — see "Research verdict" | `a1b2` |
+| **The flash** | ❌ **REPRODUCED ON THE CPU BUILD.** Daniel saw it ~20 min in. Premise in doubt; two of my own step-5 regressions fixed in `fefcf1b`, neither confirmed as the cause — see the reopened "Research verdict" | `fefcf1b` |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
