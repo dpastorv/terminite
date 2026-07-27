@@ -541,7 +541,12 @@ impl Renderer {
                 MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.05, // trackpad: gentle
             };
             if dy != 0.0 {
-                self.set_font_size((self.font_size + dy).round());
+                // Nudge the *logical* base size, not the physical `font_size`
+                // (= base × scale_factor). Feeding the physical value back in
+                // as the base compounds by the scale factor every notch — on a
+                // 2× display that runaway slams the zoom to MAX in a few
+                // scrolls. Same axis the Cmd +/- keys nudge.
+                self.set_font_size((self.base_font_size + dy).round());
             }
             return;
         }
