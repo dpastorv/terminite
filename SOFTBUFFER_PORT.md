@@ -13,7 +13,8 @@ Headline numbers, all measured: phys_footprint **414 → 88 MB**, render CPU
 **11 → 7.9 MB**, deps **199 → 173 crates**. Full render comparison in
 `BENCHMARKS.md`.
 
-**The flash is NOT fixed.** See "The premise was wrong" below.
+**The flash is NOT a terminite bug** — Apple Terminal exhibits it too, on an
+entirely separate stack. See "SETTLED" below. The port could never have fixed it.
 
 ## The premise was wrong
 
@@ -50,7 +51,43 @@ keep the "room" + the vibe.** The port delivers all of those. It simply does not
 deliver the thing that motivated it, and this document should not be read as
 claiming otherwise.
 
-### What is established (2026-07-28, after four failed fixes)
+### SETTLED: the flash is not terminite's bug
+
+**Apple Terminal flashes too** — Daniel, 2026-07-28: *"i think the normal
+terminal flashes too. that is one of the things that got me to create
+terminite."* It predates terminite and helped motivate building it.
+
+That completes the elimination. Four applications, four independent rendering
+stacks, no shared code between them:
+
+| app | graphics stack | flashes |
+|---|---|---|
+| terminite (pre-port) | wgpu / Metal | yes |
+| terminite (now) | softbuffer / CoreGraphics | yes |
+| alacritty | OpenGL / glutin ([#7898](https://github.com/alacritty/alacritty/issues/7898)) | yes |
+| **Apple Terminal** | **AppKit — Apple's own** | **yes** |
+
+Apple Terminal shares nothing with terminite: not winit, not Rust, not a
+renderer, not a line of code. **No application-level change can fix this, and no
+further terminite work should be spent on it.** The remaining candidates are all
+machine-level:
+
+- **ProMotion / variable refresh** (Liquid Retina XDR, adaptive 10–120 Hz).
+  Apple states non-game/video apps can flicker on adaptive-refresh displays.
+  Still the cheapest test: pin the display to 60 Hz.
+- **A system extension hooking the compositor.** `com.jamf.protect.security-extension`
+  was observed at **76–90% CPU sustained** throughout. EDR agents that capture or
+  hook the display are a known source of compositor artifacts. Untested.
+- **GPU driver / panel / macOS version** (Darwin 25.5.0).
+
+None of these is diagnosable from inside terminite, which is exactly why four
+in-app fixes changed nothing.
+
+**Everything below this point was written while the cause was still believed to
+be terminite's. It is kept as the record of how the elimination was done — the
+measurements are sound, the framing is superseded.**
+
+### What was established before that (2026-07-28, after four failed fixes)
 
 **The flash shows the DESKTOP even with the window, the content view's layer and
 softbuffer's sublayer all set `opaque = true` AND given an opaque background
