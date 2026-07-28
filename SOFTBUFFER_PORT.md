@@ -1,37 +1,86 @@
 # Softbuffer / CPU-render port — handoff
 
-Branch: `spike/softbuffer` (off `main` @ `89c3117`). `main` is the shipping
-wgpu build and is untouched — it's also the A/B reference for eyeballing the CPU
-build. Resume with: `git checkout spike/softbuffer`, read this file, then say
-**"resume step 6."**
+History of the wgpu → CPU render port, merged from `spike/softbuffer` (branched
+off `main` @ `89c3117`). The pre-port wgpu build survives as
+`/Applications/Terminite-wgpu.app` and at `89c3117` — keep both as the A/B
+reference while the flash is unexplained.
 
-Steps 1–5 are done, plus a 2.2× frame-time fix (`0eabb16`). What's left is
-Daniel's verdict on the flash, the feel, and the colours — see "Step 6" at the
-bottom. Nothing merges to `main` until he calls it.
+**MERGED to `main` 2026-07-27.** Steps 1–5 complete. Read the next section
+before quoting this document — its original premise did not survive contact.
 
-Headline numbers, all measured: footprint **414 → 88 MB**, frame time
-**18.8 → 8.67 ms**, release binary **11 → 7.9 MB**, deps **199 → 173 crates**.
+Headline numbers, all measured: phys_footprint **414 → 88 MB**, render CPU
+**1.28× less than Apple Terminal**, frame time **18.8 → 8.67 ms**, release binary
+**11 → 7.9 MB**, deps **199 → 173 crates**. Full render comparison in
+`BENCHMARKS.md`.
 
-Render cost against Apple Terminal lives in **`BENCHMARKS.md`** (tool:
-`tools/bench-render.sh`). Apple Terminal's baseline is measured; **terminite has
-not been run through it yet** — that's the open half of the comparison. Its
-worst per-byte cases are cursor addressing and SGR churn, not scrolling, so
-that's where the CPU renderer gets judged.
+**The flash is NOT fixed.** See "The premise was wrong" below.
 
-## Why we're doing this
+## The premise was wrong
 
-The intermittent macOS "desktop shows through for a frame" flash is a
-**wgpu / CAMetalLayer async-present** limitation. We ruled everything else out
-(see "Research verdict" below). The only clean fix wgpu can't give us
-(`presentsWithTransaction`) is a deadlock trap. Meanwhile Daniel's priorities
-are **small footprint, low energy, cross-platform, keep the "room" + the vibe.**
+This port was undertaken to kill an intermittent macOS "desktop shows through
+for a frame" flash, on the diagnosis that it was a **wgpu / CAMetalLayer
+async-present** limitation. That diagnosis is **wrong, or at best incomplete.**
 
-Moving off wgpu to **CPU rendering (softbuffer + cosmic-text)** hits all of it:
-- leaner (drops the whole wgpu + glyphon GPU dep stack — big binary/compile win)
-- lower idle energy (no GPU; draw on change)
-- **kills the flash** (softbuffer blits synchronously — no CAMetalLayer, no async present)
-- stays cross-platform (softbuffer = mac/linux/windows)
-- the room + all app logic are untouched (only the pixel layer changes)
+The flash has been seen **repeatedly on the CPU build** — a binary containing
+zero wgpu, Metal, glyphon or CAMetalLayer symbols, presenting synchronously
+through softbuffer. Removing every part of the suspected mechanism did not
+remove the symptom. **The root cause is unknown and this is an open bug.**
+
+Two of my own regressions were found and fixed while investigating (`fefcf1b`:
+a deleted layer-`opaque` call, and a buffer sized from stale state); neither
+was the cause. Environmental confounds were also present and not excluded — see
+"Testing protocol", which explains why one early sighting is unusable evidence
+and why a clean-room soak has still never been run.
+
+### So why was this merged?
+
+Not for the flash. It was merged on measurements that hold regardless:
+
+- **phys_footprint 414 MB → 88 MB** (4.7× smaller; ~3× leaner than Apple
+  Terminal's 288 MB)
+- **1.28× less CPU than Apple Terminal** across the render benchmark, winning
+  four of five workloads and 2.59× on SGR churn (`BENCHMARKS.md`)
+- **frame time 18.8 → 8.67 ms**, CPU ~25% → ~13% of a core
+- **release binary 11 → 7.9 MB**, **199 → 173 crates**
+- one render path instead of two, with unit-tested blitters and none of the GPU
+  failure modes (device loss, surface timeout, VRAM OOM) the wgpu path carried
+
+Daniel's original priorities were **small footprint, low energy, cross-platform,
+keep the "room" + the vibe.** The port delivers all of those. It simply does not
+deliver the thing that motivated it, and this document should not be read as
+claiming otherwise.
+
+### The leading hypothesis is now environmental
+
+The flash survived replacing the **entire** graphics stack — renderer, text
+engine, present path, GPU dependency. Daniel also observes it coming and going
+in bursts ("i have not seen it in a couple of minutes"), which fits an external
+trigger better than a code path that runs identically every frame.
+
+The machine was not quiet during any of this. Independent of terminite:
+`nesessionmanager` and `mDNSResponder` at 80–90% CPU, `com.jamf.protect` at 76–82%,
+Battle.net Helper ×2 at ~33%, and **WindowServer itself at 22%**. A compositor
+under that load drops frames in *any* window, which is exactly a symptom that
+survives a renderer swap.
+
+This is a hypothesis, not a finding — it has not been tested, and wanting it to
+be true is a reason to distrust it. The test is cheap: watch whether a
+**non-terminite** window ever flashes, and whether the flash disappears on a
+quiet machine.
+
+### Where to pick up the flash
+
+- It is **not** wgpu async present. It is **not** sync-output (DEC 2026 already
+  supported). It is **not** layer opacity (`c0057da` tried it; that only changes
+  desktop-vs-dark, never the drop itself).
+- Prior findings to build on: `c0057da` — "resize/surface/occlusion never fired
+  at flash time"; `fd98a73` — it only happens while the screen is actively
+  changing.
+- Next occurrence, capture: **dark rectangle or the desktop?** and
+  `grep surface_size ~/.terminite/log/terminite.log`.
+- Free control: if a **non-terminite** window ever flashes, it is environmental
+  (WindowServer was seen at 22% with unrelated apps loading the machine).
+- A clean-room soak per "Testing protocol" is still the missing experiment.
 
 ## What the spike proved (already de-risked)
 
@@ -53,7 +102,7 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
 | sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
-| **The flash** | ⚠️ **UNRESOLVED — evidence contaminated.** Seen once on the CPU build, but during a window I was polluting with window launches/kills, `sample`, and fat-LTO builds. Not usable evidence. Two of my step-5 regressions found and fixed in `fefcf1b` regardless. Needs a clean-room soak — see below | `fefcf1b` |
+| **The flash** | ❌ **NOT FIXED — open bug.** Seen repeatedly on the CPU build, which contains no wgpu/Metal/CAMetalLayer at all. The port's premise is disproven. Two of my step-5 regressions fixed in `fefcf1b`; neither was the cause | open |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
