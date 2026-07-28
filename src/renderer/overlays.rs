@@ -136,10 +136,10 @@ impl Renderer {
         // Keep the menu fully on-screen.
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = x
-            .min(self.surface_config.width as f32 - MENU_WIDTH - 4.0)
+            .min(self.surface_size.width as f32 - MENU_WIDTH - 4.0)
             .max(0.0);
         let my = y
-            .min(self.surface_config.height as f32 - h - 4.0)
+            .min(self.surface_size.height as f32 - h - 4.0)
             .max(0.0);
         self.context_menu = Some(ContextMenu {
             x: mx,
@@ -191,10 +191,10 @@ impl Renderer {
     fn place_menu(&mut self, items: Vec<MenuItem>, x: f32, y: f32) {
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = x
-            .min(self.surface_config.width as f32 - MENU_WIDTH - 4.0)
+            .min(self.surface_size.width as f32 - MENU_WIDTH - 4.0)
             .max(0.0);
         let my = y
-            .min(self.surface_config.height as f32 - h - 4.0)
+            .min(self.surface_size.height as f32 - h - 4.0)
             .max(0.0);
         self.context_menu = Some(ContextMenu { x: mx, y: my, items, hovered: None });
         self.window.request_redraw();
@@ -252,7 +252,7 @@ impl Renderer {
         let h = items.len() as f32 * MENU_ITEM_H;
         let mx = prect.x.max(0.0);
         let my = (prect.y + self.tab_bar_height)
-            .min(self.surface_config.height as f32 - h - 4.0)
+            .min(self.surface_size.height as f32 - h - 4.0)
             .max(0.0);
         self.context_menu = Some(ContextMenu {
             x: mx,
@@ -667,8 +667,8 @@ impl Renderer {
             0
         };
         let visible = total.saturating_sub(first).min(PALETTE_MAX_ROWS);
-        let surface_w = self.surface_config.width as f32;
-        let surface_h = self.surface_config.height as f32;
+        let surface_w = self.surface_size.width as f32;
+        let surface_h = self.surface_size.height as f32;
         let x = ((surface_w - PALETTE_WIDTH) * 0.5).max(4.0);
         let y = (surface_h * 0.16).max(8.0);
         Some((x, y, first, visible))
@@ -807,8 +807,8 @@ impl Renderer {
 
         // Display info: scale factor, resolution, suggested zoom.
         let scale = self.scale_factor;
-        let surface_w = self.surface_config.width;
-        let surface_h = self.surface_config.height;
+        let surface_w = self.surface_size.width;
+        let surface_h = self.surface_size.height;
         let logical_w = (surface_w as f32 / scale) as i32;
         let logical_h = (surface_h as f32 / scale) as i32;
         let dpi = (scale * 96.0).round() as i32;
@@ -1141,8 +1141,8 @@ impl Renderer {
             Some(m) => m,
             None => return Vec::new(),
         };
-        let surface_w = self.surface_config.width as f32;
-        let surface_h = self.surface_config.height as f32;
+        let surface_w = self.surface_size.width as f32;
+        let surface_h = self.surface_size.height as f32;
         let card_x = (surface_w - MODAL_CARD_W) * 0.5;
         let card_y = (surface_h - MODAL_CARD_H) * 0.5;
         let btn_y = card_y + MODAL_CARD_H - MODAL_BTN_H - 18.0;

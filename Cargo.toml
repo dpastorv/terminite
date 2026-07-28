@@ -20,15 +20,12 @@ strip = true
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
 arboard = "3.6.1"
 base64 = "0.22"
-bytemuck = { version = "1.25.0", features = ["derive"] }
-glyphon = "0.11.0"
 libc = "0.2"
 png = "0.17"
 # Multi-format decoder for the Preview module. Default features off
 # to skip formats we don't intend to support yet (tiff/avif/ico/…) —
 # keep this list lean and add only when we actually want them.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-pollster = "0.4.0"
 # Syntax highlighting for the Editor pane. `default-fancy` selects
 # the pure-Rust fancy-regex engine so we avoid the onig C dependency.
 # Bundled syntaxes + themes cover ~50 languages — enough to land
@@ -44,18 +41,20 @@ notify = "6"
 toml_edit = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-wgpu = "29.0.3"
 winit = "0.30.13"
+# CPU rendering. softbuffer owns the window's pixel buffer and blits it
+# synchronously; cosmic-text shapes and rasterizes the glyphs. Together these
+# replaced wgpu + glyphon — see SOFTBUFFER_PORT.md.
+softbuffer = "0.4"
+cosmic-text = "0.18"
 tungstenite = "0.29.0"
 # Extended syntect grammar set (Rust, TypeScript, TOML, …) — fancy-regex engine
 # to match our syntect `default-fancy`, so no Oniguruma C dependency.
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
 
-# macOS only: reach the CAMetalLayer wgpu attaches to the window so we can force
-# it opaque. Without that, a missing-drawable frame (a wgpu/CAMetalLayer
-# present-sync quirk) briefly shows the desktop *through* the window; opaque
-# makes that blip show our own dark background instead. Same objc2 (0.6) wgpu
-# already depends on, so no new version enters the tree.
+# macOS only: register the ApplePressAndHoldEnabled default for this process so
+# held keys repeat instead of opening the accent popover (see
+# `disable_press_and_hold`). Foundation calls only — the CAMetalLayer opacity
+# hack that used to live here went away with wgpu.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-

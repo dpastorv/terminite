@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
 /// Per-tab cap. Well past the line count of typical scrollback; oldest
 /// evict. Each block is fixed-shape plus a tiny label `Buffer`, so the
@@ -356,7 +356,7 @@ fn make_label_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glyphon::FontSystem;
+    use cosmic_text::FontSystem;
 
     fn fs() -> FontSystem {
         FontSystem::new()

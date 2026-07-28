@@ -2,39 +2,8 @@
 
 use super::*;
 
-/// Backoff delay before re-attempting a frame after `count` consecutive
-/// surface-acquisition failures. Exponential from 8ms, clamped at 250ms so a
-/// surface that stays invalid (e.g. mid display-mode renegotiation) retries
-/// at most ~4×/s instead of spinning a core. Pure so the curve is testable
-/// without a GPU; `count` may climb without bound, so the shift is capped to
-/// avoid overflowing the left-shift.
-fn surface_retry_delay(count: u32) -> Duration {
-    const BASE_MS: u64 = 8;
-    const MAX_MS: u64 = 250;
-    let shift = count.min(5); // 8 << 5 = 256ms, clamped to MAX_MS
-    Duration::from_millis((BASE_MS << shift).min(MAX_MS))
-}
-
 impl Renderer {
     // ── Frame ────────────────────────────────────────────────────────────
-
-    /// Reschedule a frame after the surface failed to deliver a texture,
-    /// on an exponential backoff routed through `next_wakeup()` +
-    /// `ControlFlow::WaitUntil`. This replaces an immediate
-    /// `request_redraw()`, which spun render + surface-reconfigure at full
-    /// CPU whenever the surface stayed invalid — e.g. through a display-mode
-    /// renegotiation when alt-tabbing out of a fullscreen game on a
-    /// high-refresh external display. The backoff caps the retry cadence at
-    /// `SURFACE_RETRY_MAX_MS` so a stuck surface can't pin a core or hammer
-    /// the GPU driver; `surface_retry_count` resets on the first frame that
-    /// lands (see `render`), keeping recovery immediate once the mode
-    /// settles. Same discipline as the bell/blink deadlines that replaced
-    /// the per-tick thread spawn (2026-05-20 watchdog panic).
-    fn schedule_surface_retry(&mut self) {
-        let delay = surface_retry_delay(self.surface_retry_count);
-        self.surface_retry_count = self.surface_retry_count.saturating_add(1);
-        self.next_surface_retry_deadline = Some(Instant::now() + delay);
-    }
 
     pub fn render(&mut self) {
         // Don't present while the window is fully occluded. Background redraws
@@ -50,14 +19,6 @@ impl Renderer {
         check_rss_kill_switch(self.rss_kill_bytes);
         self.refresh_auto_titles();
         let frame_start = Instant::now();
-
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.surface_config.width,
-                height: self.surface_config.height,
-            },
-        );
 
         // Cursor blink — one phase shared by every pane. alacritty's
         // CursorStyle.blinking is false unless the shell sends `\e[1/3/5 q`;
@@ -201,8 +162,8 @@ impl Renderer {
 
         // File claims / Room Who overlay — centered card above content.
         let file_claims_origin = if self.claims_overlay.is_some() {
-            let surface_w = self.surface_config.width as f32;
-            let surface_h = self.surface_config.height as f32;
+            let surface_w = self.surface_size.width as f32;
+            let surface_h = self.surface_size.height as f32;
             let card_w = FILE_CLAIMS_W;
             let card_h = MODAL_CARD_H; // reuse modal card height
             let cx = (surface_w - card_w) * 0.5;
@@ -228,8 +189,8 @@ impl Renderer {
                     rect: [
                         0.0,
                         0.0,
-                        self.surface_config.width as f32,
-                        self.surface_config.height as f32,
+                        self.surface_size.width as f32,
+                        self.surface_size.height as f32,
                     ],
                     color: BELL_COLOR,
                 });
@@ -238,33 +199,39 @@ impl Renderer {
             }
         }
 
-        let resolution = [
-            self.surface_config.width as f32,
-            self.surface_config.height as f32,
-        ];
-        // The modal and the context menu share the rects_modal /
-        // modal_text_renderer pipelines — they're mutually exclusive in
-        // practice and the modal wins if both are somehow set.
-        let overlay_rects = if self.modal.is_some() {
+        // The modal, the context menu and the palette share the overlay rect +
+        // text layers — mutually exclusive in practice, and the modal wins if
+        // more than one is somehow set.
+        let mut overlay_rects = if self.modal.is_some() {
             self.build_modal_rects()
         } else if self.palette.is_some() {
             self.build_palette_rects()
         } else {
             self.build_menu_rects()
         };
-        self.rects_below.prepare(&self.queue, &below, resolution);
-        self.rects_above.prepare(&self.queue, &above, resolution);
-        // `tab_bar` gets more entries in phase 2 (block-label highlights),
-        // so its `prepare` is deferred to after that pass — uploading
-        // here would freeze it before the highlights land.
-        self.rects_modal
-            .prepare(&self.queue, &overlay_rects, resolution);
+        // Every overlay's text areas land in this one Vec instead of going
+        // straight to `modal_text_renderer.prepare`. The CPU path can't present
+        // incrementally — it needs all eight layers in hand to rasterize them
+        // into one buffer in z-order — so collection has to finish before either
+        // backend consumes anything.
+        //
+        // Each block below ASSIGNS to `overlay_areas` rather than appending.
+        // That's not tidiness: glyphon's `prepare` *replaces* a renderer's
+        // contents, so under wgpu only the last block to run was ever drawn.
+        // Assigning reproduces that exactly, keeping this refactor
+        // behaviour-neutral for the GPU path. Same for `overlay_rects`, which
+        // the display-settings card replaces wholesale.
+        //
+        // Declared before `overlay_areas` so it outlives the `TextArea` that
+        // borrows it — locals drop in reverse declaration order.
+        let mut reset_buf: Option<Buffer> = None;
+        let mut overlay_areas: Vec<TextArea> = Vec::new();
 
-        // Modal text preparation — independent renderer so its draw can come
-        // after the modal background rects.
+        // Modal text — drawn by an independent renderer so it lands after the
+        // modal background rects.
         if let Some(modal) = self.modal.as_ref() {
-            let surface_w = self.surface_config.width as f32;
-            let surface_h = self.surface_config.height as f32;
+            let surface_w = self.surface_size.width as f32;
+            let surface_h = self.surface_size.height as f32;
             let card_x = (surface_w - MODAL_CARD_W) * 0.5;
             let card_y = (surface_h - MODAL_CARD_H) * 0.5;
             let title_color = Color::rgb(235, 235, 245);
@@ -282,7 +249,7 @@ impl Renderer {
             };
             let cr = modal.cancel_rect;
             let fr = modal.confirm_rect;
-            let areas = [
+            overlay_areas = vec![
                 TextArea {
                     buffer: &modal.title_buf,
                     left: card_x + inset,
@@ -290,7 +257,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: title_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &modal.body_buf,
@@ -299,7 +265,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: body_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &modal.cancel_buf,
@@ -313,7 +278,6 @@ impl Renderer {
                         bottom: (cr.1 + cr.3) as i32,
                     },
                     default_color: cancel_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &modal.confirm_buf,
@@ -327,20 +291,8 @@ impl Renderer {
                         bottom: (fr.1 + fr.3) as i32,
                     },
                     default_color: confirm_color,
-                    custom_glyphs: &[],
                 },
             ];
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: modal text prepare failed");
         }
 
         // File claims / Room Who overlay text — same renderer pipeline.
@@ -358,7 +310,7 @@ impl Renderer {
                     right: (cx + card_w) as i32,
                     bottom: (cy + MODAL_CARD_H) as i32,
                 };
-                let areas = [
+                overlay_areas = vec![
                     TextArea {
                         buffer: &overlay.title_buf,
                         left: cx + inset,
@@ -366,7 +318,6 @@ impl Renderer {
                         scale: 1.0,
                         bounds: card_bounds,
                         default_color: title_color,
-                        custom_glyphs: &[],
                     },
                     TextArea {
                         buffer: &overlay.body_buf,
@@ -375,40 +326,30 @@ impl Renderer {
                         scale: 1.0,
                         bounds: card_bounds,
                         default_color: body_color,
-                        custom_glyphs: &[],
                     },
                 ];
-                // NOTE: do NOT re-prepare rects_modal here. This block used to
-                // prepare it with an empty slice, which wiped the menu/palette/
-                // modal background prepared above whenever this overlay was up
-                // at the same time. The claims card's own background is drawn
-                // via the `above` layer, so it needs nothing from rects_modal.
-                self.modal_text_renderer
-                    .prepare(
-                        &self.device,
-                        &self.queue,
-                        &mut self.font_system,
-                        &mut self.atlas,
-                        &self.viewport,
-                        areas,
-                        &mut self.swash_cache,
-                    )
-                    .expect("terminite: file-claims text prepare failed");
+                // NOTE: do NOT touch `overlay_rects` here. This block used to
+                // prepare rects_modal with an empty slice, which wiped the
+                // menu/palette/modal background prepared above whenever this
+                // overlay was up at the same time. The claims card's own
+                // background is drawn via the `above` layer, so it needs nothing
+                // from the modal rect layer.
             }
         }
 
         // Display settings overlay — card with two font-size sliders + Reset.
         if let Some(ds) = self.display_settings.as_ref() {
-            let surface_w = self.surface_config.width as f32;
-            let surface_h = self.surface_config.height as f32;
+            let surface_w = self.surface_size.width as f32;
+            let surface_h = self.surface_size.height as f32;
             let card_w = DISPLAY_SETTINGS_W;
             let card_h = DISPLAY_SETTINGS_H;
             let cx = (surface_w - card_w) * 0.5;
             let cy = (surface_h - card_h) * 0.5;
-            // Card rects go through the modal rect layer (prepared below at the
-            // rects_modal.prepare call), NOT `above` — `above` was already
-            // uploaded to the GPU earlier this frame, so pushes here would never
-            // draw. The modal layer is drawn on top of everything.
+            // Card rects go through the modal rect layer, NOT `above` — the
+            // modal layer is drawn on top of everything, and `above` is a
+            // lower layer that this card must cover. They replace
+            // `overlay_rects` outright, matching the wgpu path (which
+            // re-prepared rects_modal from scratch here).
             let mut card_rects: Vec<RectInstance> = Vec::new();
             // Card background + border.
             card_rects.push(RectInstance {
@@ -460,18 +401,16 @@ impl Renderer {
             let display_top = ds.tabh_track.1 + ds.tabh_track.3 + 16.0;
             // Reset label centered in its button by MEASURING the shaped text
             // (a fixed width guess left it visibly off-centre).
-            let reset_buf = make_modal_buffer(&mut self.font_system, "Reset");
-            let reset_w = reset_buf
-                .layout_runs()
-                .map(|r| r.line_w)
-                .fold(0.0_f32, f32::max);
+            let rb = reset_buf.insert(make_modal_buffer(&mut self.font_system, "Reset"));
+            let reset_w = rb.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
             let card_bounds = TextBounds {
                 left: cx as i32,
                 top: cy as i32,
                 right: (cx + card_w) as i32,
                 bottom: (cy + card_h) as i32,
             };
-            let areas = [
+            overlay_rects = card_rects;
+            overlay_areas = vec![
                 TextArea {
                     buffer: &ds.title_buf,
                     left: cx + inset,
@@ -479,7 +418,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: title_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &ds.content_label_buf,
@@ -488,7 +426,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: label_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &ds.tab_label_buf,
@@ -497,7 +434,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: label_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &ds.tabh_label_buf,
@@ -506,7 +442,6 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: label_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
                     buffer: &ds.display_buf,
@@ -515,10 +450,9 @@ impl Renderer {
                     scale: 1.0,
                     bounds: card_bounds,
                     default_color: display_color,
-                    custom_glyphs: &[],
                 },
                 TextArea {
-                    buffer: &reset_buf,
+                    buffer: rb,
                     left: ds.btn_reset.0 + (ds.btn_reset.2 - reset_w) * 0.5,
                     top: ds.btn_reset.1 + (ds.btn_reset.3 - MODAL_LINE_H) * 0.5,
                     scale: 1.0,
@@ -529,22 +463,8 @@ impl Renderer {
                         bottom: (ds.btn_reset.1 + ds.btn_reset.3) as i32,
                     },
                     default_color: btn_color,
-                    custom_glyphs: &[],
                 },
             ];
-            self.rects_modal
-                .prepare(&self.queue, &card_rects, resolution);
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: display-settings text prepare failed");
         }
 
         if let Some(menu) = self.context_menu.as_ref() {
@@ -552,7 +472,7 @@ impl Renderer {
             let label_color = Color::rgb(225, 225, 235);
             let disabled_color = Color::rgb(110, 110, 125);
             let text_inset = 18.0;
-            let areas: Vec<TextArea> = menu
+            overlay_areas = menu
                 .items
                 .iter()
                 .enumerate()
@@ -574,21 +494,9 @@ impl Renderer {
                         } else {
                             disabled_color
                         },
-                        custom_glyphs: &[],
                     }
                 })
                 .collect();
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: menu text prepare failed");
         } else if let (Some(pal), Some((x, y, first, visible))) =
             (self.palette.as_ref(), self.palette_layout())
         {
@@ -603,20 +511,24 @@ impl Renderer {
                 right: (x + PALETTE_WIDTH) as i32,
                 bottom: (row_y + PALETTE_ROW_H) as i32,
             };
-            let mut areas: Vec<TextArea> = Vec::with_capacity(visible + 1);
-            areas.push(TextArea {
+            // Clear, not append: this branch stands in for a `prepare` call,
+            // which replaced the renderer's contents. Without the clear, a
+            // palette open at the same time as the display-settings card would
+            // draw both sets of labels on top of each other.
+            overlay_areas.clear();
+            overlay_areas.reserve(visible + 1);
+            overlay_areas.push(TextArea {
                 buffer: &pal.prompt_buf,
                 left: x + text_inset,
                 top: y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
                 scale: 1.0,
                 bounds: row_bounds(y),
                 default_color: prompt_color,
-                custom_glyphs: &[],
             });
             for row in 0..visible {
                 let item_idx = pal.filtered[first + row];
                 let row_y = y + PALETTE_ROW_H * (1 + row) as f32;
-                areas.push(TextArea {
+                overlay_areas.push(TextArea {
                     buffer: &pal.items[item_idx].label_buf,
                     left: x + text_inset,
                     top: row_y + (PALETTE_ROW_H - MODAL_LINE_H) * 0.5,
@@ -627,27 +539,17 @@ impl Renderer {
                     } else {
                         label_color
                     },
-                    custom_glyphs: &[],
                 });
             }
-            self.modal_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: palette text prepare failed");
         }
 
         // Per-pane image placements: collected during phase 2 (root is
         // borrowed for the text areas anyway), prepared after the text
         // prep, drawn in the render pass between content and the tab bar.
         let mut texture_instances: Vec<TextureInstance> = Vec::new();
-        let mut texture_bgs: Vec<wgpu::BindGroup> = Vec::new();
+        // Index-parallel with `texture_instances`: `texture_imgs[i]` is drawn
+        // into `texture_instances[i]`.
+        let mut texture_imgs: Vec<&TextureImage> = Vec::new();
 
         // ── Per-cell glyph cache: every visible shell cell needs a shaped
         //    single-grapheme buffer (keyed by grapheme + style + size) before
@@ -702,8 +604,14 @@ impl Renderer {
         // buffers are already refreshed, so we can take the immutable
         // borrows the TextAreas need. Content goes through `text_renderer`,
         // tab labels + find bar through `tab_text_renderer`.
+        //
+        // `root` and both Vecs are declared outside the block so they outlive
+        // it: whichever backend runs consumes them after this point, and the
+        // TextAreas borrow buffers reached through `root`.
+        let root = self.root.as_ref().expect("pane tree present");
+        let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
+        let mut tab_areas: Vec<TextArea> = Vec::new();
         {
-            let root = self.root.as_ref().expect("pane tree present");
             let pad = self.pad;
             let line_height = self.line_height;
             let active_color = Color::rgb(230, 230, 240);
@@ -711,8 +619,6 @@ impl Renderer {
             let close_color = Color::rgb(160, 160, 170);
             // Subdued; a block label is chrome, not content.
             let block_label_color = Color::rgb(110, 110, 130);
-            let mut content_areas: Vec<TextArea> = Vec::with_capacity(draws.len());
-            let mut tab_areas: Vec<TextArea> = Vec::new();
             for d in &draws {
                 let pane = root.find(d.pid).expect("drawn pane present");
                 let pane_rect = layout
@@ -791,7 +697,6 @@ impl Renderer {
                                 scale: 1.0,
                                 bounds: body_bounds,
                                 default_color: g.color,
-                                custom_glyphs: &[],
                             });
                         }
                     } else {
@@ -806,7 +711,6 @@ impl Renderer {
                                 self.config.foreground.1,
                                 self.config.foreground.2,
                             ),
-                            custom_glyphs: &[],
                         });
                     }
                     // Gutter labels — one TextArea per first-run of
@@ -853,7 +757,6 @@ impl Renderer {
                                         scale: 1.0,
                                         bounds: row_bounds,
                                         default_color: Color::rgb(110, 110, 130),
-                                        custom_glyphs: &[],
                                     });
                                 }
                             }
@@ -884,7 +787,6 @@ impl Renderer {
                             bottom: (bar_top + self.tab_bar_height) as i32,
                         },
                         default_color: active_color,
-                        custom_glyphs: &[],
                     });
                 }
                 for slot in &d.tabs {
@@ -900,7 +802,6 @@ impl Renderer {
                         } else {
                             inactive_color
                         },
-                        custom_glyphs: &[],
                     });
                     tab_areas.push(TextArea {
                         buffer: &self.close_buffer,
@@ -909,7 +810,6 @@ impl Renderer {
                         scale: 1.0,
                         bounds: slot.close_bounds,
                         default_color: close_color,
-                        custom_glyphs: &[],
                     });
                 }
                 // Pane's image. Scaled to fit the content area (never
@@ -953,7 +853,7 @@ impl Renderer {
                     texture_instances.push(TextureInstance {
                         rect: [x, y, sw, sh],
                     });
-                    texture_bgs.push(tex.bind_group().clone());
+                    texture_imgs.push(tex);
                 }
                 // Block IDs (`Bn`) gutter labels — OFF by default. The block
                 // model is still tracked from OSC 133; we just don't draw the
@@ -1062,7 +962,6 @@ impl Renderer {
                             bottom: (row_top + line_height) as i32,
                         },
                         default_color: text_color,
-                        custom_glyphs: &[],
                     });
                 }
                 } // end if show_block_labels
@@ -1081,160 +980,79 @@ impl Renderer {
                         bottom: (by + FIND_BAR_H) as i32,
                     },
                     default_color: Color::rgb(225, 225, 235),
-                    custom_glyphs: &[],
                 });
             }
-            self.text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    content_areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: text prepare failed");
-            self.tab_text_renderer
-                .prepare(
-                    &self.device,
-                    &self.queue,
-                    &mut self.font_system,
-                    &mut self.atlas,
-                    &self.viewport,
-                    tab_areas,
-                    &mut self.swash_cache,
-                )
-                .expect("terminite: tab bar text prepare failed");
         }
 
-        // Upload the tab-bar rects now that phase 2 has pushed any
-        // block-label highlights into the same Vec — render order still
-        // puts these behind `tab_text_renderer`, so the rect sits behind
-        // the label glyphs.
-        self.rects_tab_bar
-            .prepare(&self.queue, &tab_bar, resolution);
+        // Overlays (modal / menu / palette / display-settings card) sit on top
+        // of everything and share one rect layer + one text layer. Empty when
+        // none is up, in which case both layers are no-ops.
+        // `claims_overlay` belongs here too: its card background rides the
+        // `above` layer but its text goes through this text layer, so leaving it
+        // out of the gate rendered the card as an empty box. Pre-existing on the
+        // wgpu path; fixed for both backends.
+        let overlay_up = self.modal.is_some()
+            || self.context_menu.is_some()
+            || self.palette.is_some()
+            || self.display_settings.is_some()
+            || self.claims_overlay.is_some();
 
-        // Stage the image instance buffer; render happens between content
-        // (text + decorations) and the tab bar, so images sit above the
-        // cell grid but below per-pane chrome.
-        self.texture_renderer
-            .prepare(&self.queue, &texture_instances, resolution);
-
-        // Surface failures (timeout / outdated / lost) are routed through a
-        // backoff deadline instead of an immediate `request_redraw()`. The
-        // immediate path spun render + surface-reconfigure at full CPU while
-        // the OS compositor was already fighting a bad display mode — a
-        // livelock that could amplify a recoverable glitch into a system-wide
-        // stall (the 2026-06-03 alt-tab freeze). See `schedule_surface_retry`.
-        let surface_texture = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t) => t,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                self.schedule_surface_retry();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Outdated
-            | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                self.surface.configure(&self.device, &self.surface_config);
-                set_window_layer_opaque(&self.window);
-                self.schedule_surface_retry();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self
-                    .instance
-                    .create_surface(self.window.clone())
-                    .expect("terminite: failed to recreate the surface");
-                self.surface.configure(&self.device, &self.surface_config);
-                set_window_layer_opaque(&self.window);
-                self.schedule_surface_retry();
-                return;
-            }
-            other => {
-                eprintln!("terminite: surface status: {other:?}");
-                self.schedule_surface_retry();
-                return;
-            }
-        };
-        // A frame landed — clear the backoff so the next failure starts fresh
-        // and recovery from a transient stall is immediate.
-        self.surface_retry_count = 0;
-        self.next_surface_retry_deadline = None;
-
-        let view = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("terminite frame"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("terminite pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.bg_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            // One full-window scissor — the panes tile the whole surface and
-            // every rect / TextArea is already clipped to its own pane box,
-            // so no per-pane scissor switching is needed.
-            pass.set_scissor_rect(
-                0,
-                0,
-                self.surface_config.width,
-                self.surface_config.height,
-            );
-
-            self.rects_below.render(&mut pass);
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("terminite: text render failed");
-            self.rects_above.render(&mut pass);
-
-            // Decoded images, atop the cell grid but below the tab bar.
-            self.texture_renderer.render(&mut pass, &texture_bgs);
-
-            // Per-pane tab bars drawn on top of the content.
-            self.rects_tab_bar.render(&mut pass);
-            self.tab_text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .expect("terminite: tab bar text render failed");
-
-            // Modal, context menu, palette, and the display-settings card sit
-            // on top of *everything* — they share the rects_modal /
-            // modal_text_renderer pipelines (mutually exclusive in practice).
-            if self.modal.is_some()
-                || self.context_menu.is_some()
-                || self.palette.is_some()
-                || self.display_settings.is_some()
-            {
-                self.rects_modal.render(&mut pass);
-                self.modal_text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                    .expect("terminite: overlay text render failed");
-            }
+        // ── Present ──────────────────────────────────────────────────────────
+        // The frame's eight layers, in z-order. Text lands *between* rect
+        // layers, which is why nothing can be presented until the whole frame
+        // has been described — see `CpuLayer`.
+        //
+        // `swash_cache` is the glyph cache and has no eviction of its own, so
+        // bound it before this frame's glyphs go in: blunt clear + one frame of
+        // re-rasterization, the same policy as `glyph_cache`.
+        if self.swash_cache_bytes > SWASH_CACHE_MAX_BYTES {
+            self.swash_cache.image_cache.clear();
+            self.swash_cache_bytes = 0;
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        let layers = [
+            CpuLayer::Rects(&below),
+            CpuLayer::Text(&content_areas),
+            CpuLayer::Rects(&above),
+            CpuLayer::Images { rects: &texture_instances, imgs: &texture_imgs },
+            CpuLayer::Rects(&tab_bar),
+            CpuLayer::Text(&tab_areas),
+            CpuLayer::Rects(if overlay_up { &overlay_rects } else { &[] }),
+            CpuLayer::Text(if overlay_up { &overlay_areas } else { &[] }),
+        ];
+        // The buffer is sized from the LIVE window size, not `surface_size`.
+        //
+        // Step 5 briefly used `surface_size` so content placement and buffer
+        // size always agreed. That was the wrong trade: if a resize hasn't been
+        // processed yet, `surface_size` is stale and the presented image is
+        // *smaller than the window* — and the uncovered strip is not merely
+        // wrong, it is a hole. There's nothing behind our layer but the desktop.
+        // Sizing to the window means the background fill always covers it; the
+        // worst case is content positioned for the previous size for one frame,
+        // which is a cosmetic glitch rather than a see-through one.
+        let live = self.window.inner_size();
+        let (pw, ph) = (live.width.max(1), live.height.max(1));
+        if pw != self.surface_size.width || ph != self.surface_size.height {
+            // A Resized event we haven't handled yet. Cheap and rare, so log it:
+            // if a flash ever correlates with this line, that's the mechanism.
+            crate::logging::warn(&format!(
+                "render: window {pw}x{ph} != surface_size {}x{} — painting at \
+                 window size; layout is one frame stale",
+                self.surface_size.width, self.surface_size.height
+            ));
+        }
         self.window.pre_present_notify();
-        surface_texture.present();
-        self.atlas.trim();
+        present_cpu(
+            &mut self.sb_surface,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.swash_cache_bytes,
+            (pw, ph),
+            self.bg_color,
+            &layers,
+        );
 
-        // Frame-time bookkeeping for the stats verb. Sample is the
-        // wall-clock interval from the start of this frame through
-        // present; close enough to "what the user perceives as
-        // frame cost" for debug purposes.
+        // Frame-time bookkeeping for the stats verb. The sample is wall-clock
+        // from the start of this frame through present.
         let dt = frame_start.elapsed().as_secs_f32() * 1000.0;
         if self.frame_samples.len() == FRAME_TIMER_CAP {
             self.frame_samples.pop_front();
@@ -1568,6 +1386,335 @@ pub(super) fn make_glyph_buffer(
     buf
 }
 
+/// CPU-render port: straight-alpha blend one sRGB source over a 0RGB pixel.
+/// `a`/`sr`/`sg`/`sb` are 0..=255. Shared by the rect and glyph blitters so
+/// both composite identically.
+#[inline]
+fn blend_px(dst: &mut u32, sr: u32, sg: u32, sb: u32, a: u32) {
+    if a >= 255 {
+        *dst = (sr << 16) | (sg << 8) | sb;
+        return;
+    }
+    let d = *dst;
+    let bl = |s: u32, dv: u32| (s * a + dv * (255 - a)) / 255;
+    *dst = (bl(sr, (d >> 16) & 0xff) << 16)
+        | (bl(sg, (d >> 8) & 0xff) << 8)
+        | bl(sb, d & 0xff);
+}
+
+/// CPU-render port: alpha-blend one `RectInstance` into a 0RGB pixel buffer.
+/// `rect` is `[x, y, w, h]` in physical px; `color` is sRGB rgba in 0..1 (the
+/// same values the rect shader consumes, minus the shader's linearization —
+/// softbuffer wants sRGB straight). Clamped to the buffer bounds.
+fn blit_rect(buf: &mut [u32], stride: usize, height: usize, r: &RectInstance) {
+    let a = r.color[3];
+    if a <= 0.0 {
+        return;
+    }
+    let x0 = r.rect[0].max(0.0) as usize;
+    let y0 = r.rect[1].max(0.0) as usize;
+    let x1 = ((r.rect[0] + r.rect[2]).max(0.0) as usize).min(stride);
+    let y1 = ((r.rect[1] + r.rect[3]).max(0.0) as usize).min(height);
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0) as u32;
+    let (sr, sg, sb) = (to_u8(r.color[0]), to_u8(r.color[1]), to_u8(r.color[2]));
+    let ai = to_u8(a);
+    for y in y0..y1 {
+        let row = y * stride;
+        for x in x0..x1 {
+            blend_px(&mut buf[row + x], sr, sg, sb, ai);
+        }
+    }
+}
+
+/// CPU-render port: rasterize one `TextArea` into a 0RGB pixel buffer.
+///
+/// This deliberately does NOT use `Buffer::draw`. That convenience wrapper
+/// hardcodes its glyph origin to `(0, run.line_y)`, so callers can only offset
+/// it by whole pixels afterwards — which loses the sub-pixel x bucket in the
+/// glyph cache key and drifts up to a pixel from where the GPU path puts the
+/// same glyph. Instead we walk `layout_runs()` ourselves and reproduce glyphon's
+/// placement exactly (`glyphon::text_render`):
+///
+///   x = physical(left, top).x + image.placement.left
+///   y = round(line_y × scale) + physical(left, top).y − image.placement.top
+///
+/// `swash_cache` supplies the two `placement` terms and rasterizes each glyph
+/// once per cache key — the CPU analogue of glyphon's atlas. Glyphs are clipped
+/// to `area.bounds` (glyphon clips the quad instead; same result) and to the
+/// buffer, with the clip resolved per row rather than per pixel.
+///
+/// `cache_bytes` accumulates the size of every image this call adds to
+/// `swash_cache`, so the caller can bound a cache that has no eviction of its
+/// own — see `SWASH_CACHE_MAX_BYTES`. That's also why this walks the cache by
+/// hand instead of calling `SwashCache::with_pixels`: `with_pixels` hides
+/// whether a glyph was a hit or a miss, leaving no way to account for growth.
+fn blit_text_area(
+    buf: &mut [u32],
+    stride: usize,
+    height: usize,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    cache_bytes: &mut usize,
+    area: &TextArea,
+) {
+    // Clip box = the area's bounds intersected with the buffer. `bounds` is
+    // right/bottom-exclusive here, matching how the pane rects were built.
+    let cl = area.bounds.left.max(0) as usize;
+    let ct = area.bounds.top.max(0) as usize;
+    let cr = (area.bounds.right.max(0) as usize).min(stride);
+    let cb = (area.bounds.bottom.max(0) as usize).min(height);
+    if cr <= cl || cb <= ct {
+        return;
+    }
+    // Same run culling glyphon does, so a long body (a 1 MB Editor buffer, a
+    // full scrollback) only touches the runs that can land in `bounds`.
+    let is_run_visible = |run: &cosmic_text::LayoutRun| {
+        let start = (area.top + run.line_top * area.scale) as i32;
+        let end = start + (run.line_height * area.scale) as i32;
+        start <= area.bounds.bottom && area.bounds.top <= end
+    };
+    let runs = area
+        .buffer
+        .layout_runs()
+        .skip_while(|run| !is_run_visible(run))
+        .take_while(is_run_visible);
+    for run in runs {
+        let line_y = (run.line_y * area.scale).round() as i32;
+        for glyph in run.glyphs.iter() {
+            let pg = glyph.physical((area.left, area.top), area.scale);
+            let color = glyph.color_opt.unwrap_or(area.default_color);
+            // Account for a first-time rasterization before `get_image` caches it.
+            // Every new key is charged `SWASH_ENTRY_OVERHEAD` on top of its
+            // bitmap, because plenty of keys cache to no bitmap at all — a space,
+            // a glyph swash declines to render — and those still occupy a map
+            // slot. Charging bytes alone would let a churn of empty entries grow
+            // the map forever while the counter sat at zero, so the ceiling would
+            // never trip.
+            let is_new = !swash_cache.image_cache.contains_key(&pg.cache_key);
+            let cached = swash_cache.get_image(font_system, pg.cache_key);
+            if is_new {
+                let bitmap = cached.as_ref().map_or(0, |i| i.data.len());
+                *cache_bytes =
+                    cache_bytes.saturating_add(bitmap + SWASH_ENTRY_OVERHEAD);
+            }
+            let Some(img) = cached.as_ref() else { continue };
+            let p = img.placement;
+            if p.width == 0 || p.height == 0 {
+                continue;
+            }
+            // Glyph bitmap's top-left in buffer space.
+            let gx = pg.x + p.left;
+            let gy = pg.y + line_y - p.top;
+            // Resolve the clip once: which rows/cols of the bitmap survive.
+            let ox0 = (cl as i32 - gx).max(0);
+            let oy0 = (ct as i32 - gy).max(0);
+            let ox1 = (cr as i32 - gx).min(p.width as i32);
+            let oy1 = (cb as i32 - gy).min(p.height as i32);
+            if ox1 <= ox0 || oy1 <= oy0 {
+                continue;
+            }
+            let (cr8, cg8, cb8) = (color.r() as u32, color.g() as u32, color.b() as u32);
+            let is_color = matches!(img.content, cosmic_text::SwashContent::Color);
+            // SubpixelMask is unimplemented upstream; swash never emits it here.
+            if !is_color && !matches!(img.content, cosmic_text::SwashContent::Mask) {
+                continue;
+            }
+            let bpp = if is_color { 4 } else { 1 };
+            let row_bytes = p.width as usize * bpp;
+            if img.data.len() < row_bytes * p.height as usize {
+                continue; // truncated bitmap — refuse rather than index past it
+            }
+            for oy in oy0..oy1 {
+                let src_row = oy as usize * row_bytes;
+                let dst_row = (gy + oy) as usize * stride;
+                for ox in ox0..ox1 {
+                    let i = src_row + ox as usize * bpp;
+                    let (sr, sg, sb, a) = if is_color {
+                        (
+                            img.data[i] as u32,
+                            img.data[i + 1] as u32,
+                            img.data[i + 2] as u32,
+                            img.data[i + 3] as u32,
+                        )
+                    } else {
+                        // Mask: one coverage byte, painted in the run's colour.
+                        (cr8, cg8, cb8, img.data[i] as u32)
+                    };
+                    if a == 0 {
+                        continue;
+                    }
+                    blend_px(&mut buf[dst_row + (gx + ox) as usize], sr, sg, sb, a);
+                }
+            }
+        }
+    }
+}
+
+/// CPU-render port: blit one decoded image into `dst`, scaled into `rect`.
+///
+/// Bilinear-sampled, matching the texture pipeline's `FilterMode::Linear` —
+/// nearest-neighbour visibly aliases a downscaled photo, and downscaling is the
+/// common case (`render` fits images to the pane and never upscales). Source
+/// alpha is straight, blended the same way as `wgpu::BlendState::ALPHA_BLENDING`.
+///
+/// Filtering happens in sRGB space, whereas the GPU samples an
+/// `Rgba8UnormSrgb` texture and therefore filters in linear space. On a
+/// high-contrast edge that shows up as a marginally different mid-tone; it's the
+/// same simplification `blit_rect` already makes, and well inside the
+/// "similar, not pixel-perfect" bar.
+fn blit_image(
+    dst: &mut [u32],
+    stride: usize,
+    height: usize,
+    rect: [f32; 4],
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+) {
+    let (dw, dh) = (rect[2], rect[3]);
+    if dw <= 0.0 || dh <= 0.0 || sw == 0 || sh == 0 {
+        return;
+    }
+    // A short row means a truncated decode; refuse rather than index past it.
+    if src.len() < sw as usize * sh as usize * 4 {
+        return;
+    }
+    let x0 = rect[0].max(0.0) as usize;
+    let y0 = rect[1].max(0.0) as usize;
+    let x1 = ((rect[0] + dw).max(0.0) as usize).min(stride);
+    let y1 = ((rect[1] + dh).max(0.0) as usize).min(height);
+    let sample = |sx: usize, sy: usize| -> (f32, f32, f32, f32) {
+        let i = (sy * sw as usize + sx) * 4;
+        (
+            src[i] as f32,
+            src[i + 1] as f32,
+            src[i + 2] as f32,
+            src[i + 3] as f32,
+        )
+    };
+    for y in y0..y1 {
+        // Destination pixel centre → source coordinate, same mapping the quad's
+        // 0..1 uv gives: u = (dx + 0.5) / dw, then su = u * sw - 0.5.
+        let fy = ((y as f32 + 0.5 - rect[1]) / dh * sh as f32 - 0.5).clamp(0.0, sh as f32 - 1.0);
+        let sy0 = fy as usize;
+        let sy1 = (sy0 + 1).min(sh as usize - 1);
+        let wy = fy - sy0 as f32;
+        let row = y * stride;
+        for x in x0..x1 {
+            let fx =
+                ((x as f32 + 0.5 - rect[0]) / dw * sw as f32 - 0.5).clamp(0.0, sw as f32 - 1.0);
+            let sx0 = fx as usize;
+            let sx1 = (sx0 + 1).min(sw as usize - 1);
+            let wx = fx - sx0 as f32;
+            // Bilinear across the four neighbours (ClampToEdge via the mins above).
+            let (a00, a10) = (sample(sx0, sy0), sample(sx1, sy0));
+            let (a01, a11) = (sample(sx0, sy1), sample(sx1, sy1));
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let mix = |c0: f32, c1: f32, c2: f32, c3: f32| {
+                lerp(lerp(c0, c1, wx), lerp(c2, c3, wx), wy)
+            };
+            let a = mix(a00.3, a10.3, a01.3, a11.3);
+            if a <= 0.0 {
+                continue;
+            }
+            blend_px(
+                &mut dst[row + x],
+                mix(a00.0, a10.0, a01.0, a11.0) as u32,
+                mix(a00.1, a10.1, a01.1, a11.1) as u32,
+                mix(a00.2, a10.2, a01.2, a11.2) as u32,
+                a as u32,
+            );
+        }
+    }
+}
+
+/// One z-ordered layer of a CPU frame. `render()` hands `present_cpu` a slice of
+/// these in wgpu's draw order — this is the "display list" the port needs, at
+/// layer granularity rather than per command, because rects and text interleave
+/// at a fixed set of layers, not arbitrarily.
+enum CpuLayer<'a> {
+    Rects(&'a [RectInstance]),
+    Text(&'a [TextArea<'a>]),
+    /// Decoded images. `rects[i]` is where `imgs[i]` is drawn — the same
+    /// index-parallel pairing the wgpu path uses for its per-image bind groups.
+    Images {
+        rects: &'a [TextureInstance],
+        imgs: &'a [&'a TextureImage],
+    },
+}
+
+/// CPU-render port: rasterize a frame's layers into the softbuffer surface and
+/// present it. Synchronous — the blit completes before `present` returns, which
+/// is the whole reason we're moving off wgpu's async CAMetalLayer present.
+///
+/// A free function, not a `Renderer` method: the `TextArea`s borrow `self.root`,
+/// `self.glyph_cache` and the overlay state, so the raster can't also take
+/// `&mut self` for the font system. Callers pass the disjoint fields.
+fn present_cpu(
+    sb: &mut softbuffer::Surface<Arc<Window>, Arc<Window>>,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    cache_bytes: &mut usize,
+    (w, h): (u32, u32),
+    bg: (u8, u8, u8),
+    layers: &[CpuLayer],
+) {
+    let (Some(nw), Some(nh)) = (std::num::NonZeroU32::new(w), std::num::NonZeroU32::new(h))
+    else {
+        return;
+    };
+    if sb.resize(nw, nh).is_err() {
+        return;
+    }
+    let mut buf = match sb.buffer_mut() {
+        Ok(b) => b,
+        Err(e) => {
+            crate::logging::warn(&format!("present_cpu: buffer_mut failed: {e}"));
+            return;
+        }
+    };
+    buf.fill(((bg.0 as u32) << 16) | ((bg.1 as u32) << 8) | bg.2 as u32);
+    let (stride, height) = (w as usize, h as usize);
+    for layer in layers {
+        match layer {
+            CpuLayer::Rects(rects) => {
+                for r in *rects {
+                    blit_rect(&mut buf, stride, height, r);
+                }
+            }
+            CpuLayer::Text(areas) => {
+                for a in *areas {
+                    blit_text_area(
+                        &mut buf,
+                        stride,
+                        height,
+                        font_system,
+                        swash_cache,
+                        cache_bytes,
+                        a,
+                    );
+                }
+            }
+            CpuLayer::Images { rects, imgs } => {
+                // Same cap the instance buffer enforces on the GPU path, so an
+                // absurd image count drops the same extras on both backends.
+                for (inst, img) in rects.iter().zip(imgs.iter()).take(MAX_INSTANCES) {
+                    blit_image(
+                        &mut buf,
+                        stride,
+                        height,
+                        inst.rect,
+                        img.pixels(),
+                        img.width,
+                        img.height,
+                    );
+                }
+            }
+        }
+    }
+    let _ = buf.present();
+}
+
 /// Build a `Buffer` for modal-card text at a larger font size.
 pub(super) fn make_modal_buffer(font_system: &mut FontSystem, text: &str) -> Buffer {
     let metrics = Metrics::new(MODAL_FONT_SIZE, MODAL_LINE_H);
@@ -1651,43 +1798,94 @@ pub(super) fn measure_cell_advance(font_system: &mut FontSystem, font_size: f32,
 
 #[cfg(test)]
 mod tests {
-    use super::surface_retry_delay;
-    use std::time::Duration;
+    use super::{blend_px, blit_image, blit_rect, RectInstance};
+
+    // ── CPU-render port: the blitters ────────────────────────────────────
+    // These run on every frame the softbuffer backend draws, against geometry
+    // derived from window size, scroll offsets and PTY content. A panic here is
+    // a hard crash of the terminal, so the degenerate cases are pinned down
+    // rather than reasoned about.
 
     #[test]
-    fn surface_retry_backoff_is_exponential_then_capped() {
-        // 8ms doubling: 8, 16, 32, 64, 128, then clamped at 250ms.
-        let ms = |c| surface_retry_delay(c).as_millis() as u64;
-        assert_eq!(ms(0), 8);
-        assert_eq!(ms(1), 16);
-        assert_eq!(ms(2), 32);
-        assert_eq!(ms(3), 64);
-        assert_eq!(ms(4), 128);
-        assert_eq!(ms(5), 250); // 8 << 5 = 256, clamped
-        assert_eq!(ms(6), 250); // stays capped beyond the shift ceiling
+    fn blend_px_composites_straight_alpha() {
+        // Opaque source replaces the destination outright.
+        let mut p = 0x00_00_00;
+        blend_px(&mut p, 0xff, 0x00, 0x00, 255);
+        assert_eq!(p, 0xff_00_00);
+        // Fully transparent source leaves it untouched.
+        let mut p = 0x12_34_56;
+        blend_px(&mut p, 0xff, 0xff, 0xff, 0);
+        assert_eq!(p, 0x12_34_56);
+        // Half-covered white over black lands mid-grey, per channel.
+        let mut p = 0x00_00_00;
+        blend_px(&mut p, 0xff, 0xff, 0xff, 128);
+        assert_eq!(p, 0x80_80_80);
     }
 
     #[test]
-    fn surface_retry_never_panics_or_spins_at_extreme_counts() {
-        // A surface stuck for minutes drives the count arbitrarily high; the
-        // shift must not overflow and the delay must stay at the cap, never 0
-        // (a 0ms retry would reinstate the full-CPU spin this fix removes).
-        for c in [100u32, 10_000, u32::MAX] {
-            let d = surface_retry_delay(c);
-            assert_eq!(d, Duration::from_millis(250));
-            assert!(d > Duration::ZERO);
+    fn blit_rect_clips_instead_of_panicking() {
+        let mut buf = vec![0u32; 16];
+        let white = [1.0, 1.0, 1.0, 1.0];
+        // Off the top-left, off the bottom-right, zero-size, and NaN in either
+        // the origin or the extent. None may panic; none may draw.
+        for rect in [
+            [-100.0, -100.0, 10.0, 10.0],
+            [100.0, 100.0, 10.0, 10.0],
+            [1.0, 1.0, 0.0, 0.0],
+            [f32::NAN, f32::NAN, 4.0, 4.0],
+            [0.0, 0.0, f32::NAN, f32::NAN],
+        ] {
+            blit_rect(&mut buf, 4, 4, &RectInstance { rect, color: white });
         }
+        assert!(buf.iter().all(|&p| p == 0), "a degenerate rect drew pixels");
+        // An absurdly large rect clamps to the buffer rather than overrunning it.
+        blit_rect(&mut buf, 4, 4, &RectInstance { rect: [0.0, 0.0, 1e9, 1e9], color: white });
+        assert!(buf.iter().all(|&p| p == 0xff_ff_ff));
     }
 
     #[test]
-    fn surface_retry_is_monotonic_non_decreasing() {
-        let mut prev = surface_retry_delay(0);
-        for c in 1..=8u32 {
-            let cur = surface_retry_delay(c);
-            assert!(cur >= prev, "delay decreased at count {c}");
-            prev = cur;
-        }
+    fn blit_image_refuses_degenerate_input() {
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 2 * 2 * 4]; // opaque white 2×2
+        // Zero source dimension; zero destination rect; a source shorter than
+        // width*height*4 (a truncated decode); wholly off-buffer placements.
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 0, 2);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 2, 0);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 0.0, 0.0], &src, 2, 2);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src[..4], 2, 2);
+        blit_image(&mut buf, 4, 4, [-10.0, -10.0, 2.0, 2.0], &src, 2, 2);
+        blit_image(&mut buf, 4, 4, [1e9, 1e9, 1e9, 1e9], &src, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0), "a degenerate image drew pixels");
     }
+
+    #[test]
+    fn blit_image_fills_its_rect_and_honours_alpha() {
+        // Opaque source covers every pixel of the destination rect.
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 2 * 2 * 4];
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &src, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0xff_ff_ff));
+
+        // A fully transparent source leaves the destination alone, whatever its
+        // colour channels say — straight alpha, matching ALPHA_BLENDING.
+        let mut buf = vec![0x11_22_33u32; 16];
+        let clear: Vec<u8> = [0xff, 0xff, 0xff, 0x00].repeat(4);
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 4.0, 4.0], &clear, 2, 2);
+        assert!(buf.iter().all(|&p| p == 0x11_22_33));
+    }
+
+    #[test]
+    fn blit_image_writes_only_inside_its_rect() {
+        // A 2×2 destination in the corner of a 4×4 buffer must leave the other
+        // twelve pixels untouched — images are not clipped to a pane box, they
+        // rely on this staying inside the rect `render` computed.
+        let mut buf = vec![0u32; 16];
+        let src = vec![0xffu8; 4];
+        blit_image(&mut buf, 4, 4, [0.0, 0.0, 2.0, 2.0], &src, 1, 1);
+        let lit: Vec<usize> = (0..16).filter(|&i| buf[i] != 0).collect();
+        assert_eq!(lit, vec![0, 1, 4, 5]);
+    }
+
 }
 
 

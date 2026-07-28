@@ -641,15 +641,11 @@ impl Renderer {
                     ));
                     return;
                 };
-                // Upload all frames *before* taking a mut borrow on
-                // the pane tree — the texture path needs &device/&queue
-                // off self while the tree lookup wants &mut self.root.
+                // Decode all frames *before* taking a mut borrow on the pane
+                // tree, so the tree lookup below gets &mut self.root cleanly.
                 let (still, animation) = match decoded {
                     crate::images::DecodedImage::Static(img) => {
-                        let tex = self
-                            .texture_renderer
-                            .upload(&self.device, &self.queue, &img);
-                        (Some(tex), None)
+                        (Some(TextureImage::new(&img)), None)
                     }
                     crate::images::DecodedImage::Animated { frames, total_ms } => {
                         let mut textures = Vec::with_capacity(frames.len());
@@ -660,10 +656,7 @@ impl Renderer {
                         for (img, delay) in frames {
                             max_w = max_w.max(img.width);
                             max_h = max_h.max(img.height);
-                            let tex = self
-                                .texture_renderer
-                                .upload(&self.device, &self.queue, &img);
-                            textures.push(tex);
+                            textures.push(TextureImage::new(&img));
                             acc = acc.saturating_add(delay);
                             cumulative.push(acc);
                         }

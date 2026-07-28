@@ -442,7 +442,7 @@ impl ApplicationHandler<UserEvent> for Terminite {
         }
         // Allow IME composition input (dead keys, accents, CJK input methods).
         window.set_ime_allowed(true);
-        let mut renderer = pollster::block_on(Renderer::new(window.clone(), self.proxy.clone()));
+        let mut renderer = Renderer::new(window.clone(), self.proxy.clone());
         // Check for a recent crash before showing anything else.
         renderer.check_recent_crash();
         if let Some(saved) = saved {

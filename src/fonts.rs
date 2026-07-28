@@ -3,7 +3,7 @@
 //! regardless of what the host system has installed. All five are OFL-licensed
 //! (license files alongside the ttfs in `assets/fonts/`).
 
-use glyphon::FontSystem;
+use cosmic_text::FontSystem;
 
 macro_rules! font_bytes {
     ($p:expr) => {
