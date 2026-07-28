@@ -53,10 +53,44 @@ Conclusion: CPU rendering is fast enough with margin. The port is worth it.
 | Step 4 — images (bilinear blit, single-copy residency) | ✅ **visual confirmed** — Daniel: "the images are viewable" | `03c4c89` |
 | Step 5 — cut wgpu (CPU is the only path) | ✅ 199→173 crates, 21→14 MB binary, wgpu/glyphon/naga out of the tree, footprint 414→88 MB | `f840b5e` |
 | sRGB window colour space | ✅ frame time 18.8→8.67 ms, CPU ~25%→~13% (profiled, then measured live) | `0eabb16` |
-| **The flash** | ❌ **REPRODUCED ON THE CPU BUILD.** Daniel saw it ~20 min in. Premise in doubt; two of my own step-5 regressions fixed in `fefcf1b`, neither confirmed as the cause — see the reopened "Research verdict" | `fefcf1b` |
+| **The flash** | ⚠️ **UNRESOLVED — evidence contaminated.** Seen once on the CPU build, but during a window I was polluting with window launches/kills, `sample`, and fat-LTO builds. Not usable evidence. Two of my step-5 regressions found and fixed in `fefcf1b` regardless. Needs a clean-room soak — see below | `fefcf1b` |
 
 Run it: `cargo run`. There's one render path — the `TERMINITE_CPU` flag was
 removed in step 5.
+
+## Testing protocol — read before judging the flash
+
+**The flash evidence collected on 2026-07-27 is contaminated and should not be
+used.** While Daniel was watching for an intermittent one-frame artifact, the
+agent was, on the same machine: `rm -rf`-ing and replacing the running `.app`
+twice; running `sample` (which **suspends the target's threads**) against the
+live process; launching and killing two *maximized* spike windows rendering at
+105–586 fps; launching and killing two more terminite windows for a footprint
+comparison; and running `cargo build --release` with fat LTO across all cores.
+Every one of those is a way to make the window server drop a frame.
+
+**The asymmetry matters.** Contamination causes false *positives*, not false
+negatives:
+- The 17-minute clean stretch **is** meaningful — it survived a hostile
+  environment.
+- The single flash sighting **is not** — "terminite dropped a frame" is
+  indistinguishable from "an agent killed a 586 fps maximized window."
+
+**A clean-room soak, then:**
+1. Agent runs **nothing** — no builds, no app launches, no `sample`, no installs.
+   Not "light" activity; none.
+2. Nothing else heavy on the machine. Check first: `nesessionmanager`,
+   `mDNSResponder` and `com.jamf.protect.security-extension` were each seen at
+   80–90% CPU, and Battle.net Helper at ~33%, independent of terminite.
+3. Daniel uses terminite normally for a stretch longer than the one that already
+   passed clean.
+4. If it flashes, the one detail that decides everything: **dark rectangle or the
+   desktop?** `c0057da` established that layer opacity never stopped the blink,
+   only changed what it shows. Dark ⇒ the see-through mechanism is confirmed and
+   a dropped frame is still the real event. Desktop ⇒ neither `fefcf1b` fix was
+   it. Then check `grep surface_size ~/.terminite/log/terminite.log` for whether
+   a resize was involved.
+5. Free control: if a **non-terminite** window ever flashes, it's environmental.
 
 ## Installed for live testing (2026-07-27)
 
