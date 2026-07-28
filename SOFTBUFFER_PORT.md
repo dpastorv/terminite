@@ -50,6 +50,69 @@ keep the "room" + the vibe.** The port delivers all of those. It simply does not
 deliver the thing that motivated it, and this document should not be read as
 claiming otherwise.
 
+### What is established (2026-07-28, after four failed fixes)
+
+**The flash shows the DESKTOP even with the window, the content view's layer and
+softbuffer's sublayer all set `opaque = true` AND given an opaque background
+colour (`79ed7f8`).** That is the important measurement, and it is a real
+narrowing: if any layer in the tree were compositing, its background colour is
+what you would see. Seeing the desktop means **nothing in the window's layer
+tree is composited for that frame.** That is below the level of any AppKit or
+CoreAnimation property this app can set — which means the opacity/background
+line of attack cannot work, in principle.
+
+Also established:
+- **Not resize.** Zero `surface_size` warnings, ever, across every run.
+- **No trace anywhere.** Nothing in terminite's log; nothing from WindowServer,
+  SkyLight or CoreGraphics in the system log in a 90 s window around a sighting.
+- **Not renderer-specific.** Survived wgpu/Metal → softbuffer/CoreGraphics, and
+  [alacritty#7898](https://github.com/alacritty/alacritty/issues/7898) reports
+  the same symptom ("the client area intermittently becomes transparent") using
+  **OpenGL via glutin** in an unrelated app. Note terminite vendors only
+  `alacritty_terminal` — the state machine, with no windowing or rendering code
+  — so this is not shared code. The only shared component is **winit + AppKit**.
+- **Happens at startup too**, despite the window being created hidden, painted,
+  and only then revealed (`main.rs`).
+
+Research that did **not** pan out, so nobody repeats it:
+- alacritty's `with_transparent(false)` → "shows the system window color
+  instead" applies to their **resize** case, where the window composites with
+  wrong contents. Ours does not composite at all. Different phenomenon; I
+  over-read this as applying to us.
+- Electron's "flicker and ghosting in transparent windows on macOS" fix
+  (PR #46353) is Chromium-internal (`WindowOpacity::kTranslucent`) and gated on
+  the window being **translucent**. terminite's is not.
+- alacritty's other suggestions were timing hacks (vsync, a 10 ms sleep after
+  resize, drawing in `AboutToWait`); none was a fix.
+
+**Untested and still open: ProMotion / variable refresh.** The panel is a Liquid
+Retina XDR (adaptive 10–120 Hz) and Apple states that non-game/video apps can
+flicker on adaptive-refresh displays. terminite presents irregularly by design,
+which is the worst case for VRR. Testing means pinning the display to 60 Hz;
+Daniel declined, so this remains the largest untested hypothesis.
+
+### A note on method
+
+Four fixes have been shipped for this and **none has been verified to change
+anything**: the wgpu port itself, layer opacity (`fefcf1b`), layer background
+colour (`79ed7f8`), and before all of them `c0057da`. Each was reasoned from a
+plausible mechanism and shipped without a way to confirm it worked, and each
+cost a restart. The symptom is rare, invisible to instrumentation, and only
+observable by a human — which makes it exactly the wrong shape for
+theory-driven fixes.
+
+**Do not ship a fifth speculative fix.** The next useful step is a *fact*, not a
+theory. In rough order of cost:
+1. Does a **non-terminite** window ever flash? Settles environmental vs app in
+   one observation, costs nothing.
+2. Does `examples/softbuffer_spike.rs` flash? It is a bare winit + softbuffer
+   window with none of terminite's code — isolates winit/AppKit from terminite.
+3. Readback diagnostic: set the opacity/background properties, immediately ask
+   macOS what it reports, log it. Proves whether they stick at all.
+4. Pin the display to 60 Hz.
+
+### The earlier hypothesis, kept for context
+
 ### The leading hypothesis is now environmental
 
 The flash survived replacing the **entire** graphics stack — renderer, text
