@@ -12,6 +12,12 @@ bottom. Nothing merges to `main` until he calls it.
 Headline numbers, all measured: footprint **414 → 88 MB**, frame time
 **18.8 → 8.67 ms**, release binary **11 → 7.9 MB**, deps **199 → 173 crates**.
 
+Render cost against Apple Terminal lives in **`BENCHMARKS.md`** (tool:
+`tools/bench-render.sh`). Apple Terminal's baseline is measured; **terminite has
+not been run through it yet** — that's the open half of the comparison. Its
+worst per-byte cases are cursor addressing and SGR churn, not scrolling, so
+that's where the CPU renderer gets judged.
+
 ## Why we're doing this
 
 The intermittent macOS "desktop shows through for a frame" flash is a

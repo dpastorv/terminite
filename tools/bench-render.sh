@@ -244,6 +244,11 @@ for w in $WORKLOADS; do
 
     app0=$(cputime "$APP_PID"); ws0=$(cputime "$WS_PID")
     elapsed=$( { TIMEFORMAT=%R; time { cat "$f" > /dev/tty; sync_tty; } } 2>&1 )
+    # Terminals coalesce painting: DSR comes back once the bytes are parsed,
+    # but frames can still be queued. Let them land before sampling CPU, or
+    # the trailing paint cost gets charged to the next workload. Outside the
+    # timed region, so this does not touch wall-clock.
+    sleep 0.5
     app1=$(cputime "$APP_PID"); ws1=$(cputime "$WS_PID")
 
     RESULTS="$RESULTS$w $bytes $count $unit $elapsed $app0 $app1 $ws0 $ws1
@@ -267,7 +272,7 @@ report() {
         "$FP_BEFORE" "$FP_AFTER" "${FP_PEAK:-?}"
     printf '\n'
     printf '%-9s %7s %8s %9s %16s %9s %9s %11s\n' \
-        workload MB wall_s MB/s native_rate app_cpu_s ws_cpu_s cpu_s_per_MB
+        workload MB wall_s MB/s consume_rate app_cpu_s ws_cpu_s cpu_s_per_MB
     printf '%-9s %7s %8s %9s %16s %9s %9s %11s\n' \
         --------- ------- -------- --------- ---------------- --------- --------- -----------
     printf '%s' "$RESULTS" | while read -r w bytes count unit elapsed a0 a1 w0 w1; do
@@ -284,11 +289,14 @@ report() {
         }'
     done
     printf '\n'
-    printf 'native_rate is the honest throughput per workload — lines/s for the\n'
-    printf 'scrolling tests, cursor ops/s, and frames/s for the full-screen\n'
-    printf 'repaint (that last one is the closest thing here to an fps number).\n'
-    printf 'Lower cpu_s_per_MB is better; it is the number that cannot be faked\n'
-    printf 'by answering DSR before the pixels land. Scrollback from this run is\n'
+    printf 'consume_rate is how fast the terminal ATE the stream (lines/s, cursor\n'
+    printf 'ops/s, logical frames/s) — parse-bound, not paint-bound. Terminals\n'
+    printf 'coalesce painting, so a repaint figure far above the display refresh\n'
+    printf 'rate just means most logical frames were never drawn. It is NOT fps.\n'
+    printf '\n'
+    printf 'app_cpu_s / cpu_s_per_MB are the metrics to compare across terminals:\n'
+    printf 'coalescing can hide latency but not work, and CPU is sampled after a\n'
+    printf 'settle delay so queued paints are counted. Scrollback from this run is\n'
     printf 'still resident — clear it before reading footprint for anything else.\n'
 }
 
