@@ -190,6 +190,88 @@ pub(super) fn match_window_colorspace(window: &Window) {
 #[cfg(not(target_os = "macos"))]
 pub(super) fn match_window_colorspace(_window: &Window) {}
 
+/// Paint the window and its layers with terminite's background colour, so a
+/// frame that never lands shows our own dark backing instead of the desktop
+/// (macOS only).
+///
+/// **This is the part `c0057da` and `fefcf1b` both missed.** Both set
+/// `opaque = true` and stopped there. `opaque` is only a *hint* to Core
+/// Animation that it may skip blending — **it supplies no pixels.** A layer
+/// marked opaque whose `contents` are nil, or which hasn't been composited yet,
+/// draws *nothing*, and nothing is a hole straight through to the desktop.
+/// Daniel: "it was the complete desktop", with both layers already forced
+/// opaque by `fefcf1b`.
+///
+/// Giving the window and every layer an opaque background colour means the
+/// worst case is a one-frame flash of terminite's own background — dark on
+/// dark, effectively invisible — rather than the desktop and Dock. It does not
+/// fix the dropped frame; it makes the drop stop being a hole. That is exactly
+/// the outcome `c0057da` was after.
+///
+/// `main.rs` already documents the same symptom at window creation ("shows
+/// straight through to the desktop + Dock for a frame or two"), worked around
+/// there by creating the window hidden. Same root cause, general fix.
+#[cfg(target_os = "macos")]
+pub(super) fn set_window_opaque_background(window: &Window, (r, g, b): (u8, u8, u8)) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = window.window_handle() else { return };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else { return };
+    let (rf, gf, bf) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    // SAFETY: `ns_view` is a live NSView for the window's lifetime. We read its
+    // window and layer tree and set well-known, side-effect-free appearance
+    // properties. `colorWithSRGBRed:...` returns an autoreleased NSColor and
+    // `CGColor` a color owned by it; both outlive these calls. No ownership
+    // transfer, no retain/release.
+    unsafe {
+        let view: *mut AnyObject = h.ns_view.as_ptr().cast();
+        if view.is_null() {
+            return;
+        }
+        let color: *mut AnyObject = msg_send![
+            objc2::class!(NSColor),
+            colorWithSRGBRed: rf, green: gf, blue: bf, alpha: 1.0f64
+        ];
+        if color.is_null() {
+            return;
+        }
+        // Window level: opaque, and backed by our colour rather than AppKit's
+        // default window grey.
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, setOpaque: true];
+            let _: () = msg_send![ns_window, setBackgroundColor: color];
+        }
+        // Layer level: the content view's layer is what actually composites, and
+        // softbuffer draws into a sublayer of it. Give both a real colour.
+        let cg: *mut AnyObject = msg_send![color, CGColor];
+        let layer: *mut AnyObject = msg_send![view, layer];
+        if layer.is_null() || cg.is_null() {
+            return;
+        }
+        let _: () = msg_send![layer, setOpaque: true];
+        let _: () = msg_send![layer, setBackgroundColor: cg];
+        let subs: *mut AnyObject = msg_send![layer, sublayers];
+        if subs.is_null() {
+            return;
+        }
+        let count: usize = msg_send![subs, count];
+        for i in 0..count {
+            let sub: *mut AnyObject = msg_send![subs, objectAtIndex: i];
+            if !sub.is_null() {
+                let _: () = msg_send![sub, setOpaque: true];
+                let _: () = msg_send![sub, setBackgroundColor: cg];
+            }
+        }
+    }
+}
+
+/// No-op off macOS.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn set_window_opaque_background(_window: &Window, _bg: (u8, u8, u8)) {}
+
 /// Force the window's layer **and every sublayer** opaque (macOS only).
 ///
 /// Restores `c0057da`, which step 5 deleted on the mistaken grounds that it was
@@ -806,8 +888,9 @@ impl Renderer {
         // the context, so the local can drop here.
         drop(sb_context);
         // After the surface: softbuffer's sublayer has to exist before we can
-        // force it opaque. See the fn's docs — a see-through layer is what turns
-        // any dropped frame into a view of the desktop.
+        // reach it. Opacity alone is not enough — an opaque layer with no
+        // contents still draws nothing, which is a hole to the desktop — so the
+        // window and every layer also get terminite's background colour.
         set_window_layers_opaque(&window);
         let surface_size = SurfaceSize { width, height };
 
@@ -819,6 +902,11 @@ impl Renderer {
         // Layout metrics from the config, locked for this run. line_height
         // derives from font_size; cell_advance is measured from the font.
         let config = Config::load();
+        // Now that the background colour is known: paint the window and every
+        // layer with it, so a frame that never lands shows terminite's own dark
+        // backing rather than a hole through to the desktop. Opacity alone was
+        // not enough — see the fn's docs.
+        set_window_opaque_background(&window, config.background);
         // HiDPI: config dimensions are logical (1x) sizes; every physical
         // metric is multiplied by the display's scale factor. On a standard
         // 1x monitor that's x1 — metrics render exactly as configured; on a
