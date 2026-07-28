@@ -59,8 +59,8 @@ scrolling throughput is the least interesting column here.
 
 ## Terminite — CPU/softbuffer build
 
-Measured 2026-07-27, terminite `fefcf1b` at **119x50 → actually 119x29 cells**,
-same machine and display. Full run, 43.55 MB total payload.
+Measured 2026-07-27, terminite `fefcf1b` at **119x29 cells**, same machine and
+display (Liquid Retina XDR 3024x1964, macOS Darwin 25.5.0). Full run, 43.55 MB total payload.
 
 | workload | MB | wall s | MB/s | consume rate | app CPU s | WS CPU s | CPU s/MB |
 |---|---|---|---|---|---|---|---|
