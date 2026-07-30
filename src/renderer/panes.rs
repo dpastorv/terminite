@@ -318,6 +318,10 @@ impl Renderer {
         for tab in tabs {
             tab.title_buffer = make_title_buffer(&mut self.font_system, &tab.title, fs, lh, maxw);
         }
+        // The bar's other text shares this axis: the kind-selector word and
+        // the close × must re-shape too, or the bar reads mixed-scale.
+        self.close_buffer = make_title_buffer(&mut self.font_system, "×", fs, lh, maxw);
+        self.rebuild_kind_labels();
     }
 
     /// Persisting wrapper for the Tab-bar font slider — mirrors `set_font_size`.
@@ -589,7 +593,7 @@ impl Renderer {
     /// Handle a left-click inside pane `pid`'s tab-bar strip: switch to the
     /// clicked tab, or close it if the × close-zone was hit.
     pub(super) fn tab_bar_click(&mut self, pid: PaneId, prect: PaneRect) {
-        let ksw = kind_selector_w(self.config.tab_font_size);
+        let ksw = kind_selector_w(self.tab_font_size);
         // Kind-selector hit first — leftmost zone of the bar.
         if self.mouse_pos.0 < prect.x + ksw {
             self.open_kind_dropdown(pid, prect);

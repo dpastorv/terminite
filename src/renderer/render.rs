@@ -774,7 +774,7 @@ impl Renderer {
                     let bar_top = pane_rect.y;
                     let text_top =
                         bar_top + (self.tab_bar_height - self.tab_line_h) / 2.0;
-                    let ksw_label = kind_selector_w(self.config.tab_font_size);
+                    let ksw_label = kind_selector_w(self.tab_font_size);
                     tab_areas.push(TextArea {
                         buffer: label_buf,
                         left: pane_rect.x + TAB_LABEL_INSET,
@@ -1084,7 +1084,7 @@ impl Renderer {
             .iter()
             .map(|t| measure_title_width(&t.title_buffer))
             .collect();
-        let ksw = kind_selector_w(self.config.tab_font_size);
+        let ksw = kind_selector_w(self.tab_font_size);
         let layout = pane_tab_layout(
             rect,
             &title_widths,

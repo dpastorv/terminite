@@ -17,11 +17,18 @@ impl Renderer {
     /// dropdown immediately.
     pub fn reload_modules(&mut self) {
         self.modules = crate::modules::Registry::discover();
-        // Rebuild the per-kind label buffers. Built-ins stay; module
-        // entries reflect the fresh registry.
+        self.rebuild_kind_labels();
+        self.window.request_redraw();
+    }
+
+    /// Re-shape the per-kind selector labels ("Shell ▾", module names) at the
+    /// live tab-bar font. Built-ins stay; module entries reflect the current
+    /// registry. Called on module reload and whenever the tab font axis moves
+    /// (Cmd+G slider, persisted-layout restore).
+    pub(super) fn rebuild_kind_labels(&mut self) {
         let mut next: std::collections::HashMap<String, Buffer> =
             std::collections::HashMap::new();
-        let ksw = kind_selector_w(self.config.tab_font_size);
+        let ksw = kind_selector_w(self.tab_font_size);
         let label = |fs: &mut FontSystem, name: &str| {
             make_title_buffer(
                 fs,
@@ -37,7 +44,6 @@ impl Renderer {
             next.insert(m.id.clone(), label(&mut self.font_system, &m.name));
         }
         self.kind_label_buffers = next;
-        self.window.request_redraw();
     }
 
     /// Resolve a click in `pid`'s content area to a (source line,
