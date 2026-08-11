@@ -1,0 +1,12 @@
+# terminite-native Voice module — the app's own voice, as a pane.
+#
+# A chat surface over `terminite ask`: type a question, the local SLM answers
+# in place. Everything the CLI promises holds here too — fully local, offline,
+# CPU-only, nothing resident: the model lifts for one answer per question and
+# sleeps again. The pane is just a window onto that same one-shot call.
+
+name = "Voice"
+version = "0.1.0"
+binary = "./voice.py"
+description = "Talk to terminite itself — the app's own local voice (offline, CPU-only), as a chat pane."
+kind = "data"
