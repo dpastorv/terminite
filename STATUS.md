@@ -100,3 +100,22 @@ correct for him, and he overrides every dimensional field — so defaults don't
 bite him — but a fresh install on Retina would render everything ×2-too-big.
 Halve the dimensional defaults in `config.rs` (`Default` + `schema`) before the
 public release.
+
+## The voice — terminite speaks for itself (opened 2026-08-11)
+
+Daniel's ask: the app deserves its own voice — small, local, leaning on nothing,
+scoped to talking about itself (config, features, who's in the room). Everything
+below is **BUILT, NOT PROVEN** until Daniel actually converses with it during
+real work.
+
+| capability | state | evidence / why |
+|---|---|---|
+| `terminite voice download` — pinned GGUF, sha256+size verified, resumable | BUILT | exercised by the build session for both models (241 MB + 537 MB, hashes verified); not yet by Daniel |
+| `terminite ask "…"` — one-shot grounded conversation, streams to stdout | BUILT | smoke-tested: qwen answered "who is in the room" **correctly against live room_who** and gave a fully correct background-color edit (right key, right file, right value) at ~2–4 s on CPU; grounded in version + active config + schema + room_who; ctx 4096, out ≤512 tok, ≤4 threads, `GGML_METAL_DEVICES=0` (GPU never probed), process exits after (no resident weight) |
+| model roster: qwen3.5-0.8b (default) · gemma-3-270m (ultra-lean) · any `.gguf` path | BUILT | picked 2026-08-11 after a landscape check; Apache-2.0 default matches the repo license. gemma-270m needed a named-template fix (its QAT GGUF ships none) and still echoes long prompts — it's the floor, not the voice |
+| the voice is *worth talking to* | NOT PROVEN | one session of staged smoke questions ≠ real use. 0.8B is honest-but-dim: identity answers run verbose, and pre-fix runs confabulated (`#10101f` offered as "darker"). Proof = Daniel living with it |
+
+Same-day repairs (the "home for every LLM" sweep): stale `~/.cargo/bin/terminite`
+hook entries purged from claude-gut + codex (installer now self-heals, 2e41b9d);
+qwen re-registered; agy plugin re-baked; claude channel receiver moved off a
+debug-build path. Kimi's CLI is uninstalled — its seat stays ready.

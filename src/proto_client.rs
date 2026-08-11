@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 /// Where to find a running terminite's socket. Mirrors `proto::socket_path`
 /// — kept duplicated so the client doesn't pull the server module in.
-fn socket_path() -> Option<PathBuf> {
+pub(crate) fn socket_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("TERMINITE_SOCKET") {
         return Some(PathBuf::from(p));
     }
@@ -83,6 +83,8 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         "room-listen" => Some(cmd_room_listen(&args[1..])),
         "files" => Some(cmd_files(args.get(1).map(|s| s.as_str()))),
         "tool-emit-hook" => Some(cmd_tool_emit_hook()),
+        "voice" => Some(crate::voice::cmd_voice(&args[1..])),
+        "ask" => Some(crate::voice::cmd_ask(&args[1..])),
         "install" => Some(cmd_install(&args[1..])),
         "config" => Some(cmd_config()),
         "module" => Some(cmd_module(&args[1..])),
@@ -163,6 +165,15 @@ USAGE
                                      its profile (claude: ~/.claude; codex:
                                      ~/.codex; grok: ~/.grok). Reverse:
                                      `<cli> mcp remove lounge`
+  terminite voice [status]           terminite's own voice: a small local
+                                     LLM that speaks for the app itself
+                                     (offline, CPU-only, private)
+  terminite voice download [name]    fetch a pinned, checksummed model into
+                                     ~/.terminite/models (qwen3.5-0.8b
+                                     default; gemma-3-270m ultra-lean)
+  terminite ask \"<question>\"         talk to terminite — it knows its own
+                                     config, features, and who's in the room
+                                     [--model <name|path.gguf>]
   terminite module list              registered modules (extension surface)
   terminite module add <dir>         install a module from <dir>
   terminite module remove <id>       uninstall a module

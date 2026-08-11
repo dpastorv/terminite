@@ -14,10 +14,21 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+[features]
+# Terminite's own voice — a small local LLM (GGUF via llama.cpp) so the app
+# itself can converse: explain its config, say who's in the room, suggest
+# exact edits. Off by default (needs cmake + a C++ compile); tools/build-app.sh
+# ships the bundle with it ON. Weights are never bundled — `terminite voice
+# download` fetches a pinned, checksummed GGUF into ~/.terminite/models.
+voice = ["dep:llama-cpp-2"]
+
 [dependencies]
 # Vendored fork — adds OSC 7 (cwd) + OSC 133 (shell integration) dispatch.
 # See vendor/. terminite owns these patches; they travel with the repo.
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+# The voice: llama.cpp bindings (GGUF inference, Metal on macOS). Optional —
+# only the `voice` feature pulls it and its C++ build in.
+llama-cpp-2 = { version = "0.1.154", optional = true }
 arboard = "3.6.1"
 base64 = "0.22"
 libc = "0.2"

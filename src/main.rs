@@ -36,6 +36,7 @@ mod rect;
 mod renderer;
 mod term;
 mod texture;
+mod voice;
 
 use renderer::{Renderer, SplitDir};
 

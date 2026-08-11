@@ -39,8 +39,10 @@ CONTENTS="$APP/Contents"
 MACOS_DIR="$CONTENTS/MacOS"
 RES_DIR="$CONTENTS/Resources"
 
-echo "→ cargo build --release"
-cargo build --release
+echo "→ cargo build --release --features voice"
+# `voice` = terminite's own local LLM (llama.cpp behind a cargo feature).
+# The shipped app can always speak; plain `cargo build` skips the C++ build.
+cargo build --release --features voice
 
 echo "→ assembling $APP"
 rm -rf "$APP"
