@@ -171,6 +171,9 @@ USAGE
   terminite voice download [name]    fetch a pinned, checksummed model into
                                      ~/.terminite/models (qwen3.5-0.8b
                                      default; gemma-3-270m ultra-lean)
+  terminite voice soul [--init]      show the voice's identity prompt; --init
+                                     copies it to ~/.terminite/soul.md where
+                                     you can reshape it (guardrails stay)
   terminite ask \"<question>\"         talk to terminite — it knows its own
                                      config, features, and who's in the room
                                      [--model <name|path.gguf>]
