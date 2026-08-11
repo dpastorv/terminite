@@ -572,13 +572,33 @@ fn install_kimi_hook(config_file: &std::path::Path, command: &str) -> Result<boo
         doc["hooks"] = Item::Value(Value::Array(Array::new()));
     }
     let arr = doc["hooks"].as_array_mut().ok_or("`hooks` is not an array")?;
+    // Prune stale emit hooks from previous installs (binary since moved) —
+    // a dead hook path means a visible hook failure on every tool call.
+    let mut pruned = false;
+    for i in (0..arr.len()).rev() {
+        let stale = arr
+            .get(i)
+            .and_then(|v| v.as_inline_table())
+            .and_then(|t| t.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.ends_with("terminite tool-emit-hook") && c != command);
+        if stale {
+            arr.remove(i);
+            pruned = true;
+        }
+    }
     let already = arr.iter().any(|v| {
         v.as_inline_table()
             .and_then(|t| t.get("command"))
             .and_then(|c| c.as_str())
             == Some(command)
     });
+    if already && !pruned {
+        return Ok(false);
+    }
     if already {
+        crate::io_util::atomic_write(config_file, doc.to_string().as_bytes(), 0o644)
+            .map_err(|e| format!("write {}: {e}", config_file.display()))?;
         return Ok(false);
     }
     let mut entry = InlineTable::new();
@@ -1405,6 +1425,29 @@ fn install_hook(hooks_file: &std::path::Path, matcher: &str, command: &str) -> R
         .entry("PostToolUse")
         .or_insert_with(|| serde_json::json!([]));
     let arr = post.as_array_mut().ok_or("`hooks.PostToolUse` is not an array")?;
+    // Prune stale terminite emit hooks first: an entry from a previous install
+    // points at wherever the binary lived then (e.g. ~/.cargo/bin), and once
+    // that binary is gone the CLI reports a failed hook after every tool call.
+    // Same-suffix, different-command ⇒ ours, stale ⇒ replace, never accumulate.
+    let is_stale = |h: &serde_json::Value| {
+        h.get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.ends_with("terminite tool-emit-hook") && c != command)
+    };
+    let mut pruned = false;
+    for group in arr.iter_mut() {
+        if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            let before = hs.len();
+            hs.retain(|h| !is_stale(h));
+            pruned |= hs.len() != before;
+        }
+    }
+    arr.retain(|group| {
+        group
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .is_none_or(|hs| !hs.is_empty())
+    });
     let already = arr.iter().any(|group| {
         group
             .get("hooks")
@@ -1414,7 +1457,14 @@ fn install_hook(hooks_file: &std::path::Path, matcher: &str, command: &str) -> R
                     .any(|h| h.get("command").and_then(|c| c.as_str()) == Some(command))
             })
     });
+    if already && !pruned {
+        return Ok(false);
+    }
     if already {
+        // Stale entry removed, current one already present — just rewrite.
+        let pretty = serde_json::to_string_pretty(&root).map_err(|e| format!("serialize: {e}"))?;
+        crate::io_util::atomic_write(hooks_file, pretty.as_bytes(), 0o644)
+            .map_err(|e| format!("write {}: {e}", hooks_file.display()))?;
         return Ok(false);
     }
     arr.push(serde_json::json!({
