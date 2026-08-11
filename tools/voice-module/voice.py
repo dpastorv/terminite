@@ -17,6 +17,15 @@ Keys:
   Ctrl+L  clear the whole transcript
   Ctrl+C  cancel the in-flight answer
 
+Slash commands (chat-native — `?` and chords collide with real questions):
+  /help    the key legend + what this pane is
+  /clear   clear the chat (same as Ctrl+L)
+  /soul    print the voice's active identity (`terminite voice soul`)
+  /models  voice + model status (`terminite voice status`)
+
+An empty chat shows a welcome block with the same instructions, so the
+pane explains itself on first open.
+
 Wire (this module → host):
   set_text   full-frame render: header, transcript, prompt line
   log        diagnostics
@@ -46,6 +55,25 @@ MAX_TRANSCRIPT = 600     # rendered lines kept; oldest dropped past this
 
 PROMPT = "you ❯ "
 VOICE = "terminite ❯ "
+
+KEY_LEGEND = [
+    "  Enter    ask                  Esc      clear the input line",
+    "  Ctrl+L   clear the chat       Ctrl+C   cancel an answer",
+    "  /help    these instructions   /soul    who I am",
+    "  /models  models + status      /clear   clear the chat",
+]
+
+WELCOME = [
+    "I'm terminite's own voice — a small model living inside the app.",
+    "Local, offline, CPU-only, private. Nothing runs between questions:",
+    "each answer loads the model fresh, speaks, and goes back to sleep,",
+    "so this pane costs nothing while it sits open.",
+    "",
+    "Ask me about your config, who's in the room, or how my features",
+    "work. The first words of an answer take a few seconds — that's the",
+    "model waking up.",
+    "",
+] + KEY_LEGEND
 
 
 def send(msg):
@@ -98,6 +126,8 @@ class Voice:
 
     def render(self):
         lines = ["◆ Voice — terminite's own; local, offline, CPU-only", ""]
+        if not self.transcript and not self.busy:
+            lines += WELCOME + [""]
         lines += self.transcript
         if self.busy:
             lines += wrap(PROMPT + self.pending_q)
@@ -109,7 +139,7 @@ class Voice:
             lines.append("")
         if self.status:
             lines += ["· " + self.status, ""]
-        state = "thinking — Ctrl+C cancels" if self.busy else "Enter ask · Esc clear · Ctrl+L clear chat"
+        state = "thinking — Ctrl+C cancels" if self.busy else "Enter ask · /help for keys"
         lines += ["❯ " + self.input_buf + "▏", "  " + state]
         send({"kind": "set_text", "body": "\n".join(lines), "scroll_to_line": len(lines) - 1})
 
@@ -126,7 +156,10 @@ class Voice:
                 if q and not self.busy:
                     self.input_buf = ""
                     self.status = ""
-                    self.submit(q)
+                    if q.startswith("/"):
+                        self.command(q)
+                    else:
+                        self.submit(q)
             elif data in ("\x7f", "\x08"):
                 self.input_buf = self.input_buf[:-1]
             elif data == "\x1b":
@@ -146,6 +179,42 @@ class Voice:
                 if clean and len(self.input_buf) < MAX_INPUT:
                     self.input_buf += clean
             self.render()
+
+    # ── slash commands ─────────────────────────────────────────────────
+    # Local utility only — a command never reaches the model and never
+    # touches anything beyond terminite's own read-only CLI verbs.
+
+    def command(self, q):
+        """Called with the lock held. `q` starts with '/'."""
+        cmd = q.split()[0].lower()
+        if cmd == "/clear":
+            self.transcript = []
+        elif cmd == "/help":
+            self.transcript += [PROMPT + q, ""] + KEY_LEGEND + [""]
+        elif cmd in ("/soul", "/models"):
+            self.transcript += [PROMPT + q, ""]
+            verb = ["voice", "soul"] if cmd == "/soul" else ["voice", "status"]
+            out = self.run_verb(verb)
+            self.transcript += wrap(out, indent="  ") + [""]
+        else:
+            self.status = f"unknown command {cmd} — /help lists them"
+        if len(self.transcript) > MAX_TRANSCRIPT:
+            self.transcript = self.transcript[-MAX_TRANSCRIPT:]
+
+    def run_verb(self, verb):
+        """One fast, read-only `terminite <verb>` call; output as text."""
+        if not self.bin:
+            return "terminite binary not found — is the app installed?"
+        try:
+            r = subprocess.run(
+                [self.bin] + verb, capture_output=True, timeout=10
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return f"can't run terminite {' '.join(verb)}: {e}"
+        text = (r.stdout or b"").decode("utf-8", errors="replace").strip()
+        if not text:
+            text = (r.stderr or b"").decode("utf-8", errors="replace").strip()
+        return text or "(no output)"
 
     # ── asking ─────────────────────────────────────────────────────────
 
