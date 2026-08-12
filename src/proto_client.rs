@@ -45,6 +45,19 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
     let Some(cmd) = args.first().map(|s| s.as_str()) else {
         return None;
     };
+    // Human-facing CLI verbs die quietly on a closed pipe, like every Unix
+    // tool: Rust ignores SIGPIPE by default, so `terminite voice status |
+    // head -2` panicked with "failed printing to stdout: Broken pipe".
+    // Scoped tightly: the long-lived servers (mcp / channel / codex-bridge)
+    // must keep seeing EPIPE as a handleable error, not a death — a peer
+    // hanging up must never kill them — and the hooks (tool-emit-hook,
+    // room-join) are fail-open contracts where a signal death would read as
+    // a hook failure in the host CLI. The window path never gets here.
+    #[cfg(unix)]
+    if !matches!(cmd, "mcp" | "channel" | "codex-bridge" | "tool-emit-hook" | "room-join") {
+        // SAFETY: setting a signal disposition before any thread is spawned.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match cmd {
         "tabs" => Some(cmd_tabs()),
         "blocks" => Some(cmd_blocks(args.get(1).and_then(|s| s.parse().ok()))),
