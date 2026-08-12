@@ -11,6 +11,14 @@ use crate::logging;
 pub fn write_crash_dump(payload: &str, location: &str, backtrace: &str) {
     let dir = logging::crash_dir();
     let Some(dir) = dir else { return };
+    // The dir exists only if something made it — nothing did until now, so
+    // every dump (and the last-crash pointer) failed silently into the
+    // `let _ =` writes below. A crash recorder that loses the evidence is
+    // worse than none: the 2026-08-11 sleep-crash report could not be
+    // checked against dumps because of exactly this.
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
 
     let filename = format!("{}.txt", logging::filename_timestamp_now());
     let path = dir.join(&filename);
